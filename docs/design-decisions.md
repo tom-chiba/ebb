@@ -63,6 +63,126 @@
    → Playwright の `storageState` にセッションを注入する方式にする
 9. 購読が失効したら（Push サービスが 410 Gone を返す）DB から購読を削除する処理が必要
 
+## モノレポの土台（#1）
+- **TypeScript は 6.0 系に固定**（`~6.0.3`）。最新は 7.0.2 だが `typescript-eslint@8.65` の
+  peer が `>=4.8.4 <6.1.0`、`svelte-check@4.7.4` が `^5.0.0 || ^6.0.0`。
+  上限を決めているのは typescript-eslint の `<6.1.0` なので、`^` ではなく `~` で 6.1 も塞ぐ
+  - バージョンは `pnpm-workspace.yaml` の `catalog` で一元管理する
+- **`packages/*` は build を持たず、`exports` から TS ソースを直接公開する**
+  （Vite / esbuild / wrangler がそのまま解決できるため）
+  - 帰結: 依存側ソースの型検査は **consumer 側の tsconfig で行われる**
+    → 全 consumer が `tsconfig.base.json` を継承する必要がある
+  - リポジトリ全体で構文を型消去可能に保つため `erasableSyntaxOnly` を有効にする
+    （`enum` / `namespace` / パラメータプロパティが禁止される）。
+    `packages/*` はソースをそのまま配るので必須（consumer 側のトランスパイラの能力に
+    前提を置かない）、`apps/*` は揃えるため
+  - 相対 import に `.ts` 拡張子は書かない（`moduleResolution: bundler` では `TS5097`）。
+    バンドラ経由での消費が前提で、Node のネイティブ型消去での直接実行は前提にしない
+- **共有する compilerOptions は `tsconfig.base.json`**、ルート `tsconfig.json` は
+  それを継承してリポジトリ直下の `*.ts` だけを見る実プロジェクトにする
+  - 基底を `tsconfig.json` にして `files: []` を持たせると、(1) `files: []` が子に継承されて
+    子の `include` が 0 件マッチでも `TS18003` が出ず「何も検査せず緑」になる、
+    (2) ファイルを持てない config が `tsconfig.json` の名前を占領するため、
+    ルート直下の `.ts` が typescript-eslint の `projectService` から見えない
+  - 型検査の入口は `pnpm check`（= 各パッケージの tsconfig）。
+    ルート直下に `.ts` が無い間、ルートで直接 `tsc -p .` すると `TS18003` になるのが正常
+- **`tsconfig.base.json` は実行環境の型を含めない**（`lib` は `ES2023` のみ）
+  - `packages/core` は純ロジックなので実行環境の型を持たせない。
+    **`console` も使えない**（ログは呼び出し側の責務）。
+    一方 `packages/push` は Web Crypto / `fetch` を使うので実行環境の型を持つ
+  - `noUncheckedIndexedAccess` は #15 の API の形を規定する。プリセット配列を復習回数で
+    引くと `presets[step]` が `number | undefined` になるので、戻り型を
+    `number | undefined` にするか境界で throw するかを #15 で決めることになる
+  - `lib` / `target` の `ES2023` は、workerd も evergreen ブラウザも ES2024 を実装している
+    ので実行環境が課す上限ではなく、意図的に保守的に置いた下限。必要になったら上げる
+  - この下限が効くのは `packages/*` と `apps/scheduler` だけ。`apps/web` は
+    SvelteKit 生成の `target: esnext` / `lib: [esnext, DOM, DOM.Iterable]` に従う
+    （`apps/web` で書いた ES2024 の API を `packages/core` へ移すと落ちる、という非対称が残る）
+- **Node のバージョンは `.tool-versions` が正**。`engines` は警告しか出さない
+  - `.node-version` ではなく `.tool-versions` にしたのは、mise が `.node-version` を
+    既定で読まない（`idiomatic_version_file_enable_tools` が空だと無視される）ため。
+    `.tool-versions` は mise / asdf が既定で読み、`actions/setup-node` の
+    `node-version-file` も対応している
+- ルートの `lint` / `format` / `test` / `check` は `pnpm -r --if-present run <name>` で
+  各パッケージへ委譲するだけ
+  - `--if-present` は必須。無いと委譲先が 0 件のとき `ERR_PNPM_RECURSIVE_RUN_NO_SCRIPT` で失敗する
+  - `pnpm -r` はワークスペースルートを対象に含まない
+- **pnpm 10 は依存パッケージのビルドスクリプト（postinstall 等）を既定で実行しない**。
+  スキップされても `pnpm install` は exit 0 で埋没するため、`strictDepBuilds: true` を
+  入れて「実行する（`onlyBuiltDependencies`）／実行しない（`ignoredBuiltDependencies`）」
+  を明示するまで install が失敗するようにした
+
+### 後続 Issue への申し送り（#1 では検証していない）
+- **実行環境の型は `types` に明示する**（#2 / #4 / #5 / #20）
+  （`@cloudflare/workers-types` / `wrangler types` の出力）。
+  TS 6 は `node_modules/@types` の自動取り込みをしないので、`types` への明示が必須
+  - **導入したパッケージ側だけでなく、全 consumer 側でも揃える必要がある**。
+    build を持たない構成では同じソースが consumer の数だけ別の global 型集合で検査され、
+    パッケージ側だけ `lib`/`types` を足しても consumer 側で `Cannot find name 'fetch'` になる
+    （しかもエラーの表示位置は `packages/*` 側）。
+    つまり `packages/*` のソースは**全 consumer の型集合の共通部分でしか書けない**
+  - global の有無だけでなく**同名 global のシグネチャ差**でも効く。例えば DOM の `BodyInit` は
+    `Uint8Array<ArrayBuffer>` を要求するが workers-types は `Uint8Array<ArrayBufferLike>` を
+    受けるので、`fetch(url, { body: payload })` が `apps/web` からの検査だけ `TS2322` で落ちる。
+    直し方は tsconfig ではなくコード側（境界の型を狭く書く）。#20 で踏みやすい
+- **ワークスペース内の依存は `workspace:*` で書く**。pnpm 10 は
+  `link-workspace-packages` が既定 false なので、`^0.0.0` などと書くと
+  npm レジストリを見て `ERR_PNPM_FETCH_404` になる
+- **パッケージ間の依存の向きは `apps/* → packages/*` のみ**にする（#5 / #20）
+  - `packages/core` は無依存
+  - **`packages/push` は `packages/db` に依存させない**。送信結果（成功 / 410 / その他）を
+    返すだけにし、**410 を受けた呼び出し側が `packages/db` の削除を呼ぶ**
+    （要注意点 9 の実装場所。逆向きに生やすと push の単体テストに D1 が必要になる）
+  - 帰結として「送信結果を見て 410 なら購読を削除する」糊が呼び出し側の数だけ増える。
+    #20 で置き場（`apps/*` ごとに書く / `packages/db` に削除関数を用意して呼び出し規約だけ
+    決める / `apps/web` からは送らない）を決めること
+- #2 `apps/web` の tsconfig は
+  `"extends": ["../../tsconfig.base.json", "./.svelte-kit/tsconfig.json"]` の配列指定にする
+  - `target` / `lib` は SvelteKit 側が勝ち、strict 系はルート側が残る。ただしこれは
+    「後勝ち」だからではなく **SvelteKit 生成の config が strict 系を書いていない** から。
+    将来 SvelteKit が書き始めたら上書きされる
+  - **`apps/web` では `include` を書かない**。書くと SvelteKit 生成の `include` を上書きして
+    ambient 宣言がプログラムから外れ、`$env/*` や `./$types` が解決できなくなる。
+    追加ファイル（`worker-configuration.d.ts` 等）は `types` か `/// <reference>` で入れる
+  - ただし SvelteKit 生成の config は `src/service-worker.ts` を **`exclude`** に入れる
+    （worker の型がアプリ全体に漏れるのを防ぐため）。service worker はアプリから
+    import もされないので、このままだと **どの型検査にも入らない**。
+    #19 / #20 で service worker 専用の tsconfig と、それを叩く `check` を足すこと
+    （`types` や `/// <reference>` では直らない。除外されているのは ambient 型ではなく
+    ソースファイル自身）。専用 tsconfig は下記の形にする:
+    ```jsonc
+    {
+      "extends": "../../tsconfig.base.json",
+      "compilerOptions": { "lib": ["ES2023", "WebWorker"], "types": [] },
+      "files": ["src/service-worker.ts", ".svelte-kit/ambient.d.ts"]
+    }
+    ```
+    - **`.svelte-kit/tsconfig.json` は継承しない**。継承すると SvelteKit 生成の `include`
+      （`src/**` など）も入ってきて、`types: []` / `DOM` なしの型集合で**アプリ全体が検査され**、
+      普通のクライアントコードが `document` / `window` で大量に偽エラーになる
+    - **`include` ではなく `files` で指定する**。`.svelte-kit/tsconfig.json` を継承した上で
+      `include` を書くと、継承した `exclude`（SvelteKit がアプリ側の検査から外すために
+      `src/service-worker.ts` を入れている）に打ち消されて **1 行も検査せず exit 0** になる
+      （`ambient.d.ts` が残るので `TS18003` すら出ない）。`exclude` は `files` には効かない
+    - `$service-worker` の型は `.svelte-kit/ambient.d.ts` 経由で解決するので `paths` は不要。
+      逆にこのファイルを書かないと `$service-worker` が `TS2307` になる
+    - `lib` は `WebWorker`（`ServiceWorkerGlobalScope` の出所）。`DOM` は入れない
+    - 足したら `tsc --listFiles` に `service-worker.ts` が出ることを必ず確認する
+      （この失敗は緑で埋没する）
+- #3 各パッケージに実スクリプトが揃ったら `--if-present` を外す
+  （付いている間はスクリプト名の typo が静かに成功する）
+  - `lint` / `format` はリポジトリ直下のファイル（`README.md` / `docs/*` / `.github/*` /
+    ルート直下の `.ts`）を対象にできていないので、ルート直実行に変える
+  - `check` は tsc がプロジェクト単位でしか動かないので委譲のままにし、ルート直下の `.ts`
+    （`eslint.config.ts` 等）を置いたら `tsc -p .` を足す。ルート `tsconfig.json` の
+    `include: ["*.ts"]` はそのために用意してある（置くまでは `TS18003` になる）
+  - `packages/*` の `include` は `src/` 配下とパッケージ直下だけなので、テストを
+    `test/` に置くと型検査から外れる。`src/` に併置するか `include` を広げる
+- #6 CI では Node を `actions/setup-node` の `node-version-file` で `.tool-versions` から読ませる
+  - `.tool-versions` は `nodejs <単一バージョン>` の 1 行に保つ。setup-node は
+    `.tool-versions` 専用パーサを持たず「行頭トークン 1 個の行」を拾うだけなので、
+    `#` の直後に空白のないコメントや複数バージョン指定を書くと CI だけ静かに壊れる
+
 ## 開発の進め方
 - リポジトリ: public
 - Issue の粒度: 1 Issue = 1 PR（半日〜1日程度）

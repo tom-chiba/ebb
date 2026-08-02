@@ -1,0 +1,12 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# 全パッケージで共有するバージョン。各 package.json では "catalog:" と書く
+catalog:
+  typescript: ~6.0.3
+
+# ビルドスクリプト（postinstall 等）を持つ依存は、実行する
+# （onlyBuiltDependencies）か実行しない（ignoredBuiltDependencies）かを
+# 明示するまで install を失敗させる。既定ではスキップされても exit 0 で埋没する
+strictDepBuilds: true
