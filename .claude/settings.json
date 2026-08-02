@@ -1,0 +1,34 @@
+{
+  "env": {
+    "ENABLE_TOOL_SEARCH": "true",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL": "1"
+  },
+  "autoMode": {
+    "environment": [
+      "$defaults",
+      "Source control: https://github.com/tom-chiba/ebb/"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "network": {
+      "allowLocalBinding": true
+    },
+    "filesystem": {
+      "allowWrite": [
+        "~/.claude/plugins/data/",
+        "~/.codex/",
+        "~/Library/Preferences/.wrangler/"
+      ]
+    },
+    "excludedCommands": [
+      "playwright-cli *",
+      "node *codex-companion.mjs*",
+      "git *",
+      "gh *"
+    ]
+  }
+}

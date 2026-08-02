@@ -25,3 +25,6 @@ playwright/.cache/
 *.log
 npm-debug.log*
 pnpm-debug.log*
+
+# Claude Code の個人設定（settings.json は共有する）
+.claude/settings.local.json
