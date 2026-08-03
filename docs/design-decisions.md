@@ -72,6 +72,9 @@
   （Vite / esbuild / wrangler がそのまま解決できるため）
   - 帰結: 依存側ソースの型検査は **consumer 側の tsconfig で行われる**
     → 全 consumer が `tsconfig.base.json` を継承する必要がある
+  - `exports` には `"./package.json": "./package.json"` も必ず足す。`"."` だけだと
+    `<pkg>/package.json` を解決しようとする下流ツール（Vite/vitest プラグイン、eslint
+    resolver、wrangler/esbuild プラグインなど）が `ERR_PACKAGE_PATH_NOT_EXPORTED` で落ちる
   - リポジトリ全体で構文を型消去可能に保つため `erasableSyntaxOnly` を有効にする
     （`enum` / `namespace` / パラメータプロパティが禁止される）。
     `packages/*` はソースをそのまま配るので必須（consumer 側のトランスパイラの能力に
@@ -211,6 +214,10 @@
     `include: ["*.ts"]` はそのために用意してある（置くまでは `TS18003` になる）
   - `packages/*` の `include` は `src/` 配下とパッケージ直下だけなので、テストを
     `test/` に置くと型検査から外れる。`src/` に併置するか `include` を広げる
+  - `packages/*` の `include` はディレクトリ形式 `["src", "*.ts"]` で書く。
+    `"src/**/*.ts"` のような拡張子固定の glob に**戻さない**こと。`.ts` にしか
+    マッチせず、`.mts` / `.cts` / `.tsx` がツリーにあっても型検査から黙って外れ
+    `pnpm check` が緑のまま通ってしまう（実測済み）
 - #6 CI の Node / pnpm は `jdx/mise-action` で `mise.toml` から入れる
   - `actions/setup-node` の `node-version-file` は `mise.toml` に対応していないので、
     setup-node を使うならバージョンの二重管理になる
