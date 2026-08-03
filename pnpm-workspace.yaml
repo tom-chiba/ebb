@@ -6,7 +6,5 @@ packages:
 catalog:
   typescript: ~6.0.3
 
-# ビルドスクリプト（postinstall 等）を持つ依存は、実行する
-# （onlyBuiltDependencies）か実行しない（ignoredBuiltDependencies）かを
-# 明示するまで install を失敗させる。既定ではスキップされても exit 0 で埋没する
-strictDepBuilds: true
+# ビルドスクリプト（postinstall 等）を持つ依存が出てきたら、実行する / しないを
+# allowBuilds に書く。書くまで install が失敗する（pnpm 11 の strictDepBuilds 既定）

@@ -99,6 +99,9 @@
     SvelteKit 生成の `target: esnext` / `lib: [esnext, DOM, DOM.Iterable]` に従う
     （`apps/web` で書いた ES2024 の API を `packages/core` へ移すと落ちる、という非対称が残る）
 - **Node のバージョンは `mise.toml` が正**。`engines` は警告しか出さない
+  - **Active LTS の最新（24.18.1 / Krypton）を採る**。26.x のほうが新しいが、
+    2026-10-28 まではまだ Current（非 LTS）なので採らない。24 は 2026-10-20 に
+    Maintenance 入りするので、26 が LTS 化したら上げる
   - このリポジトリはツールの管理に mise を使う前提なので、mise のネイティブ形式である
     `mise.toml` に置く（mise 公式も新規プロジェクトには `.tool-versions` ではなく
     `mise.toml` を推奨している）
@@ -112,10 +115,17 @@
   各パッケージへ委譲するだけ
   - `--if-present` は必須。無いと委譲先が 0 件のとき `ERR_PNPM_RECURSIVE_RUN_NO_SCRIPT` で失敗する
   - `pnpm -r` はワークスペースルートを対象に含まない
-- **pnpm 10 は依存パッケージのビルドスクリプト（postinstall 等）を既定で実行しない**。
-  スキップされても `pnpm install` は exit 0 で埋没するため、`strictDepBuilds: true` を
-  入れて「実行する（`onlyBuiltDependencies`）／実行しない（`ignoredBuiltDependencies`）」
-  を明示するまで install が失敗するようにした
+- **pnpm は依存パッケージのビルドスクリプト（postinstall 等）を既定で実行しない**。
+  実行する / しないは `allowBuilds`（`pnpm-workspace.yaml`）に書く。書くまで install は
+  失敗する（`strictDepBuilds` が pnpm 11 から既定 true。pnpm 10 まではスキップしても
+  exit 0 で埋没したので明示的に `strictDepBuilds: true` を置いていた）
+  - pnpm 10 の `onlyBuiltDependencies` / `ignoredBuiltDependencies` /
+    `neverBuiltDependencies` / `ignoreDepScripts` は pnpm 11 で `allowBuilds` に統合され、
+    **削除された**（#2 で esbuild・workerd を踏むので、そこで `allowBuilds` を書く）
+- **pnpm 11 の `minimumReleaseAge` は既定 1440 分**。公開から 24 時間経っていない
+  バージョンは解決対象にならない。出たばかりの版を入れようとして「無い」ように
+  見えたらこれ（`blockExoticSubdeps` も既定 true になり、git / tarball 直指定は
+  直接依存でしか使えない）
 
 ### 後続 Issue への申し送り（#1 では検証していない）
 - **実行環境の型は `types` に明示する**（#2 / #4 / #5 / #20）
@@ -130,8 +140,8 @@
     `Uint8Array<ArrayBuffer>` を要求するが workers-types は `Uint8Array<ArrayBufferLike>` を
     受けるので、`fetch(url, { body: payload })` が `apps/web` からの検査だけ `TS2322` で落ちる。
     直し方は tsconfig ではなくコード側（境界の型を狭く書く）。#20 で踏みやすい
-- **ワークスペース内の依存は `workspace:*` で書く**。pnpm 10 は
-  `link-workspace-packages` が既定 false なので、`^0.0.0` などと書くと
+- **ワークスペース内の依存は `workspace:*` で書く**。pnpm 9 以降は
+  `linkWorkspacePackages` が既定 false なので、`^0.0.0` などと書くと
   npm レジストリを見て `ERR_PNPM_FETCH_404` になる
 - **パッケージ間の依存の向きは `apps/* → packages/*` のみ**にする（#5 / #20）
   - `packages/core` は無依存
