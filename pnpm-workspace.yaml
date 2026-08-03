@@ -12,3 +12,23 @@ minimumReleaseAge: 10080
 
 # 過去のリリースより信頼レベルが下がった版が来たら install を失敗させる（既定は off）
 trustPolicy: no-downgrade
+
+# chokidar@4.0.2/4.0.3 は provenance attestation なしで公開された（乗っ取りではなく
+# CI 変更由来と判明済み。5.0.0 で provenance は復活している）ため個別に許可する
+trustPolicyExclude:
+  - chokidar@4.0.3
+
+# strictDepBuilds（既定 true）によりビルドスクリプトが既定でブロックされる依存を許可する
+allowBuilds:
+  esbuild: true
+  workerd: true
+
+minimumReleaseAgeExclude:
+  - '@cloudflare/workerd-darwin-64@1.20260730.1'
+  - '@cloudflare/workerd-darwin-arm64@1.20260730.1'
+  - '@cloudflare/workerd-linux-64@1.20260730.1'
+  - '@cloudflare/workerd-linux-arm64@1.20260730.1'
+  - '@cloudflare/workerd-windows-64@1.20260730.1'
+  - miniflare@5.20260730.0-alpha
+  - workerd@1.20260730.1
+  - wrangler@4.118.0
