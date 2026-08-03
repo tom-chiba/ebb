@@ -5,6 +5,3 @@ packages:
 # 全パッケージで共有するバージョン。各 package.json では "catalog:" と書く
 catalog:
   typescript: ~6.0.3
-
-# ビルドスクリプト（postinstall 等）を持つ依存が出てきたら、実行する / しないを
-# allowBuilds に書く。書くまで install が失敗する（pnpm 11 の strictDepBuilds 既定）

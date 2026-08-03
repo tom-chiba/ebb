@@ -127,17 +127,12 @@
   各パッケージへ委譲するだけ
   - `--if-present` は必須。無いと委譲先が 0 件のとき `ERR_PNPM_RECURSIVE_RUN_NO_SCRIPT` で失敗する
   - `pnpm -r` はワークスペースルートを対象に含まない
-- **pnpm は依存パッケージのビルドスクリプト（postinstall 等）を既定で実行しない**。
-  実行する / しないは `allowBuilds`（`pnpm-workspace.yaml`）に書く。書くまで install は
-  失敗する（`strictDepBuilds` が pnpm 11 から既定 true。pnpm 10 まではスキップしても
-  exit 0 で埋没したので明示的に `strictDepBuilds: true` を置いていた）
-  - pnpm 10 の `onlyBuiltDependencies` / `ignoredBuiltDependencies` /
-    `neverBuiltDependencies` / `ignoreDepScripts` は pnpm 11 で `allowBuilds` に統合され、
-    **削除された**（#2 で esbuild・workerd を踏むので、そこで `allowBuilds` を書く）
-- **pnpm 11 の `minimumReleaseAge` は既定 1440 分**。公開から 24 時間経っていない
-  バージョンは解決対象にならない。出たばかりの版を入れようとして「無い」ように
-  見えたらこれ（`blockExoticSubdeps` も既定 true になり、git / tarball 直指定は
-  直接依存でしか使えない）
+- **依存パッケージのビルドスクリプト（postinstall 等）は既定で実行されない**。実行する /
+  しないを `pnpm-workspace.yaml` の `allowBuilds` に書くまで install は失敗する
+  （`strictDepBuilds` の既定が true）。#2 で esbuild・workerd を踏むので、そこで書く
+- **`minimumReleaseAge` の既定は 1440 分**。公開から 24 時間経っていないバージョンは
+  解決対象にならない。出たばかりの版を入れようとして「無い」ように見えたらこれ
+  （`blockExoticSubdeps` も既定 true なので、git / tarball 直指定は直接依存でしか使えない）
 
 ### 後続 Issue への申し送り（#1 では検証していない）
 - **実行環境の型は `types` に明示する**（#2 / #4 / #5 / #20）
@@ -152,7 +147,7 @@
     `Uint8Array<ArrayBuffer>` を要求するが workers-types は `Uint8Array<ArrayBufferLike>` を
     受けるので、`fetch(url, { body: payload })` が `apps/web` からの検査だけ `TS2322` で落ちる。
     直し方は tsconfig ではなくコード側（境界の型を狭く書く）。#20 で踏みやすい
-- **ワークスペース内の依存は `workspace:*` で書く**。pnpm 9 以降は
+- **ワークスペース内の依存は `workspace:*` で書く**。
   `linkWorkspacePackages` が既定 false なので、`^0.0.0` などと書くと
   npm レジストリを見て `ERR_PNPM_FETCH_404` になる
 - **パッケージ間の依存の向きは `apps/* → packages/*` のみ**にする（#5 / #20）
