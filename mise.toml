@@ -1,2 +1,4 @@
 [tools]
 node = "24.18.1"
+# package.json の packageManager と必ず同じ値にする（実行時は packageManager が勝つ）
+pnpm = "11.18.0"

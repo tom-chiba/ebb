@@ -111,6 +111,18 @@
     （対応形式は `.nvmrc` / `.node-version` / `.tool-versions` / `package.json` のみ）。
     CI 側は #6 で `jdx/mise-action` を使う
   - 個人用の上書きは `mise.local.toml`（gitignore 済み）
+- **pnpm も `mise.toml` に入れる。ただし `package.json` の `packageManager` も残す**
+  - mise.toml に入れる理由: `mise install` だけで Node と pnpm が揃う。入れないと
+    pnpm は各自のグローバル環境任せになる
+  - `packageManager` を残す理由: mise を使わない経路（Cloudflare のビルド、
+    mise-action を使わない CI、corepack）でも版が決まるようにするため
+  - **両方に同じ値を書く必要がある**。pnpm は `pmOnFail` が既定 `download` なので、
+    ズレた場合は `packageManager` の版を自分でダウンロードして実行し直す。
+    つまり**実行時は `packageManager` が勝ち、mise.toml の pin は黙って無視される**
+  - pnpm 11 は `packageManager` を legacy 扱いにし、範囲指定できる
+    `devEngines.packageManager` を新設した。ただし解決結果が `pnpm-lock.yaml` に
+    記録されて再利用されるため、版の出所がもう 1 つ増える。今は素直に
+    `packageManager` の完全一致 pin のままにしている
 - ルートの `lint` / `format` / `test` / `check` は `pnpm -r --if-present run <name>` で
   各パッケージへ委譲するだけ
   - `--if-present` は必須。無いと委譲先が 0 件のとき `ERR_PNPM_RECURSIVE_RUN_NO_SCRIPT` で失敗する
@@ -193,7 +205,7 @@
     `include: ["*.ts"]` はそのために用意してある（置くまでは `TS18003` になる）
   - `packages/*` の `include` は `src/` 配下とパッケージ直下だけなので、テストを
     `test/` に置くと型検査から外れる。`src/` に併置するか `include` を広げる
-- #6 CI の Node は `jdx/mise-action` で `mise.toml` から入れる
+- #6 CI の Node / pnpm は `jdx/mise-action` で `mise.toml` から入れる
   - `actions/setup-node` の `node-version-file` は `mise.toml` に対応していないので、
     setup-node を使うならバージョンの二重管理になる
   - mise-action がキャッシュするのは mise 本体と mise が入れたツールまで。pnpm store の
