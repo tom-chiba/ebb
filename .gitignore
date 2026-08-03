@@ -1,6 +1,9 @@
 node_modules/
 .DS_Store
 
+# pnpm がグローバルストアに書けない環境で作るプロジェクトローカルのストア
+.pnpm-store/
+
 # builds
 .svelte-kit/
 build/
@@ -28,3 +31,7 @@ pnpm-debug.log*
 
 # Claude Code の個人設定（settings.json は共有する）
 .claude/settings.local.json
+
+# mise の個人設定（mise.toml は共有する）
+mise.local.toml
+.mise.local.toml

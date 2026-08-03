@@ -21,6 +21,8 @@
       "allowWrite": [
         "~/.claude/plugins/data/",
         "~/.codex/",
+        "~/Library/pnpm/",
+        "~/Library/Caches/pnpm/",
         "~/Library/Preferences/.wrangler/"
       ]
     },
