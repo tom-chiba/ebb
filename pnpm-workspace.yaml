@@ -5,3 +5,10 @@ packages:
 # 全パッケージで共有するバージョン。各 package.json では "catalog:" と書く
 catalog:
   typescript: ~6.0.3
+
+# 公開直後の版は解決しない（既定は 1440 = 1 日）。乗っ取り公開が取り下げられるまでの
+# 猶予を稼ぐ。どうしても出たての版が要るときは minimumReleaseAgeExclude に足す
+minimumReleaseAge: 10080
+
+# 過去のリリースより信頼レベルが下がった版が来たら install を失敗させる（既定は off）
+trustPolicy: no-downgrade

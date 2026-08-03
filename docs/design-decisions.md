@@ -130,9 +130,20 @@
 - **依存パッケージのビルドスクリプト（postinstall 等）は既定で実行されない**。実行する /
   しないを `pnpm-workspace.yaml` の `allowBuilds` に書くまで install は失敗する
   （`strictDepBuilds` の既定が true）。#2 で esbuild・workerd を踏むので、そこで書く
-- **`minimumReleaseAge` の既定は 1440 分**。公開から 24 時間経っていないバージョンは
-  解決対象にならない。出たばかりの版を入れようとして「無い」ように見えたらこれ
-  （`blockExoticSubdeps` も既定 true なので、git / tarball 直指定は直接依存でしか使えない）
+- **サプライチェーン対策は pnpm の設定で足りるところまでを #1 で入れた**。
+  依存が 1 個のうちに入れておかないと、#2 で SvelteKit 系が一気に増えたあとでは
+  「今あるものを全部許容する」しかなくなるため
+  - `minimumReleaseAge: 10080`（7 日）。既定は 1440（1 日）。乗っ取り公開が
+    発見・取り下げされるまでの猶予を稼ぐ。**範囲指定なら古い版に落ちるだけでエラーには
+    ならない**（`typescript: latest` で 7.0.2 が弾かれると 6.0.3 が入る、と実測）。
+    落ちるのは満たす版が 1 つも無いときだけで、そのときは `ERR_PNPM_NO_MATCHING_VERSION`。
+    出たての版がどうしても要るなら `minimumReleaseAgeExclude` に足す
+  - `trustPolicy: no-downgrade`（既定は `off`）。過去のリリースより信頼レベルが
+    下がった版が来たら install を失敗させる。個別に通すなら `trustPolicyExclude`
+  - `strictDepBuilds` / `blockExoticSubdeps` は pnpm 11 の既定が既に true なので書かない
+    （`blockExoticSubdeps` により git / tarball 直指定は直接依存でしか使えない）
+  - CI と GitHub 側（`pnpm audit`、dependency-review、Actions の権限最小化と SHA 固定、
+    依存更新の自動化）は #32
 
 ### 後続 Issue への申し送り（#1 では検証していない）
 - **実行環境の型は `types` に明示する**（#2 / #4 / #5 / #20）
