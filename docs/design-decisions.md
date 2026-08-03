@@ -1,12 +1,14 @@
 # Ebb 設計決定メモ（Issue 化用）
 
 ## プロダクト
+
 - 名前: Ebb
 - 概要: メモを記録し、エビングハウスの忘却曲線に沿ってリマインドするアプリ
 - 想定ユーザー: 自分を含む一般公開
 - コア機能: メモ記録 + 間隔反復リマインド
 
 ## 仕様
+
 - 通知手段: **Web Push (PWA) のみ**
   - iOS Safari はホーム画面追加が必須 → オンボーディングで案内
 - 復習間隔: 最小単位 **1時間**、プリセット + ユーザーによるカスタム設定
@@ -17,6 +19,7 @@
 - タグ / 全文検索 / フォルダ: **MVP 対象外**（後続 Issue）
 
 ## 技術スタック（確定）
+
 - FE/BE: **SvelteKit**（server side をそのまま BE として使う。Hono 別 Worker は不採用）
 - デプロイ: **Cloudflare 統一**（adapter-cloudflare + Workers Static Assets）
 - DB: **Cloudflare D1** + **Drizzle ORM / drizzle-kit**
@@ -34,16 +37,18 @@
 - ドメイン: 独自ドメイン保有済み
 
 ## 却下した選択肢と理由
+
 - **Vercel**: Hobby プランの cron が 1日1回のみ。`0 * * * *` はデプロイ自体が失敗する
   → 最小 1h の要件を満たせない
-- **Cloudflare Workflows**: 
+- **Cloudflare Workflows**:
   - Free は 3,000 steps/日、2026-08-10 から steps/storage が課金対象
   - ユーザーが間隔をカスタム変更する仕様と相性が悪い（sleep 中インスタンスは terminate → 再作成が必要）
   - 復習予定の一覧表示のため結局 D1 にも persist が必要 → 二重管理
-  → Cron Triggers + D1 ポーリングを採用
+    → Cron Triggers + D1 ポーリングを採用
 - **Lucia**: 2025年3月に deprecated
 
 ## 実装上の要注意点（Issue に反映）
+
 1. **Workers で `web-push` パッケージは動かない**（Node crypto 依存）
    → Web Crypto ベースの実装（`@block65/webcrypto-web-push` 等）が必要
 2. **Free プランは CPU 10ms/リクエスト**
@@ -57,6 +62,7 @@
 6. Workers で `fs` は使用不可 → `$app/server` の `read()` を使う
 
 ## 実装上の要注意点（追加）
+
 7. **Queues 不採用のため cron の送信件数に上限が必須**
    → `SELECT ... LIMIT 20` 程度に絞り、残りは次周期へ。毎分実行なら 1時間 1200 件さばける
 8. **E2E で Google OAuth を通すのは不安定**
@@ -64,6 +70,7 @@
 9. 購読が失効したら（Push サービスが 410 Gone を返す）DB から購読を削除する処理が必要
 
 ## モノレポの土台（#1）
+
 - **TypeScript は 6.0 系に固定**（`~6.0.3`）。最新は 7.0.2 だが `typescript-eslint@8.65` の
   peer が `>=4.8.4 <6.1.0`、`svelte-check@4.7.4` が `^5.0.0 || ^6.0.0`。
   上限を決めているのは typescript-eslint の `<6.1.0` なので、`^` ではなく `~` で 6.1 も塞ぐ
@@ -149,6 +156,7 @@
     依存更新の自動化）は #32
 
 ### 後続 Issue への申し送り（#1 では検証していない）
+
 - **実行環境の型は `types` に明示する**（#2 / #4 / #5 / #20）
   （`@cloudflare/workers-types` / `wrangler types` の出力）。
   TS 6 は `node_modules/@types` の自動取り込みをしないので、`types` への明示が必須
@@ -188,9 +196,9 @@
     ソースファイル自身）。専用 tsconfig は下記の形にする:
     ```jsonc
     {
-      "extends": "../../tsconfig.base.json",
-      "compilerOptions": { "lib": ["ES2023", "WebWorker"], "types": [] },
-      "files": ["src/service-worker.ts", ".svelte-kit/ambient.d.ts"]
+    	"extends": "../../tsconfig.base.json",
+    	"compilerOptions": { "lib": ["ES2023", "WebWorker"], "types": [] },
+    	"files": ["src/service-worker.ts", ".svelte-kit/ambient.d.ts"]
     }
     ```
     - **`.svelte-kit/tsconfig.json` は継承しない**。継承すると SvelteKit 生成の `include`
@@ -225,9 +233,10 @@
     キャッシュ（setup-node の `cache: pnpm` に相当）は別途用意する必要がある
 
 ## 開発の進め方
+
 - リポジトリ: public
 - Issue の粒度: 1 Issue = 1 PR（半日〜1日程度）
 - **Web Push の技術検証（M1）を認証やメモ機能より先に置く**
   → このプロジェクトで最も不確実性が高い箇所であり、
-    ここで想定外の壁に当たると設計全体に影響するため。
-    認証・CRUD は手順が確立した定型作業なので後に回してもリスクが増えない
+  ここで想定外の壁に当たると設計全体に影響するため。
+  認証・CRUD は手順が確立した定型作業なので後に回してもリスクが増えない

@@ -12,17 +12,17 @@
 
 ## 技術スタック
 
-| 領域 | 採用 |
-|---|---|
-| フロントエンド / バックエンド | SvelteKit（server side をバックエンドとして使用） |
-| ホスティング | Cloudflare Workers（`adapter-cloudflare` + Static Assets） |
-| データベース | Cloudflare D1 + Drizzle ORM |
-| 定期実行 | Cloudflare Cron Triggers（専用 Worker） |
-| 認証 | Better Auth（Google OAuth） |
-| 通知 | Web Push（VAPID / PWA） |
-| スタイル | 素の CSS（Svelte scoped style） |
-| テスト | Vitest / `@cloudflare/vitest-pool-workers` / Playwright |
-| CI/CD | GitHub Actions |
+| 領域                          | 採用                                                       |
+| ----------------------------- | ---------------------------------------------------------- |
+| フロントエンド / バックエンド | SvelteKit（server side をバックエンドとして使用）          |
+| ホスティング                  | Cloudflare Workers（`adapter-cloudflare` + Static Assets） |
+| データベース                  | Cloudflare D1 + Drizzle ORM                                |
+| 定期実行                      | Cloudflare Cron Triggers（専用 Worker）                    |
+| 認証                          | Better Auth（Google OAuth）                                |
+| 通知                          | Web Push（VAPID / PWA）                                    |
+| スタイル                      | 素の CSS（Svelte scoped style）                            |
+| テスト                        | Vitest / `@cloudflare/vitest-pool-workers` / Playwright    |
+| CI/CD                         | GitHub Actions                                             |
 
 主要な設計判断とその理由は [docs/design-decisions.md](docs/design-decisions.md) に記録しています。
 
