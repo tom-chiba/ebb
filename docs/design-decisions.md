@@ -98,11 +98,16 @@
   - この下限が効くのは `packages/*` と `apps/scheduler` だけ。`apps/web` は
     SvelteKit 生成の `target: esnext` / `lib: [esnext, DOM, DOM.Iterable]` に従う
     （`apps/web` で書いた ES2024 の API を `packages/core` へ移すと落ちる、という非対称が残る）
-- **Node のバージョンは `.tool-versions` が正**。`engines` は警告しか出さない
-  - `.node-version` ではなく `.tool-versions` にしたのは、mise が `.node-version` を
-    既定で読まない（`idiomatic_version_file_enable_tools` が空だと無視される）ため。
-    `.tool-versions` は mise / asdf が既定で読み、`actions/setup-node` の
-    `node-version-file` も対応している
+- **Node のバージョンは `mise.toml` が正**。`engines` は警告しか出さない
+  - このリポジトリはツールの管理に mise を使う前提なので、mise のネイティブ形式である
+    `mise.toml` に置く（mise 公式も新規プロジェクトには `.tool-versions` ではなく
+    `mise.toml` を推奨している）
+  - `.node-version` は使えない。mise は `.node-version` を既定で読まない
+    （`idiomatic_version_file_enable_tools` が空だと無視される）
+  - 代償として **`actions/setup-node` の `node-version-file` は `mise.toml` を読めない**
+    （対応形式は `.nvmrc` / `.node-version` / `.tool-versions` / `package.json` のみ）。
+    CI 側は #6 で `jdx/mise-action` を使う
+  - 個人用の上書きは `mise.local.toml`（gitignore 済み）
 - ルートの `lint` / `format` / `test` / `check` は `pnpm -r --if-present run <name>` で
   各パッケージへ委譲するだけ
   - `--if-present` は必須。無いと委譲先が 0 件のとき `ERR_PNPM_RECURSIVE_RUN_NO_SCRIPT` で失敗する
@@ -178,10 +183,11 @@
     `include: ["*.ts"]` はそのために用意してある（置くまでは `TS18003` になる）
   - `packages/*` の `include` は `src/` 配下とパッケージ直下だけなので、テストを
     `test/` に置くと型検査から外れる。`src/` に併置するか `include` を広げる
-- #6 CI では Node を `actions/setup-node` の `node-version-file` で `.tool-versions` から読ませる
-  - `.tool-versions` は `nodejs <単一バージョン>` の 1 行に保つ。setup-node は
-    `.tool-versions` 専用パーサを持たず「行頭トークン 1 個の行」を拾うだけなので、
-    `#` の直後に空白のないコメントや複数バージョン指定を書くと CI だけ静かに壊れる
+- #6 CI の Node は `jdx/mise-action` で `mise.toml` から入れる
+  - `actions/setup-node` の `node-version-file` は `mise.toml` に対応していないので、
+    setup-node を使うならバージョンの二重管理になる
+  - mise-action がキャッシュするのは mise 本体と mise が入れたツールまで。pnpm store の
+    キャッシュ（setup-node の `cache: pnpm` に相当）は別途用意する必要がある
 
 ## 開発の進め方
 - リポジトリ: public
