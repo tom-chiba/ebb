@@ -1,0 +1,6 @@
+# Claude Code の設定・スキルは対象外（サンドボックスの書き込み制限にも触れる）
+.claude/
+
+# pnpm / wrangler が生成する形式をそのまま保つ（再生成のたびに差分が出るのを防ぐ）
+pnpm-lock.yaml
+**/worker-configuration.d.ts

@@ -1,6 +1,6 @@
 packages:
-  - "apps/*"
-  - "packages/*"
+  - 'apps/*'
+  - 'packages/*'
 
 # 全パッケージで共有するバージョン。各 package.json では "catalog:" と書く
 catalog:
