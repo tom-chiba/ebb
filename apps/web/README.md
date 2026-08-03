@@ -1,15 +1,8 @@
-# sv
+# @ebb/web
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+SvelteKit アプリ。このリポジトリの pnpm workspaces の一部としてビルド・管理する（`apps/web` 単体で `npm`/`yarn` は使わない。`typescript` は `catalog:` 経由で pnpm の catalog protocol にのみ解決される）。
 
 ## Creating a project
-
-If you're seeing this, you've probably already done this step. Congrats!
-
-```sh
-# create a new project
-npx sv create my-app
-```
 
 To recreate this project with the same configuration:
 
@@ -20,13 +13,15 @@ npx sv@0.17.0 create --template minimal --types ts --no-install apps/web
 
 ## Developing
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+ワークスペースルートで依存関係をインストール後、開発サーバーを起動する:
 
 ```sh
-npm run dev
+pnpm install
+
+pnpm --filter @ebb/web dev
 
 # or start the server and open the app in a new browser tab
-npm run dev -- --open
+pnpm --filter @ebb/web dev -- --open
 ```
 
 ## Building
@@ -34,9 +29,9 @@ npm run dev -- --open
 To create a production version of your app:
 
 ```sh
-npm run build
+pnpm --filter @ebb/web build
 ```
 
-You can preview the production build with `npm run preview`.
+You can preview the production build with `pnpm --filter @ebb/web preview`.
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+デプロイ先は [`@sveltejs/adapter-cloudflare`](https://svelte.dev/docs/kit/adapter-cloudflare) を組み込み済み（Cloudflare Workers Static Assets）。
