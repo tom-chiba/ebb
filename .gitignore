@@ -1,6 +1,9 @@
 node_modules/
 .DS_Store
 
+# pnpm がグローバルストアに書けない環境で作るプロジェクトローカルのストア
+.pnpm-store/
+
 # builds
 .svelte-kit/
 build/
