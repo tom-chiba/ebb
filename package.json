@@ -12,7 +12,7 @@
 		"lint": "eslint .",
 		"format": "prettier --write .",
 		"test": "pnpm -r --if-present run test",
-		"check": "tsc -p . && pnpm -r run check"
+		"check": "tsc -p . && pnpm -r --if-present run check"
 	},
 	"devDependencies": {
 		"@eslint/compat": "^1.2.5",
