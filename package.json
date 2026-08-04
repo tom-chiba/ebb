@@ -11,6 +11,7 @@
 		"build": "pnpm -r --if-present run build",
 		"lint": "eslint .",
 		"format": "prettier --write .",
+		"format:check": "prettier --check .",
 		"test": "pnpm -r --if-present run test",
 		"check": "tsc -p . && pnpm -r --if-present run check",
 		"db:generate": "pnpm --filter @ebb/db run generate",
