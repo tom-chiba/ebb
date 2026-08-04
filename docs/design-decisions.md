@@ -302,7 +302,7 @@
 - **本番 D1 のマイグレーション適用は deploy ワークフローに自動組み込みにした**（手動手順の
   文書化ではなく）。ユーザー判断により、早期に自動化する方針を採った
 - **`Install dependencies` の直後に `Verify Cloudflare authentication`
-  （`wrangler d1 info ebb --remote`）を追加した**。`CLOUDFLARE_API_TOKEN` の期限切れは、
+  （`wrangler d1 info ebb`）を追加した**。`CLOUDFLARE_API_TOKEN` の期限切れは、
   何も対策しないと migrate/deploy ステップの中で他のエラーに紛れて発生し、原因の切り分けが
   遅れる。認証だけを切り出して build より前に検証することで、期限切れなら
   「Verify Cloudflare authentication」というステップ名で明確に失敗させる
@@ -311,7 +311,7 @@
     「Workers Scripts / D1 / Workers Routes に絞った最小権限トークン」だと
     `whoami` 自体が失敗して全デプロイが止まってしまう（wrangler ソースの
     `getAccounts` → `fetchAllAccounts` で確認）。migrate/deploy ですでに必要な
-    D1 権限だけで完結する `wrangler d1 info ebb --remote`（読み取りのみ、状態を変更しない）
+    D1 権限だけで完結する `wrangler d1 info ebb`（読み取りのみ、状態を変更しない）
     に変更した
   - スコープは「トークンの期限切れ／無効」の検知のみ。`CLOUDFLARE_ACCOUNT_ID` の
     取り違えや、トークンは有効だが Workers Scripts/Workers Routes の権限が不足している
