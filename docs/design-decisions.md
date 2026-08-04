@@ -295,6 +295,18 @@
   されて最新のものに差し替わる（＝完全な直列キューではない）
 - **本番 D1 のマイグレーション適用は deploy ワークフローに自動組み込みにした**（手動手順の
   文書化ではなく）。ユーザー判断により、早期に自動化する方針を採った
+- **`Install dependencies` の直後に `Verify Cloudflare authentication`
+  （`wrangler whoami --json`）を追加した**。`CLOUDFLARE_API_TOKEN` の期限切れは、
+  何も対策しないと migrate/deploy ステップの中で他のエラーに紛れて発生し、原因の切り分けが
+  遅れる。認証だけを切り出して build より前に検証することで、期限切れなら
+  「Verify Cloudflare authentication」というステップ名で明確に失敗させる
+  - `wrangler whoami`（`--json` なし）は未認証でも exit code 0 になることがあるため
+    使わない。`--json` は「未認証なら non-zero exit」と明記されており、実機でも
+    non-zero exit を確認済み
+  - スコープは「トークンの期限切れ／無効」の検知のみ。`CLOUDFLARE_ACCOUNT_ID` の
+    取り違えや、トークンは有効だが D1/Workers Routes の権限が不足しているケースは
+    `whoami` では検知できず、引き続き `Migrate production D1` / `Deploy` ステップで
+    初めて失敗する
 
 ## 開発の進め方
 
