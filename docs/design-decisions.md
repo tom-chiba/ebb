@@ -267,10 +267,16 @@
   対して毎分実行され続ける。rename/drop を伴う破壊的マイグレーションを行う場合は、
   この順序自体を見直す必要がある
 - **ルートの `deploy` スクリプトは `pnpm -r --if-present run deploy` ではなく
-  `pnpm --filter @ebb/web run deploy && pnpm --filter @ebb/scheduler run deploy` にした**。
+  `pnpm --dir apps/web run deploy && pnpm --dir apps/scheduler run deploy` にした**。
   `--if-present` はスクリプト名の typo を静かに成功させる（#1 の罠と同じ）が、
   `lint`/`test` と違い `deploy` でこれを踏むと「本番に反映されていないのに CI が緑」になる
-  ため実害が大きい。`db:migrate:local` と同じ `--filter` 明示 + `&&` 連結パターンに揃えた
+  ため実害が大きい
+  - 当初は `db:migrate:local` と同じ `--filter @ebb/xxx` 明示 + `&&` 連結にしていたが、
+    `pnpm --filter` はパッケージ名が一致しない場合も警告のみで exit 0 になる
+    （実機確認済み: `pnpm --filter @ebb/does-not-exist run deploy` → exit 0）ため、
+    「パッケージ名の typo／リネーム」には typo 対策が効かないままだった。
+    存在しないディレクトリを指定すると ENOENT で確実に exit 1 になる `--dir <path>` に
+    変更し、ディレクトリ指定の typo・リネームも確実に失敗させるようにした
   - `&&` 連結のため web 成功 / scheduler 失敗時は「web だけ本番反映済み」の部分適用状態が
     起こり得るが、自動ロールバックは本 issue のスコープ外（起きたら手動で追いデプロイする）
 - **CI 実行時は `pnpm deploy`（bare）ではなく `pnpm run deploy` を明示する**。
@@ -296,17 +302,32 @@
 - **本番 D1 のマイグレーション適用は deploy ワークフローに自動組み込みにした**（手動手順の
   文書化ではなく）。ユーザー判断により、早期に自動化する方針を採った
 - **`Install dependencies` の直後に `Verify Cloudflare authentication`
-  （`wrangler whoami --json`）を追加した**。`CLOUDFLARE_API_TOKEN` の期限切れは、
+  （`wrangler d1 info ebb --remote`）を追加した**。`CLOUDFLARE_API_TOKEN` の期限切れは、
   何も対策しないと migrate/deploy ステップの中で他のエラーに紛れて発生し、原因の切り分けが
   遅れる。認証だけを切り出して build より前に検証することで、期限切れなら
   「Verify Cloudflare authentication」というステップ名で明確に失敗させる
-  - `wrangler whoami`（`--json` なし）は未認証でも exit code 0 になることがあるため
-    使わない。`--json` は「未認証なら non-zero exit」と明記されており、実機でも
-    non-zero exit を確認済み
+  - 当初は `wrangler whoami --json` を使っていたが、`whoami` は内部で `/accounts`
+    （アカウント一覧取得 API）を呼ぶため **Account Settings Read 権限**が別途必要になり、
+    「Workers Scripts / D1 / Workers Routes に絞った最小権限トークン」だと
+    `whoami` 自体が失敗して全デプロイが止まってしまう（wrangler ソースの
+    `getAccounts` → `fetchAllAccounts` で確認）。migrate/deploy ですでに必要な
+    D1 権限だけで完結する `wrangler d1 info ebb --remote`（読み取りのみ、状態を変更しない）
+    に変更した
   - スコープは「トークンの期限切れ／無効」の検知のみ。`CLOUDFLARE_ACCOUNT_ID` の
-    取り違えや、トークンは有効だが D1/Workers Routes の権限が不足しているケースは
-    `whoami` では検知できず、引き続き `Migrate production D1` / `Deploy` ステップで
-    初めて失敗する
+    取り違えや、トークンは有効だが Workers Scripts/Workers Routes の権限が不足している
+    ケースはこの認証チェックでは検知できず、引き続き `Migrate production D1` /
+    `Deploy` ステップで初めて失敗する
+- **`apps/web/wrangler.jsonc` にも `observability: { enabled: true }` を追加した**。
+  `apps/scheduler/wrangler.jsonc` は cron 失敗を追えるよう既に有効化していたが、
+  `routes` 追加で `apps/web` も本番トラフィックを受ける Worker になったため揃えた。
+  なければ本番の web リクエスト失敗が Workers Logs に記録されず、インシデント調査の
+  初手が「observability を有効化して再発を待つ」になってしまう
+- **`ci.yml` / `deploy.yml` で重複していた checkout 以降のセットアップ手順
+  （mise-action → pnpm store path 取得 → キャッシュ復元 → `pnpm install`）を
+  `.github/actions/setup-pnpm` の composite action に切り出した**。バイト単位で重複していると
+  片方だけ更新した際に CI と本番デプロイでツールチェーン挙動が分岐しかねない。
+  `checkout` 自体はローカル composite action を読み込むために各ワークフローの
+  先頭で必要なため、composite action 側には含めていない
 
 ## 開発の進め方
 
