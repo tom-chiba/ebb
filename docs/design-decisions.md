@@ -232,6 +232,25 @@
   - mise-action がキャッシュするのは mise 本体と mise が入れたツールまで。pnpm store の
     キャッシュ（setup-node の `cache: pnpm` に相当）は別途用意する必要がある
 
+## scheduler Worker の雛形（#5）
+
+- **ローカル D1 は `apps/web` と `apps/scheduler` で別インスタンスになる**（実測済み：
+  `apps/web/.wrangler/state/v3/d1` と `apps/scheduler/.wrangler/state/v3/d1` が別々に生成される）。
+  wrangler のローカル永続化はワーカーのディレクトリ単位で行われ、`database_id` が一致していても
+  共有されない。remote では同じ D1 を指すので影響しないが、local では
+  「`apps/web` で書いた行を `apps/scheduler` の cron が読む」という構成が成立しない
+  - 本 issue のスコープでは両方に `migrate:local` すれば（ルートの
+    `pnpm db:migrate:local` は `apps/web` と `apps/scheduler` の両方に適用する）
+    `packages/db` 経由の SELECT 疎通確認は成立するため、これで十分と判断した
+  - scheduler が web の書いた `reviews` 行を cron で読む #21 では、`--persist-to` 等で
+    ローカル永続化先を共有する対応が必要になる見込み（#21 で検証する）
+- **`apps/scheduler/package.json` に `migrate:remote` を持たせていない**。remote D1 は
+  web/scheduler で共有なので、`apps/web` 側で一度適用すれば scheduler からも参照できる
+  （二重に持たせても実害はないが、実行する意味のあるコマンドを増やさない）
+  - 逆に `deploy` は scheduler 側にのみ用意した。`apps/web` は CI（#6）経由のデプロイを
+    想定しているためこの時点では持たせていないが、scheduler は #6 より先に本番での
+    cron 発火確認が必要なため、手動デプロイの入口を用意した
+
 ## 開発の進め方
 
 - リポジトリ: public
