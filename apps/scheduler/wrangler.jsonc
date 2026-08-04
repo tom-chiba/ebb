@@ -1,0 +1,16 @@
+{
+	"name": "ebb-scheduler",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-04",
+	"triggers": {
+		"crons": ["* * * * *"]
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "ebb",
+			"database_id": "9d613b4c-3fa7-454d-a7d9-0c0930eb7b40",
+			"migrations_dir": "../../packages/db/migrations"
+		}
+	]
+}

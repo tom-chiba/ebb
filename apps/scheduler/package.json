@@ -1,0 +1,21 @@
+{
+	"name": "@ebb/scheduler",
+	"private": true,
+	"version": "0.0.0",
+	"type": "module",
+	"scripts": {
+		"dev": "wrangler dev --test-scheduled",
+		"check": "tsc --noEmit",
+		"cf-typegen": "wrangler types --include-runtime=false",
+		"migrate:local": "wrangler d1 migrations apply ebb --local",
+		"deploy": "wrangler deploy"
+	},
+	"dependencies": {
+		"@ebb/db": "workspace:*"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^4.20260702.1",
+		"typescript": "catalog:",
+		"wrangler": "^4.118.0"
+	}
+}

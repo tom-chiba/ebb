@@ -14,7 +14,7 @@
 		"test": "pnpm -r --if-present run test",
 		"check": "tsc -p . && pnpm -r --if-present run check",
 		"db:generate": "pnpm --filter @ebb/db run generate",
-		"db:migrate:local": "pnpm --filter @ebb/web run migrate:local",
+		"db:migrate:local": "pnpm --filter @ebb/web --filter @ebb/scheduler run migrate:local",
 		"db:migrate:remote": "pnpm --filter @ebb/web run migrate:remote"
 	},
 	"devDependencies": {
