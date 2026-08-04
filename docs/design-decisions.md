@@ -336,6 +336,80 @@
   `checkout` 自体はローカル composite action を読み込むために各ワークフローの
   先頭で必要なため、composite action 側には含めていない
 
+## PWA 受信・通知確認 (#9)
+
+- **SvelteKit は `kit.serviceWorker.register`（既定 `true`）かつ `src/service-worker.ts` が
+  存在する場合、`navigator.serviceWorker.register(...)` を全ページの `window` `load` イベントに
+  自動的に注入する**（`@sveltejs/kit` の `runtime/server/page/render.js` /
+  `core/sync/write_server.js` で確認。このリポジトリには `svelte.config.js` が無く
+  `vite.config.ts` の `sveltekit()` プラグインオプションで Kit を設定しているが、
+  この既定値はそれとは無関係に効く）。dev では `type: 'module'`、本番ビルドでは
+  無指定（`classic`）で登録される。**PWA 全体で Service Worker を有効にするための登録コードを
+  アプリ側に書く必要はない**
+  - 当初これを把握せずに `+layout.svelte` の `onMount` で独自に
+    `register('/service-worker.js', { type: 'module' })` を呼ぶ処理を追加していたが、
+    レビューで「本番では SvelteKit 自動注入（`classic`）と型が食い違い、Service Worker の
+    Register/Update アルゴリズム上、登録のたびに再インストールが起きる懸念がある」と
+    指摘された。`vite preview`（本番ビルド）でレンダリング後の HTML を直接確認したところ、
+    実際に `addEventListener('load', function () { navigator.serviceWorker.register(sanitised); })`
+    が注入されていることを確認し、指摘は正しいと判断して独自の登録コードを削除した
+  - `/debug/push` の `subscribe()` は今も独自に `register()` を呼んでいるが、こちらは
+    dev 環境限定のページで SvelteKit の自動注入と同じ `type: 'module'` を指定しているため
+    型の食い違いは起きない（#8 由来のコードで #9 では変更していない）
+- **`fetch` イベントハンドラは追加しなかった**。Chrome for Developers 公式ブログには
+  「`beforeinstallprompt` のリッチなインストール導線には今も `fetch` ハンドラが必要」との
+  記述があるが、実際に `fetch` ハンドラの有無で A/B して確認したところ、現行 Chrome
+  （151、実測時点）では `fetch` ハンドラなしでも `Page.getInstallabilityErrors` が空、
+  `beforeinstallprompt` も発火した。ブログの記述は書かれた時点の Chrome バージョンでは
+  正しかった可能性があるが、現行バージョンの実機測定を優先し、コードに反映しなかった。
+  `fetch` ハンドラを持つと Service Worker がページの全リクエストを横取りするようになり
+  （`clients.claim()` と組み合わさるとより早いタイミングから横取りが始まる）、実装していない
+  オフラインキャッシュ抜きでは素通しにする以外の意味がなく、単一障害点を増やすだけになる
+  （Chrome 自身も「空の `fetch` ハンドラを付けるだけの実装がパフォーマンスを悪化させた」と
+  同ブログで指摘している）。受け入れ条件が求めるのは「ホーム画面に追加して通知が届く」
+  ことであり、これは Chrome の「メニューからインストール」でも満たせるため
+  `beforeinstallprompt` 自体も本 Issue の必須要件ではない
+- **`beforeinstallprompt` / installability の判定を Playwright の in-memory（一時）プロファイルで
+  確認しようとすると、常に `in-incognito` 判定で失敗する**。Chrome はインストール自体を
+  シークレットモードで許可しないため。判定を検証する際は `playwright-cli open --persistent`
+  のような永続プロファイルが必須（実測済み）
+- **push イベントの受信ロジックは、実際の push サービスへの配送を経由せずに Chrome DevTools
+  Protocol の `ServiceWorker.deliverPushMessage` で直接シミュレートできる**。開発用サンドボックス
+  環境は outbound network を許可リスト方式で制限しており（#8 で判明済み）実配送を試せないため、
+  この方法で受信側（`showNotification` 呼び出し）のみを切り離して検証した
+- **`notificationclick` の分岐ロジックは、Playwright の `BrowserContext.serviceWorkers()` で
+  取得した Worker コンテキストに対して `worker.evaluate()` を使うと、実際の Service Worker
+  内で直接検証できる**。OS 通知そのものをクリックする操作は自動化できないが、
+  `self.clients.matchAll` / `self.clients.openWindow` をその場で差し替えて
+  `self.dispatchEvent(new Event('notificationclick', ...))` すれば、既存クライアントが
+  ある場合の `focus()` 分岐とない場合の `openWindow('/')` 分岐の両方を実際のコードパスで
+  確認できる（実測済み）。Service Worker のコンテキストを掴むには、登録直後は
+  Playwright にワーカーが見えないことがあるため、`unregister()` → `reload()` で
+  登録し直す必要がある場合がある
+- **`#1c2b39`（テーマカラー）は `apps/web/static/manifest.webmanifest` の
+  `theme_color`/`background_color` と `apps/web/src/routes/+layout.svelte` の
+  `<meta name="theme-color">` に別々にハードコードしており、共通化していない**。
+  レビューで指摘された重複だが、値を1箇所にまとめるには manifest を
+  `src/routes/manifest.webmanifest/+server.ts` のような動的レスポンスに変更する必要があり、
+  静的な2値の重複を解消するには過大な変更になると判断し、意図的に許容した。ブランドカラー
+  確定時にはこの2箇所を両方更新する必要がある点に注意
+- **PWA アイコンは独自の簡易プレースホルダーを用意した**。既存の favicon（`favicon.svg`）は
+  SvelteKit テンプレート由来の Svelte ロゴであり、ホーム画面アイコンとして流用すると
+  第三者のブランドがユーザーに見える形で残ってしまう。ブランド未確定の現時点では
+  自作の簡易マーク（波形モチーフ）を使い、確定後に置き換える前提とした
+- **iOS 実機・Android 実機での受信確認はユーザー判断で保留した**。`/debug/push` が開発環境限定
+  （本番ビルドでは 404）である一方、Web Push / Service Worker の登録は secure context が必須で、
+  LAN 上の IP への `http` アクセスでは動作しない。実機からアクセスするには USB ポート
+  フォワーディングやトンネルなどの追加セットアップが必要になるため、コードベースに問題が
+  なければ実機確認なしでマージし、本番運用開始後に確認する方針にした
+  - 依存 Issue #8 の受け入れ条件は「iOS 実機」を前提に書かれているが、ユーザーが普段使うのは
+    Android のため、**iOS 実機確認は Android 実機確認に読み替える**運用にした（詳細は
+    `docs/pwa-notification-receive.md`）
+- **iOS Safari（ホーム画面未追加）でどう見えるかは、実機を用意できないため公開情報の記録に
+  留めた**（ユーザー了承済み）。iOS/iPadOS 16.4 で Web Push はホーム画面追加済みの Web App
+  にのみ対応する形で追加されており、Chrome の `beforeinstallprompt` に相当する自動インストール
+  バナーは存在しない（WebKit 公式ブログで確認。詳細は `docs/pwa-notification-receive.md`）
+
 ## 開発の進め方
 
 - リポジトリ: public

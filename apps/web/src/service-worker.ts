@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-// Web Push の受信確認用の最小実装（#8）。manifest / notificationclick / iOS 対応は #9 で行う。
+// Web Push の受信・PWA インストール可能性のための実装（#8, #9）。
 // このファイルは SvelteKit 生成 tsconfig の exclude に入っているため、現時点では `pnpm check` の対象外
 // （専用 tsconfig の追加は #19 / #20 で行う方針。docs/design-decisions.md 参照）。
 
@@ -26,6 +26,21 @@ self.addEventListener('push', (event) => {
 			await self.registration.showNotification(data?.title ?? 'Ebb', {
 				body: data?.body
 			});
+		})()
+	);
+});
+
+self.addEventListener('notificationclick', (event) => {
+	event.notification.close();
+	event.waitUntil(
+		(async () => {
+			const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+			const existing = clients.find((client) => 'focus' in client);
+			if (existing) {
+				await existing.focus();
+			} else {
+				await self.clients.openWindow('/');
+			}
 		})()
 	);
 });
