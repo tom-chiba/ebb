@@ -12,7 +12,8 @@
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"cf-typegen": "wrangler types --include-runtime=false",
 		"migrate:local": "wrangler d1 migrations apply ebb --local",
-		"migrate:remote": "wrangler d1 migrations apply ebb --remote"
+		"migrate:remote": "wrangler d1 migrations apply ebb --remote",
+		"deploy": "wrangler deploy"
 	},
 	"dependencies": {
 		"@ebb/db": "workspace:*"

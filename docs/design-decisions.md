@@ -250,6 +250,84 @@
   - 逆に `deploy` は scheduler 側にのみ用意した。`apps/web` は CI（#6）経由のデプロイを
     想定しているためこの時点では持たせていないが、scheduler は #6 より先に本番での
     cron 発火確認が必要なため、手動デプロイの入口を用意した
+    - **#7 で `apps/web` にも `deploy` を追加し、CI から web/scheduler 両方の `deploy` を
+      自動実行するようにした**。scheduler 側の `deploy` も「手動デプロイの入口」から
+      CI 経由の自動実行に役割が変わっている
+
+## production へのデプロイ（#7）
+
+- **deploy ワークフローは `main` への push のみで起動し、`ci.yml`（`pull_request`）の
+  lint/test/check を再実行しない**。main へのマージ自体がブランチ保護
+  （`required_status_checks: ["ci"]`, `enforce_admins: true`）で CI 通過済みであることを
+  前提にしている。「PR で検査、main で deploy」という当初の役割分担（技術スタックの節）どおり
+- **`pnpm build` → `pnpm db:migrate:remote` → `pnpm run deploy` の順に実行する**。
+  スキーマ変更は新コードのデプロイ前に反映しておく必要があるため。この順序は
+  マイグレーションが**追加的（後方互換）である前提**に立っており、migrate 完了後・
+  scheduler の `wrangler deploy` 完了までの間は旧バージョンの scheduler が新スキーマに
+  対して毎分実行され続ける。rename/drop を伴う破壊的マイグレーションを行う場合は、
+  この順序自体を見直す必要がある
+- **ルートの `deploy` スクリプトは `pnpm -r --if-present run deploy` ではなく
+  `pnpm --dir apps/web run deploy && pnpm --dir apps/scheduler run deploy` にした**。
+  `--if-present` はスクリプト名の typo を静かに成功させる（#1 の罠と同じ）が、
+  `lint`/`test` と違い `deploy` でこれを踏むと「本番に反映されていないのに CI が緑」になる
+  ため実害が大きい
+  - 当初は `db:migrate:local` と同じ `--filter @ebb/xxx` 明示 + `&&` 連結にしていたが、
+    `pnpm --filter` はパッケージ名が一致しない場合も警告のみで exit 0 になる
+    （実機確認済み: `pnpm --filter @ebb/does-not-exist run deploy` → exit 0）ため、
+    「パッケージ名の typo／リネーム」には typo 対策が効かないままだった。
+    存在しないディレクトリを指定すると ENOENT で確実に exit 1 になる `--dir <path>` に
+    変更し、ディレクトリ指定の typo・リネームも確実に失敗させるようにした
+  - `&&` 連結のため web 成功 / scheduler 失敗時は「web だけ本番反映済み」の部分適用状態が
+    起こり得るが、自動ロールバックは本 issue のスコープ外（起きたら手動で追いデプロイする）
+- **CI 実行時は `pnpm deploy`（bare）ではなく `pnpm run deploy` を明示する**。
+  pnpm には `pnpm --filter <pkg> deploy <dir>`（ワークスペースの実行体をディレクトリに
+  切り出す別コマンド）が予約されており、bare 呼び出しでも将来のpnpmバージョンでの
+  挙動変化に依存しないよう `run` を明示した（現行の pnpm 11.18.0 では bare `pnpm deploy`
+  でも package.json の `deploy` スクリプトに委譲されることを実機確認済み）
+- **`apps/web/wrangler.jsonc` に `routes: [{ pattern: "ebb.tom-chiba.com", custom_domain: true }]`
+  を追加**。Custom Domain の割り当てには Account 単位の Workers Scripts 編集権限だけでなく、
+  対象ゾーン（`tom-chiba.com`）に対する **Zone: Workers Routes 編集権限**が API トークンに
+  別途必要（Cloudflare 公式ドキュメントで確認）。「API トークンの権限は Workers Scripts / D1
+  の編集に絞る」という #7 の当初方針だけでは custom domain の割り当てに失敗するため、
+  トークン発行時にはこのゾーン権限を追加すること
+  - `routes` を追加すると次回デプロイ以降 `workers_dev` は実質 `false` 扱いになり、
+    既存の `*.workers.dev` URL は無効化される見込み。環境は local/production の2つのみで
+    workers.dev URL を使い続ける想定はないため、意図した挙動として許容している
+- **`concurrency.cancel-in-progress` は `ci.yml` の `true` と逆の `false` にした**。
+  デプロイやマイグレーションの途中でキャンセルされると中途半端な状態が残るため、
+  実行中のジョブはキャンセルさせない。ただし GitHub Actions の concurrency group は
+  「実行中1件 + 待機中1件」までしか保持できない固定仕様（設定で深さを変える手段はない）で、
+  main への push が短時間に3回以上続くと、待機中だった中間コミットのデプロイはキャンセル
+  されて最新のものに差し替わる（＝完全な直列キューではない）
+- **本番 D1 のマイグレーション適用は deploy ワークフローに自動組み込みにした**（手動手順の
+  文書化ではなく）。ユーザー判断により、早期に自動化する方針を採った
+- **`Install dependencies` の直後に `Verify Cloudflare authentication`
+  （`wrangler d1 info ebb --remote`）を追加した**。`CLOUDFLARE_API_TOKEN` の期限切れは、
+  何も対策しないと migrate/deploy ステップの中で他のエラーに紛れて発生し、原因の切り分けが
+  遅れる。認証だけを切り出して build より前に検証することで、期限切れなら
+  「Verify Cloudflare authentication」というステップ名で明確に失敗させる
+  - 当初は `wrangler whoami --json` を使っていたが、`whoami` は内部で `/accounts`
+    （アカウント一覧取得 API）を呼ぶため **Account Settings Read 権限**が別途必要になり、
+    「Workers Scripts / D1 / Workers Routes に絞った最小権限トークン」だと
+    `whoami` 自体が失敗して全デプロイが止まってしまう（wrangler ソースの
+    `getAccounts` → `fetchAllAccounts` で確認）。migrate/deploy ですでに必要な
+    D1 権限だけで完結する `wrangler d1 info ebb --remote`（読み取りのみ、状態を変更しない）
+    に変更した
+  - スコープは「トークンの期限切れ／無効」の検知のみ。`CLOUDFLARE_ACCOUNT_ID` の
+    取り違えや、トークンは有効だが Workers Scripts/Workers Routes の権限が不足している
+    ケースはこの認証チェックでは検知できず、引き続き `Migrate production D1` /
+    `Deploy` ステップで初めて失敗する
+- **`apps/web/wrangler.jsonc` にも `observability: { enabled: true }` を追加した**。
+  `apps/scheduler/wrangler.jsonc` は cron 失敗を追えるよう既に有効化していたが、
+  `routes` 追加で `apps/web` も本番トラフィックを受ける Worker になったため揃えた。
+  なければ本番の web リクエスト失敗が Workers Logs に記録されず、インシデント調査の
+  初手が「observability を有効化して再発を待つ」になってしまう
+- **`ci.yml` / `deploy.yml` で重複していた checkout 以降のセットアップ手順
+  （mise-action → pnpm store path 取得 → キャッシュ復元 → `pnpm install`）を
+  `.github/actions/setup-pnpm` の composite action に切り出した**。バイト単位で重複していると
+  片方だけ更新した際に CI と本番デプロイでツールチェーン挙動が分岐しかねない。
+  `checkout` 自体はローカル composite action を読み込むために各ワークフローの
+  先頭で必要なため、composite action 側には含めていない
 
 ## 開発の進め方
 
