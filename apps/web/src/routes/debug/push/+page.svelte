@@ -26,7 +26,7 @@
 			// 現状の src/service-worker.ts は import/export を持たないため本番ビルドでは
 			// classic 出力になるが、このデバッグページでは明示的に ESM として登録する
 			const registration = await navigator.serviceWorker.register('/service-worker.js', {
-				type: 'module',
+				type: 'module'
 			});
 			await navigator.serviceWorker.ready;
 
@@ -34,7 +34,7 @@
 			// それをそのまま返す（unsubscribe を挟むと新規購読失敗時に復元できなくなる）
 			const subscription = await registration.pushManager.subscribe({
 				userVisibleOnly: true,
-				applicationServerKey: urlBase64ToUint8Array(data.vapidPublicKey),
+				applicationServerKey: urlBase64ToUint8Array(data.vapidPublicKey)
 			});
 
 			subscriptionJson = JSON.stringify(subscription.toJSON(), null, 2);

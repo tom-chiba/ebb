@@ -48,12 +48,12 @@ export const actions: Actions = {
 				{
 					subject: platform.env.VAPID_SUBJECT,
 					publicKey: platform.env.VAPID_PUBLIC_KEY,
-					privateKey: platform.env.VAPID_PRIVATE_KEY,
-				},
+					privateKey: platform.env.VAPID_PRIVATE_KEY
+				}
 			);
 		} catch (err) {
 			return fail(400, {
-				error: `subscription または VAPID 鍵設定が不正: ${err instanceof Error ? err.message : String(err)}`,
+				error: `subscription または VAPID 鍵設定が不正: ${err instanceof Error ? err.message : String(err)}`
 			});
 		}
 
@@ -64,7 +64,7 @@ export const actions: Actions = {
 			response = await fetch(subscription.endpoint, { ...payload, body: requestBody });
 		} catch (err) {
 			return fail(502, {
-				error: `push サービスへの fetch に失敗した: ${err instanceof Error ? err.message : String(err)}`,
+				error: `push サービスへの fetch に失敗した: ${err instanceof Error ? err.message : String(err)}`
 			});
 		}
 
@@ -73,11 +73,11 @@ export const actions: Actions = {
 			responseBody = await response.text();
 		} catch (err) {
 			return fail(502, {
-				error: `push サービスのレスポンス読み取りに失敗した: ${err instanceof Error ? err.message : String(err)}`,
+				error: `push サービスのレスポンス読み取りに失敗した: ${err instanceof Error ? err.message : String(err)}`
 			});
 		}
 		const wallClockMs = Date.now() - startedAt;
 
 		return { sendStatus: response.status, body: responseBody, wallClockMs };
-	},
+	}
 };

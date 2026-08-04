@@ -13,7 +13,7 @@ function toBase64Url(bytes: Uint8Array): string {
 
 const keyPair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
 	'sign',
-	'verify',
+	'verify'
 ]);
 
 const publicKeyBytes = new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey));

@@ -24,8 +24,8 @@ self.addEventListener('push', (event) => {
 				data = undefined;
 			}
 			await self.registration.showNotification(data?.title ?? 'Ebb', {
-				body: data?.body,
+				body: data?.body
 			});
-		})(),
+		})()
 	);
 });
