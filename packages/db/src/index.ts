@@ -3,6 +3,7 @@ import type { D1Database } from '@cloudflare/workers-types';
 import * as schema from './schema';
 
 export * from './schema';
+export { count } from 'drizzle-orm';
 
 export function createDb(d1: D1Database) {
 	return drizzle(d1, { schema });
