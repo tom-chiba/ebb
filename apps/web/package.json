@@ -16,6 +16,7 @@
 		"deploy": "wrangler deploy"
 	},
 	"dependencies": {
+		"@block65/webcrypto-web-push": "^1.0.2",
 		"@ebb/db": "workspace:*"
 	},
 	"devDependencies": {
