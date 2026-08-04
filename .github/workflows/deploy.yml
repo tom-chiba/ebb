@@ -22,7 +22,7 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
 
       - name: Verify Cloudflare authentication
-        run: pnpm --filter @ebb/web exec wrangler d1 info ebb --remote
+        run: pnpm --filter @ebb/web exec wrangler d1 info ebb
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
