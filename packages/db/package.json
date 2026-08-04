@@ -8,9 +8,15 @@
 		"./package.json": "./package.json"
 	},
 	"scripts": {
-		"check": "tsc --noEmit"
+		"check": "tsc --noEmit",
+		"generate": "drizzle-kit generate"
 	},
 	"devDependencies": {
+		"@cloudflare/workers-types": "^4.20260702.1",
+		"drizzle-kit": "^0.31.10",
 		"typescript": "catalog:"
+	},
+	"dependencies": {
+		"drizzle-orm": "^0.45.2"
 	}
 }

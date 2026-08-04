@@ -10,7 +10,12 @@
 		"prepare": "svelte-kit sync",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-		"cf-typegen": "wrangler types --include-runtime=false"
+		"cf-typegen": "wrangler types --include-runtime=false",
+		"migrate:local": "wrangler d1 migrations apply ebb --local",
+		"migrate:remote": "wrangler d1 migrations apply ebb --remote"
+	},
+	"dependencies": {
+		"@ebb/db": "workspace:*"
 	},
 	"devDependencies": {
 		"@cloudflare/workers-types": "^4.20260702.1",
