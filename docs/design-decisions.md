@@ -51,6 +51,9 @@
 
 1. **Workers で `web-push` パッケージは動かない**（Node crypto 依存）
    → Web Crypto ベースの実装（`@block65/webcrypto-web-push` 等）が必要
+   - #8 で `@block65/webcrypto-web-push` の採用を確定した。legacy な
+     `aesgcm` 実装だが、2026 時点の Chrome / FCM では実際に受理・復号・表示
+     されることを実測済み（詳細は `docs/web-push-spike.md`）
 2. **Free プランは CPU 10ms/リクエスト**
    → cron で全件その場送信は不可。Queues でファンアウトし 1メッセージ = 1通知にする
    → Queues 無料枠は 1万オペ/日（保持 24h）= 実質 1日1万通知が上限
@@ -220,6 +223,10 @@
   - `check` は tsc がプロジェクト単位でしか動かないので委譲のままにし、ルート直下の `.ts`
     （`eslint.config.ts` 等）を置いたら `tsc -p .` を足す。ルート `tsconfig.json` の
     `include: ["*.ts"]` はそのために用意してある（置くまでは `TS18003` になる）
+    - #8 で `scripts/`（ワンショットの運用スクリプト置き場）を追加した際、
+      `include` に `"scripts"` を足した。`apps/*` / `packages/*` に属さない
+      スクリプトはこれ以外どの tsconfig からも見えず、足さないと `pnpm check` の
+      対象外のまま静かに型エラーが埋没する
   - `packages/*` の `include` は `src/` 配下とパッケージ直下だけなので、テストを
     `test/` に置くと型検査から外れる。`src/` に併置するか `include` を広げる
   - `packages/*` の `include` はディレクトリ形式 `["src", "*.ts"]` で書く。

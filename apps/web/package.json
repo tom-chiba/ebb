@@ -10,12 +10,13 @@
 		"prepare": "svelte-kit sync",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-		"cf-typegen": "wrangler types --include-runtime=false",
+		"cf-typegen": "test -f .dev.vars || cp .dev.vars.example .dev.vars && wrangler types --include-runtime=false",
 		"migrate:local": "wrangler d1 migrations apply ebb --local",
 		"migrate:remote": "wrangler d1 migrations apply ebb --remote",
 		"deploy": "wrangler deploy"
 	},
 	"dependencies": {
+		"@block65/webcrypto-web-push": "^1.0.2",
 		"@ebb/db": "workspace:*"
 	},
 	"devDependencies": {
