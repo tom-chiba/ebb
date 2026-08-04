@@ -1,8 +1,13 @@
+import { dev } from '$app/environment';
 import { error, fail } from '@sveltejs/kit';
 import { buildPushPayload, type PushSubscription } from '@block65/webcrypto-web-push';
 import type { Actions, PageServerLoad } from './$types';
 
+// 本番の VAPID 秘密鍵で任意の endpoint に fetch できてしまうため、開発環境限定にする
 export const load: PageServerLoad = ({ platform }) => {
+	if (!dev) {
+		error(404, 'Not Found');
+	}
 	if (!platform?.env.VAPID_PUBLIC_KEY) {
 		error(500, 'VAPID_PUBLIC_KEY が未設定');
 	}
@@ -11,6 +16,9 @@ export const load: PageServerLoad = ({ platform }) => {
 
 export const actions: Actions = {
 	send: async ({ request, platform }) => {
+		if (!dev) {
+			error(404, 'Not Found');
+		}
 		if (!platform?.env.VAPID_PRIVATE_KEY) {
 			return fail(500, { error: 'VAPID_PRIVATE_KEY が未設定' });
 		}
@@ -45,14 +53,11 @@ export const actions: Actions = {
 			);
 		} catch (err) {
 			return fail(400, {
-				error: `subscription の形式が不正: ${err instanceof Error ? err.message : String(err)}`,
+				error: `subscription または VAPID 鍵設定が不正: ${err instanceof Error ? err.message : String(err)}`,
 			});
 		}
 
-		// payload.body は Uint8Array<ArrayBufferLike> だが fetch の BodyInit は
-		// Uint8Array<ArrayBuffer> を要求する（docs/design-decisions.md 参照）ため境界で詰め替える
-		const requestBody = new Uint8Array(payload.body.byteLength);
-		requestBody.set(payload.body);
+		const requestBody = new Uint8Array(payload.body);
 
 		let response: Response;
 		try {

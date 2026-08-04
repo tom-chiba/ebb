@@ -23,17 +23,15 @@
 	async function subscribe() {
 		try {
 			statusMessage = 'Service Worker を登録中...';
-			// dev/build ともに ESM で出力されるため type: 'module' が必要
+			// 現状の src/service-worker.ts は import/export を持たないため本番ビルドでは
+			// classic 出力になるが、このデバッグページでは明示的に ESM として登録する
 			const registration = await navigator.serviceWorker.register('/service-worker.js', {
 				type: 'module',
 			});
 			await navigator.serviceWorker.ready;
 
-			const existing = await registration.pushManager.getSubscription();
-			if (existing) {
-				await existing.unsubscribe();
-			}
-
+			// applicationServerKey が変わらない限り、既存の購読があれば subscribe() は
+			// それをそのまま返す（unsubscribe を挟むと新規購読失敗時に復元できなくなる）
 			const subscription = await registration.pushManager.subscribe({
 				userVisibleOnly: true,
 				applicationServerKey: urlBase64ToUint8Array(data.vapidPublicKey),
