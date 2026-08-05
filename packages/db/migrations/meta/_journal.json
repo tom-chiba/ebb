@@ -1,27 +1,41 @@
 {
-	"version": "7",
-	"dialect": "sqlite",
-	"entries": [
-		{
-			"idx": 0,
-			"version": "6",
-			"when": 1785768570200,
-			"tag": "0000_living_stellaris",
-			"breakpoints": true
-		},
-		{
-			"idx": 1,
-			"version": "6",
-			"when": 1785863531202,
-			"tag": "0001_unknown_vance_astro",
-			"breakpoints": true
-		},
-		{
-			"idx": 2,
-			"version": "6",
-			"when": 1785892374412,
-			"tag": "0002_elite_gwen_stacy",
-			"breakpoints": true
-		}
-	]
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1785768570200,
+      "tag": "0000_living_stellaris",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1785863531202,
+      "tag": "0001_unknown_vance_astro",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785892374412,
+      "tag": "0002_elite_gwen_stacy",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1785897329693,
+      "tag": "0003_steep_mimic",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1785898195937,
+      "tag": "0004_thick_wendell_rand",
+      "breakpoints": true
+    }
+  ]
 }
