@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createDb, eq, intervalPresets, memos, user, type Db } from '@ebb/db';
 import {
 	archiveMemo,
+	ConflictError,
 	CONTENT_MAX_LENGTH,
 	createMemo,
 	getMemo,
@@ -164,6 +165,61 @@ describe('createMemo', () => {
 		});
 		expect(memo.content).toHaveLength(CONTENT_MAX_LENGTH);
 	});
+
+	// [adversarial-review] クライアントが POST のレスポンスを受け取れず（タイムアウト等）
+	// 同じリクエストを再送した場合、サーバー側が毎回新しい id を採番すると重複作成される。
+	// クライアント生成の id を冪等性キーとして使えるようにし、再送では既存行を返す。
+	it('is idempotent when the same client-generated id is submitted twice', async () => {
+		const id = crypto.randomUUID();
+		const first = await createMemo(db, ownerId, {
+			id,
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		const second = await createMemo(db, ownerId, {
+			id,
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		expect(second).toEqual(first);
+
+		const { total } = await listMemos(db, ownerId);
+		expect(total).toBe(1);
+	});
+
+	it('rejects a client-generated id already used by another user', async () => {
+		const id = crypto.randomUUID();
+		await createMemo(db, otherUserId, {
+			id,
+			title: 'title',
+			content: 'content',
+			intervalPresetId: otherUserPresetId
+		});
+		await expect(
+			createMemo(db, ownerId, {
+				id,
+				title: 'title',
+				content: 'content',
+				intervalPresetId: ownerPresetId
+			})
+		).rejects.toThrow(ValidationError);
+	});
+
+	it('generates a random id when none is supplied', async () => {
+		const a = await createMemo(db, ownerId, {
+			title: 'a',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const b = await createMemo(db, ownerId, {
+			title: 'b',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		expect(a.id).not.toBe(b.id);
+	});
 });
 
 describe('listMemos / getMemo', () => {
@@ -307,7 +363,7 @@ describe('updateMemo', () => {
 			content: 'content',
 			intervalPresetId: ownerPresetId
 		});
-		const updated = await updateMemo(db, ownerId, memo.id, { title: 'new title' });
+		const updated = await updateMemo(db, ownerId, memo.id, memo.updatedAt, { title: 'new title' });
 		expect(updated.title).toBe('new title');
 		expect(updated.content).toBe('content');
 	});
@@ -318,7 +374,7 @@ describe('updateMemo', () => {
 			content: 'content',
 			intervalPresetId: ownerPresetId
 		});
-		await expect(updateMemo(db, ownerId, memo.id, { title: '  ' })).rejects.toThrow(
+		await expect(updateMemo(db, ownerId, memo.id, memo.updatedAt, { title: '  ' })).rejects.toThrow(
 			ValidationError
 		);
 	});
@@ -330,23 +386,49 @@ describe('updateMemo', () => {
 			intervalPresetId: ownerPresetId
 		});
 		await expect(
-			updateMemo(db, ownerId, memo.id, { content: 'a'.repeat(CONTENT_MAX_LENGTH + 1) })
+			updateMemo(db, ownerId, memo.id, memo.updatedAt, {
+				content: 'a'.repeat(CONTENT_MAX_LENGTH + 1)
+			})
 		).rejects.toThrow(ValidationError);
 	});
 
-	it('concurrent partial updates on different fields do not clobber each other', async () => {
+	it('sequential partial updates on different fields, each with the latest updatedAt, do not clobber each other', async () => {
 		const memo = await createMemo(db, ownerId, {
 			title: 'title',
 			content: 'content',
 			intervalPresetId: ownerPresetId
 		});
-		await Promise.all([
-			updateMemo(db, ownerId, memo.id, { title: 'new title' }),
-			updateMemo(db, ownerId, memo.id, { content: 'new content' })
-		]);
+		const afterTitle = await updateMemo(db, ownerId, memo.id, memo.updatedAt, {
+			title: 'new title'
+		});
+		const afterContent = await updateMemo(db, ownerId, memo.id, afterTitle.updatedAt, {
+			content: 'new content'
+		});
+		expect(afterContent.title).toBe('new title');
+		expect(afterContent.content).toBe('new content');
+	});
+
+	it('throws ConflictError when expectedUpdatedAt no longer matches (lost-update protection)', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		// updatedAt はミリ秒精度で、2回の更新が同一ミリ秒内に完了しうるため、
+		// 両者が読んだとみなす基準時刻を明確に過去へずらしてから検証する。
+		const staleUpdatedAt = new Date(memo.updatedAt.getTime() - 60_000);
+		await db.update(memos).set({ updatedAt: staleUpdatedAt }).where(eq(memos.id, memo.id));
+
+		// 片方が先に確定し、もう片方は取得時点の（今や古い）updatedAt のまま送ってくる
+		// 同時実行を模す。後勝ちで無条件に上書きすると、先に確定した更新が消えてしまう。
+		await updateMemo(db, ownerId, memo.id, staleUpdatedAt, { title: 'first writer' });
+		await expect(
+			updateMemo(db, ownerId, memo.id, staleUpdatedAt, { content: 'second writer (stale)' })
+		).rejects.toThrow(ConflictError);
+
 		const final = await getMemo(db, ownerId, memo.id);
-		expect(final.title).toBe('new title');
-		expect(final.content).toBe('new content');
+		expect(final.title).toBe('first writer');
+		expect(final.content).toBe('content');
 	});
 
 	it('bumps updatedAt when a field actually changes', async () => {
@@ -360,7 +442,7 @@ describe('updateMemo', () => {
 		const pastUpdatedAt = new Date(memo.updatedAt.getTime() - 60_000);
 		await db.update(memos).set({ updatedAt: pastUpdatedAt }).where(eq(memos.id, memo.id));
 
-		const updated = await updateMemo(db, ownerId, memo.id, { title: 'new title' });
+		const updated = await updateMemo(db, ownerId, memo.id, pastUpdatedAt, { title: 'new title' });
 		expect(updated.updatedAt.getTime()).toBeGreaterThan(pastUpdatedAt.getTime());
 	});
 
@@ -370,7 +452,18 @@ describe('updateMemo', () => {
 			content: 'content',
 			intervalPresetId: ownerPresetId
 		});
-		const result = await updateMemo(db, ownerId, memo.id, {});
+		const result = await updateMemo(db, ownerId, memo.id, memo.updatedAt, {});
+		expect(result).toEqual(memo);
+	});
+
+	it('does not require a matching expectedUpdatedAt for a no-op update', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		const staleDate = new Date(memo.updatedAt.getTime() - 60_000);
+		const result = await updateMemo(db, ownerId, memo.id, staleDate, {});
 		expect(result).toEqual(memo);
 	});
 
@@ -380,7 +473,9 @@ describe('updateMemo', () => {
 			content: 'content',
 			intervalPresetId: otherUserPresetId
 		});
-		await expect(updateMemo(db, ownerId, memo.id, {})).rejects.toThrow(NotFoundError);
+		await expect(updateMemo(db, ownerId, memo.id, memo.updatedAt, {})).rejects.toThrow(
+			NotFoundError
+		);
 	});
 
 	it('throws NotFoundError for a no-op update on an archived memo', async () => {
@@ -390,7 +485,9 @@ describe('updateMemo', () => {
 			intervalPresetId: ownerPresetId
 		});
 		await archiveMemo(db, ownerId, memo.id);
-		await expect(updateMemo(db, ownerId, memo.id, {})).rejects.toThrow(NotFoundError);
+		await expect(updateMemo(db, ownerId, memo.id, memo.updatedAt, {})).rejects.toThrow(
+			NotFoundError
+		);
 	});
 
 	it('rejects switching to a preset owned by another user', async () => {
@@ -400,7 +497,7 @@ describe('updateMemo', () => {
 			intervalPresetId: ownerPresetId
 		});
 		await expect(
-			updateMemo(db, ownerId, memo.id, { intervalPresetId: otherUserPresetId })
+			updateMemo(db, ownerId, memo.id, memo.updatedAt, { intervalPresetId: otherUserPresetId })
 		).rejects.toThrow(ValidationError);
 	});
 
@@ -410,7 +507,9 @@ describe('updateMemo', () => {
 			content: 'content',
 			intervalPresetId: otherUserPresetId
 		});
-		await expect(updateMemo(db, ownerId, memo.id, { title: 'x' })).rejects.toThrow(NotFoundError);
+		await expect(updateMemo(db, ownerId, memo.id, memo.updatedAt, { title: 'x' })).rejects.toThrow(
+			NotFoundError
+		);
 	});
 
 	it('throws NotFoundError when updating an archived memo', async () => {
@@ -420,7 +519,35 @@ describe('updateMemo', () => {
 			intervalPresetId: ownerPresetId
 		});
 		await archiveMemo(db, ownerId, memo.id);
-		await expect(updateMemo(db, ownerId, memo.id, { title: 'x' })).rejects.toThrow(NotFoundError);
+		await expect(updateMemo(db, ownerId, memo.id, memo.updatedAt, { title: 'x' })).rejects.toThrow(
+			NotFoundError
+		);
+	});
+
+	// [codex:review] 存在確認より先にバリデーションを行うと、他人/アーカイブ済みのメモに
+	// 不正な入力を送った際に 404 ではなく 400 になってしまっていた。存在確認を先に行う
+	// ことで、入力の正当性に関わらず 404 に統一されることを確認する。
+	it('throws NotFoundError (not ValidationError) for an invalid title on another user memo', async () => {
+		const memo = await createMemo(db, otherUserId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: otherUserPresetId
+		});
+		await expect(updateMemo(db, ownerId, memo.id, memo.updatedAt, { title: '  ' })).rejects.toThrow(
+			NotFoundError
+		);
+	});
+
+	it('throws NotFoundError (not ValidationError) for an invalid title on an archived memo', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		await archiveMemo(db, ownerId, memo.id);
+		await expect(updateMemo(db, ownerId, memo.id, memo.updatedAt, { title: '  ' })).rejects.toThrow(
+			NotFoundError
+		);
 	});
 });
 
@@ -468,6 +595,14 @@ describe('handleMemoError', () => {
 
 	it('maps NotFoundError to a 404 with a fixed message (no detail leaked)', () => {
 		expect(statusOf(() => handleMemoError(new NotFoundError('memo abc123 not found')))).toBe(404);
+	});
+
+	it('maps ConflictError to 409', () => {
+		expect(
+			statusOf(() =>
+				handleMemoError(new ConflictError('memo has been modified since it was last read'))
+			)
+		).toBe(409);
 	});
 
 	it('rethrows anything else unchanged', () => {

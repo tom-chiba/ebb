@@ -20,6 +20,7 @@ export const GET: RequestHandler = async ({ locals, platform, url }) => {
 function parseCreateMemoBody(body: unknown) {
 	if (typeof body !== 'object' || body === null) return null;
 	const record = body as Record<string, unknown>;
+	if (record.id !== undefined && typeof record.id !== 'string') return null;
 	if (
 		typeof record.title !== 'string' ||
 		typeof record.content !== 'string' ||
@@ -28,6 +29,7 @@ function parseCreateMemoBody(body: unknown) {
 		return null;
 	}
 	return {
+		id: record.id as string | undefined,
 		title: record.title,
 		content: record.content,
 		intervalPresetId: record.intervalPresetId

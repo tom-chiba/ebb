@@ -9,6 +9,8 @@ const MAX_LIMIT = 100;
 
 export class ValidationError extends Error {}
 export class NotFoundError extends Error {}
+// 楽観的並行性制御で、更新対象が最後に読んだ状態から変わっていた場合に投げる。
+export class ConflictError extends Error {}
 
 interface ListOptions {
 	limit?: number;
@@ -112,9 +114,29 @@ async function assertPresetAccessible(db: Db, userId: string, intervalPresetId: 
 }
 
 export interface CreateMemoInput {
+	// クライアントが生成した冪等性キー（memos.id と共用）。省略時はサーバー側で
+	// crypto.randomUUID() が採番される。同じ id で再送されたリクエストは新規作成せず
+	// 既存の memo をそのまま返す（POST がタイムアウト等で再送されても重複作成しない）。
+	id?: string;
 	title: string;
 	content: string;
 	intervalPresetId: string;
+}
+
+async function findOwnMemoById(db: Db, userId: string, id: string) {
+	const rows = await db
+		.select()
+		.from(memos)
+		.where(and(eq(memos.id, id), eq(memos.userId, userId)))
+		.limit(1)
+		.all();
+	return rows[0];
+}
+
+function isUniqueConstraintViolation(err: unknown): boolean {
+	if (!(err instanceof Error)) return false;
+	const cause = err.cause instanceof Error ? err.cause.message : '';
+	return /UNIQUE constraint failed/i.test(`${err.message} ${cause}`);
 }
 
 export async function createMemo(db: Db, userId: string, input: CreateMemoInput) {
@@ -122,24 +144,50 @@ export async function createMemo(db: Db, userId: string, input: CreateMemoInput)
 	assertContent(input.content);
 	await assertPresetAccessible(db, userId, input.intervalPresetId);
 
-	const rows = await db
-		.insert(memos)
-		.values({
-			userId,
-			title: input.title,
-			content: input.content,
-			intervalPresetId: input.intervalPresetId
-		})
-		.returning()
-		.all();
-	const memo = rows[0];
-	if (!memo) throw new Error('failed to create memo');
-	return toMemoResponse(memo);
+	if (input.id !== undefined) {
+		const existing = await findOwnMemoById(db, userId, input.id);
+		if (existing) return toMemoResponse(existing);
+	}
+
+	try {
+		const rows = await db
+			.insert(memos)
+			.values({
+				...(input.id !== undefined ? { id: input.id } : {}),
+				userId,
+				title: input.title,
+				content: input.content,
+				intervalPresetId: input.intervalPresetId
+			})
+			.returning()
+			.all();
+		const memo = rows[0];
+		if (!memo) throw new Error('failed to create memo');
+		return toMemoResponse(memo);
+	} catch (err) {
+		if (input.id !== undefined && isUniqueConstraintViolation(err)) {
+			const existing = await findOwnMemoById(db, userId, input.id);
+			if (existing) return toMemoResponse(existing);
+			throw new ValidationError('id is already in use');
+		}
+		throw err;
+	}
 }
 
-export type UpdateMemoInput = Partial<CreateMemoInput>;
+export type UpdateMemoInput = Partial<Omit<CreateMemoInput, 'id'>>;
 
-export async function updateMemo(db: Db, userId: string, id: string, input: UpdateMemoInput) {
+export async function updateMemo(
+	db: Db,
+	userId: string,
+	id: string,
+	expectedUpdatedAt: Date,
+	input: UpdateMemoInput
+) {
+	// 存在・所有権・非アーカイブを最初に確認する。バリデーションを先に行うと、
+	// 他人のメモやアーカイブ済みのメモに対する不正な入力が 404 ではなく 400 に
+	// なってしまう（存在確認より前に ValidationError が投げられるため）。
+	const existing = await getMemo(db, userId, id);
+
 	if (input.title !== undefined) assertTitle(input.title);
 	if (input.content !== undefined) assertContent(input.content);
 	if (input.intervalPresetId !== undefined) {
@@ -154,13 +202,31 @@ export async function updateMemo(db: Db, userId: string, id: string, input: Upda
 	if (input.intervalPresetId !== undefined) set.intervalPresetId = input.intervalPresetId;
 
 	if (Object.keys(set).length === 0) {
-		return getMemo(db, userId, id);
+		return existing;
 	}
 
-	const rows = await db.update(memos).set(set).where(ownMemo(userId, id)).returning().all();
+	// 楽観的並行性制御: クライアントが最後に読んだ updatedAt を WHERE 条件に含める。
+	// 別のリクエストが先に更新していれば updatedAt がずれて 0 行ヒットになるため、
+	// 同一フィールドへの同時更新が古い方で新しい方を黙って上書きすることを防ぐ。
+	const rows = await db
+		.update(memos)
+		.set(set)
+		.where(and(ownMemo(userId, id), eq(memos.updatedAt, expectedUpdatedAt)))
+		.returning()
+		.all();
 	const updated = rows[0];
-	if (!updated) throw new NotFoundError('memo not found');
-	return toMemoResponse(updated);
+	if (updated) return toMemoResponse(updated);
+
+	// 0 行だった理由が「そもそも対象が無くなった（同時アーカイブ等）」のか
+	// 「バージョンが古い（同時更新）」のかを区別する。
+	const stillOwned = await db
+		.select({ id: memos.id })
+		.from(memos)
+		.where(ownMemo(userId, id))
+		.limit(1)
+		.all();
+	if (stillOwned.length === 0) throw new NotFoundError('memo not found');
+	throw new ConflictError('memo has been modified since it was last read');
 }
 
 // この関数だけ MemoResponse ではなく DB 行をそのまま返す。archiveMemo の戻り値は
@@ -182,8 +248,10 @@ export async function archiveMemo(db: Db, userId: string, id: string) {
 
 // ValidationError はクライアント自身の入力に関する情報なのでメッセージをそのまま返す。
 // NotFoundError は「存在しない」と「他人のもの」を区別させないため、常に固定文言にする。
+// ConflictError はクライアントに再取得の上でのリトライを促すため 409 にする。
 export function handleMemoError(err: unknown): never {
 	if (err instanceof ValidationError) error(400, err.message);
 	if (err instanceof NotFoundError) error(404, 'Not Found');
+	if (err instanceof ConflictError) error(409, err.message);
 	throw err;
 }

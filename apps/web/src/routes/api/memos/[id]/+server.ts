@@ -16,12 +16,16 @@ export const GET: RequestHandler = async ({ locals, platform, params }) => {
 function parseUpdateMemoBody(body: unknown) {
 	if (typeof body !== 'object' || body === null) return null;
 	const record = body as Record<string, unknown>;
+	if (typeof record.expectedUpdatedAt !== 'string') return null;
+	const expectedUpdatedAt = new Date(record.expectedUpdatedAt);
+	if (Number.isNaN(expectedUpdatedAt.getTime())) return null;
 	if (record.title !== undefined && typeof record.title !== 'string') return null;
 	if (record.content !== undefined && typeof record.content !== 'string') return null;
 	if (record.intervalPresetId !== undefined && typeof record.intervalPresetId !== 'string') {
 		return null;
 	}
 	return {
+		expectedUpdatedAt,
 		title: record.title as string | undefined,
 		content: record.content as string | undefined,
 		intervalPresetId: record.intervalPresetId as string | undefined
@@ -35,11 +39,15 @@ export const PATCH: RequestHandler = async ({ locals, platform, params, request 
 	const rawBody = await request.json().catch(() => null);
 	const body = parseUpdateMemoBody(rawBody);
 	if (!body) {
-		error(400, 'title, content and intervalPresetId, when present, must be strings');
+		error(
+			400,
+			'expectedUpdatedAt (ISO string of the last-known updatedAt) is required; title, content and intervalPresetId, when present, must be strings'
+		);
 	}
 
 	try {
-		const memo = await updateMemo(db, user.id, params.id, body);
+		const { expectedUpdatedAt, ...input } = body;
+		const memo = await updateMemo(db, user.id, params.id, expectedUpdatedAt, input);
 		return json(memo);
 	} catch (err) {
 		handleMemoError(err);
