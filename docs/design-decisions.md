@@ -686,6 +686,39 @@ by this server binary is ...` で起動に失敗することを実測した
   `clamp(0, 1, 100)` が `1` に丸めていた）を発見し、修正した
   （`vitest` の統合テストは `$lib/server/memos.ts` を直接呼ぶため、`+server.ts` の
   クエリパラメータ解析はカバーしておらず、この手動確認がなければ埋没していた）
+- **レビュー（4観点並列）で見つかった不備を差し戻して修正した**:
+  - `updateMemo` が `getMemo` で読んだ既存値を使って毎回3カラムまとめて書き戻す
+    read-modify-write だったため、異なるフィールドを狙った同時 PATCH が互いの
+    変更を古い値で上書きしうるロストアップデートがあった。指定された
+    フィールドだけを `SET` する形に変え、`vitest-pool-workers` で
+    `Promise.all` による同時 PATCH のテストを追加した
+  - クエリパラメータの `limit`/`offset` が非数値チェック（`Number.isNaN`）
+    のみで、小数（`limit=2.5`）や指数表記（`1e21`）を渡すと D1 の
+    `LIMIT`/`OFFSET` に渡した時点で `SQLITE_MISMATCH` により 500 になることを
+    実測した。`$lib/server/pagination.ts` の `parsePaginationParam` で
+    非負整数のみを正規表現で受理し、不正な値は 400 にする形に変更した
+    （空文字を `undefined` ではなく `0` として通してしまう不具合も同時に解消）
+  - `content-type` の完全一致比較が `application/json; charset=utf-8` を
+    弾いていたため、先頭のメディアタイプのみを比較するように変更した
+  - `listMemos` の並び順が `createdAt`（ミリ秒精度）のみで、同一ミリ秒の
+    行が複数あるとページ間で順序が不安定になり得た。`id` を tie-breaker に
+    追加した
+  - レスポンスが DB の行をそのまま返しており、非アーカイブの memo にしか
+    到達しないため常に `null` にしかならない `archivedAt` が漏れていた。
+    `MemoResponse` として明示的に必要なフィールドだけ返すようにした
+    （#15 でカラムが増えても自動でレスポンスに混入しないようにする狙いもある）
+  - `locals.user`/`platform.env.DB` のチェックとエラー→HTTPマッピングが
+    5つのハンドラに複製されていたため、`$lib/server/api.ts` の
+    `requireAuthedDb`/`handleMemoError`/`requireJsonContentType` に共通化した
+  - **`+server.ts` から HTTP ハンドラ以外の named export（`parsePaginationParam`）
+    をテスト用に追加したところ、`pnpm build` が
+    `Invalid export 'parsePaginationParam' in /api/memos` で失敗した**。
+    SvelteKit は `+server.ts` から `GET`/`POST`/... 等の決まった名前以外の
+    export を許可しない（ビルド後の静的解析で検証される）。`svelte-check`・
+    `vitest`・`eslint` はいずれもこの制約を検知せず `pnpm build` でのみ
+    顕在化したため、`parsePaginationParam` を `$lib/server/pagination.ts`
+    に切り出した。**「型検査・lint・テストが全部通っても `pnpm build` は
+    別に流す必要がある」ことを再確認した一件**
 
 ## 開発の進め方
 
