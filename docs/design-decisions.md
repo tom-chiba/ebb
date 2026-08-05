@@ -612,6 +612,81 @@ google is missing clientId or clientSecret` の warning のみで両ページと
   署名付き Cookie をブラウザにセットすることでログイン済み状態を再現した
   （実際の Google OAuth を経由しない）。検証後は insert した行を削除した
 
+## メモの CRUD API (#13)
+
+- **form actions ではなく `+server.ts` の JSON API にした**（`/api/memos`、
+  `/api/memos/[id]`）。Issue タイトルが「CRUD API」であること、UI（#14）が
+  form actions 前提の設計をまだ決めていないこと、認可・バリデーション・クエリを
+  `$lib/server/memos.ts` に切り出せば #14 が form actions を被せたくなっても
+  この層は無変更で済むことから採用した
+- **`intervalPresetId` は作成・更新時の必須入力にした**。`interval_presets` の
+  システム標準プリセットの実データ投入（seed）は #15 のスコープであり、この Issue の
+  時点では1件も存在しない（`docs/schema.md` に明記済み）。作成 API は
+  `intervalPresetId` を必須で受け取り、`interval_presets` に対して
+  「自分の custom プリセット、またはシステム標準プリセット（`user_id IS NULL`）」で
+  存在するかを事前チェックし、無ければ 400 を返す（DB 側のテナント分離トリガー
+  `0004_memos_interval_preset_owner_trigger.sql` の `RAISE(ABORT, ...)` を
+  生の 500 としてクライアントに漏らさないため）。#15 でシステム標準プリセットが
+  seed されたら、クライアント側で「未指定なら標準プリセットを使う」ような
+  デフォルト値の付与を検討できる
+- **削除は論理削除**（`memos.archived_at` を立てる）。物理削除にしなかった理由は
+  スキーマに既に `archived_at` カラムが用意されているため。**アーカイブ済みの
+  メモへの GET / PATCH / 再 DELETE はすべて 404** にした（一覧からも除外する）。
+  「アーカイブ済みかどうか」を区別して見せる UI・API（復元機能等）は本 Issue の
+  スコープ外
+- **他ユーザーのメモ ID を指定した場合は 404 に統一**（403 は使わない）。存在の有無を
+  レスポンスの違いから推測できないようにするため
+- **title は200文字、content は50,000文字を上限**にした（`apps/web/src/lib/server/memos.ts`
+  の `TITLE_MAX_LENGTH`/`CONTENT_MAX_LENGTH`）。仕様・DB スキーマのどこにも具体値の
+  指定がないため決め打ちした値であり、#14 が同じ上限を UI 側のバリデーションに
+  使う場合はこの値を参照すること
+- **バリデーションロジックは `packages/core` ではなく `apps/web/src/lib/server/memos.ts`
+  に置いた**。`packages/core` は #15/#16 が `nextReviewAt` 等の計算ロジックと
+  あわせてプリセット値そのものの置き場所を決める Issue であり、#13 が先に
+  住人を増やすと #14/#15 の設計判断を縛ってしまうため、あえて `apps/web` 側に
+  留めた
+- **`packages/db/src/index.ts` に `eq`/`and`/`or`/`isNull`/`desc` を re-export
+  追加した**。既存の `count` の re-export と同じ理由（「依存の向きは
+  `apps/* → packages/*` のみ」を保つため、`apps/web` に `drizzle-orm` を
+  直接の依存として足さない）
+- **`apps/web` に `vitest` + `@cloudflare/vitest-pool-workers` を導入した**
+  （このリポジトリ初）。受け入れ条件が「統合テストで検証している」ことを求めており、
+  実 D1（miniflare）に対するテストが必要だったため。`packages/db` の migrations を
+  `readD1Migrations`/`applyD1Migrations`（setup file）で適用し、`$lib/server/memos.ts`
+  の関数を直接呼ぶ形にした（`+server.ts` は認可チェック + 関数呼び出し + JSON化 だけの
+  薄いアダプタにし、HTTP 経由でのテストは行っていない）
+  - `@cloudflare/vitest-pool-workers` は `minimumReleaseAge`（7日）に収まる
+    `0.18.8` に固定した（`^0.18.8` は npm semver のルール上パッチ更新のみを許容
+    するため、より新しい 0.19.x/0.20.x へは上がらない）
+  - **`apps/web/wrangler.test.jsonc` を本番の `wrangler.jsonc` とは別ファイルにした**。
+    本番設定の `main` はビルド成果物（`.svelte-kit/cloudflare/_worker.js`）を
+    指しており、`pnpm build` を経ないと存在しないため、テストではそもそも `main`
+    を持たない（D1 バインディングのみの）最小構成にした
+  - **`compatibility_date` は本番設定と独立して `2026-07-29` に固定した**。
+    `@cloudflare/vitest-pool-workers@0.18.8` が内部に同梱する
+    `miniflare@4.20260722.0`/`workerd` バイナリがサポートする最新の日付がこれで、
+    本番設定の日付（`2026-08-03`）をそのまま使うと
+    `This Worker requires compatibility date ... but the newest date supported
+by this server binary is ...` で起動に失敗することを実測した
+  - `apps/web/test/env.d.ts` で `TEST_MIGRATIONS` を `Cloudflare.Env`（global）に
+    型として追加している。**`declare global { namespace Cloudflare { ... } }` で
+    包む必要がある**点に注意（ファイルが `import type` を持つ ES module である
+    ため、`declare namespace` を素で書くとローカルスコープの宣言になり global の
+    `Cloudflare.Env` にマージされない。最初これで `svelte-check` が
+    `Property 'TEST_MIGRATIONS' does not exist` を出し、修正した）
+- **検証は「コード起点 + 手動の実地確認」に限定した**（#10/#11 と同じ方針）。
+  統合テスト（vitest-pool-workers、20 tests）で `$lib/server/memos.ts` の
+  5操作・バリデーション・テナント分離・アーカイブ後 404・トリガーの存在を確認した上で、
+  UI が存在しない（#14 未着手）ため playwright-cli ではなく `pnpm dev` +
+  手動署名 Cookie（#11 と同じ手法で `user`/`session`/`interval_presets`/`memos`
+  行をローカル D1 に直接 insert）で実際の HTTP 経由の動作を curl で確認した
+  （認証・404・400・204 のステータスコードを含む）。検証後は insert した行を削除した。
+  この手動確認で **GET `/api/memos` のクエリパラメータ未指定時に `limit` が
+  既定値 20 ではなく 1 になるバグ**（`Number(null)` が `NaN` ではなく `0` を返し、
+  `clamp(0, 1, 100)` が `1` に丸めていた）を発見し、修正した
+  （`vitest` の統合テストは `$lib/server/memos.ts` を直接呼ぶため、`+server.ts` の
+  クエリパラメータ解析はカバーしておらず、この手動確認がなければ埋没していた）
+
 ## 開発の進め方
 
 - リポジトリ: public
