@@ -1,3 +1,4 @@
+import { isHttpError } from '@sveltejs/kit';
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createDb, eq, intervalPresets, memos, user, type Db } from '@ebb/db';
@@ -6,12 +7,23 @@ import {
 	CONTENT_MAX_LENGTH,
 	createMemo,
 	getMemo,
+	handleMemoError,
 	listMemos,
 	NotFoundError,
 	TITLE_MAX_LENGTH,
 	updateMemo,
 	ValidationError
 } from './memos';
+
+function statusOf(fn: () => unknown): number {
+	try {
+		fn();
+	} catch (err) {
+		if (isHttpError(err)) return err.status;
+		throw err;
+	}
+	throw new Error('expected fn to throw');
+}
 
 let db: Db;
 let ownerId: string;
@@ -343,8 +355,13 @@ describe('updateMemo', () => {
 			content: 'content',
 			intervalPresetId: ownerPresetId
 		});
+		// updatedAt はミリ秒精度で、create と update が同一ミリ秒内に完了しうるため、
+		// 明確に過去の固定値へ書き換えてから比較し、厳密な不等号で検証を意味あるものにする。
+		const pastUpdatedAt = new Date(memo.updatedAt.getTime() - 60_000);
+		await db.update(memos).set({ updatedAt: pastUpdatedAt }).where(eq(memos.id, memo.id));
+
 		const updated = await updateMemo(db, ownerId, memo.id, { title: 'new title' });
-		expect(updated.updatedAt.getTime()).toBeGreaterThanOrEqual(memo.updatedAt.getTime());
+		expect(updated.updatedAt.getTime()).toBeGreaterThan(pastUpdatedAt.getTime());
 	});
 
 	it('returns the current memo unchanged for a no-op update (empty body)', async () => {
@@ -435,5 +452,26 @@ describe('archiveMemo', () => {
 		});
 		await archiveMemo(db, ownerId, memo.id);
 		await expect(archiveMemo(db, ownerId, memo.id)).rejects.toThrow(NotFoundError);
+	});
+});
+
+describe('handleMemoError', () => {
+	it('maps ValidationError to 400 and passes its message through', () => {
+		try {
+			handleMemoError(new ValidationError('title is required'));
+			expect.unreachable();
+		} catch (err) {
+			expect(isHttpError(err) && err.status).toBe(400);
+			expect(isHttpError(err) && err.body.message).toBe('title is required');
+		}
+	});
+
+	it('maps NotFoundError to a 404 with a fixed message (no detail leaked)', () => {
+		expect(statusOf(() => handleMemoError(new NotFoundError('memo abc123 not found')))).toBe(404);
+	});
+
+	it('rethrows anything else unchanged', () => {
+		const original = new Error('unexpected');
+		expect(() => handleMemoError(original)).toThrow(original);
 	});
 });

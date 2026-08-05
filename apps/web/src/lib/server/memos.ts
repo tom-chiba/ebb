@@ -163,6 +163,9 @@ export async function updateMemo(db: Db, userId: string, id: string, input: Upda
 	return toMemoResponse(updated);
 }
 
+// この関数だけ MemoResponse ではなく DB 行をそのまま返す。archiveMemo の戻り値は
+// HTTP レイヤー（DELETE は 204 を返すのみ）では使われず、archivedAt が実際に
+// セットされたことをテストから直接確認するための内部用途にとどまるため。
 export async function archiveMemo(db: Db, userId: string, id: string) {
 	await getMemo(db, userId, id);
 
