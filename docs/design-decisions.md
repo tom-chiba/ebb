@@ -523,17 +523,18 @@ google is missing clientId or clientSecret` の warning のみで両ページと
     （利用不可にはなるが、黒塗りセッションを本番で握るよりは安全という判断）
 - **Step 5 の検証は「コード起点」に限定した**（実際の Google アカウントでの同意画面通過は未検証、
   ユーザー判断）。確認したのは (1) `/api/auth/sign-in/social` が `accounts.google.com` への
-  正しい `client_id`/`redirect_uri` を含む URL を返すこと、(2) `hooks.server.ts` が
-  `locals.user`/`locals.session` を解決するコードパス自体が型検査・実装レベルで正しいこと、
-  (3) `drizzleAdapter` によるスキーマ解決と D1 への実書き込みが機能すること —
-  ダミー Client ID でのサインイン試行時に `verification` テーブルへ実際に
-  `callbackURL`/`codeVerifier`/`oauthState` を含む行が insert されることをローカル D1
-  （`wrangler d1 execute ebb --local`）で確認し、確認後に削除した。これにより
+  正しい `client_id` を含む URL を返すこと（ダミーの Client ID で検証。Google 側が
+  `invalid_client` で即エラーになるため、`redirect_uri` の値そのものは未確認）、
+  (2) `hooks.server.ts` が `locals.user`/`locals.session` を解決するコードパス自体が
+  型検査・実装レベルで正しいこと、(3) `drizzleAdapter` によるスキーマ解決と D1 への
+  実書き込みが機能すること — ダミー Client ID でのサインイン試行時に `verification`
+  テーブルへ実際に `callbackURL`/`codeVerifier`/`oauthState` を含む行が insert されることを
+  ローカル D1（`wrangler d1 execute ebb --local`）で確認し、確認後に削除した。これにより
   `db._.fullSchema` 経由のテーブル解決・カラムマッピング（`timestamp_ms` 等）が
-  実際に機能することまでは実証済み。同意画面以降の完了、ログアウト後の Cookie 削除、
-  リロード後のセッション維持の**実機確認**はユーザーが Google Cloud Console でクライアントを
-  作成した後に `/debug/auth`（dev 限定ページ、既存の `/debug/push` `/debug/d1` と同じパターン）
-  で行う
+  実際に機能することまでは実証済み。`redirect_uri` の一致確認、同意画面以降の完了、
+  ログアウト後の Cookie 削除、リロード後のセッション維持の**実機確認**はユーザーが
+  Google Cloud Console でクライアントを作成した後に `/debug/auth`（dev 限定ページ、
+  既存の `/debug/push` `/debug/d1` と同じパターン）で行う
 - **`pnpm-workspace.yaml` に `semver@6.3.1` を `trustPolicyExclude` へ追加した**。
   `@better-auth/cli` 経由で入る依存で、pnpm の `no-downgrade` チェックが無関係な
   `semver@7.x` 系（provenance あり）の公開日時と比較して誤検知する既知の false positive
