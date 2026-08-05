@@ -9,6 +9,9 @@ import type { D1Database } from '@cloudflare/workers-types';
 //
 // `socialProviders`/`plugins` は生成されるテーブル・カラムに影響しない（Google OAuth は
 // 追加フィールドを持たないため）ので、ここには含めない。
+// `rateLimit` の `storage: 'database'` は `rateLimit` テーブルを生成するため、実行時の
+// 設定（apps/web/src/lib/server/auth.ts）と一致させる必要がある。
 export const auth = betterAuth({
-	database: drizzleAdapter(drizzle({} as D1Database), { provider: 'sqlite' })
+	database: drizzleAdapter(drizzle({} as D1Database), { provider: 'sqlite' }),
+	rateLimit: { enabled: true, storage: 'database' }
 });
