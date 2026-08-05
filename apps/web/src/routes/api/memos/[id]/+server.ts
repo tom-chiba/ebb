@@ -1,25 +1,15 @@
 import { error, json } from '@sveltejs/kit';
-import { createDb } from '@ebb/db';
-import {
-	archiveMemo,
-	getMemo,
-	NotFoundError,
-	updateMemo,
-	ValidationError
-} from '$lib/server/memos';
+import { handleMemoError, requireAuthedDb, requireJsonContentType } from '$lib/server/api';
+import { archiveMemo, getMemo, updateMemo } from '$lib/server/memos';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async ({ locals, platform, params }) => {
-	if (!locals.user) error(401, 'Unauthorized');
-	if (!platform?.env.DB) error(500, 'platform.env.DB is not available');
-
-	const db = createDb(platform.env.DB);
+	const { user, db } = requireAuthedDb({ locals, platform });
 	try {
-		const memo = await getMemo(db, locals.user.id, params.id);
+		const memo = await getMemo(db, user.id, params.id);
 		return json(memo);
 	} catch (err) {
-		if (err instanceof NotFoundError) error(404, 'Not Found');
-		throw err;
+		handleMemoError(err);
 	}
 };
 
@@ -39,11 +29,8 @@ function parseUpdateMemoBody(body: unknown) {
 }
 
 export const PATCH: RequestHandler = async ({ locals, platform, params, request }) => {
-	if (!locals.user) error(401, 'Unauthorized');
-	if (!platform?.env.DB) error(500, 'platform.env.DB is not available');
-	if (request.headers.get('content-type') !== 'application/json') {
-		error(400, 'content-type must be application/json');
-	}
+	const { user, db } = requireAuthedDb({ locals, platform });
+	requireJsonContentType(request);
 
 	const rawBody = await request.json().catch(() => null);
 	const body = parseUpdateMemoBody(rawBody);
@@ -51,27 +38,20 @@ export const PATCH: RequestHandler = async ({ locals, platform, params, request 
 		error(400, 'title, content and intervalPresetId, when present, must be strings');
 	}
 
-	const db = createDb(platform.env.DB);
 	try {
-		const memo = await updateMemo(db, locals.user.id, params.id, body);
+		const memo = await updateMemo(db, user.id, params.id, body);
 		return json(memo);
 	} catch (err) {
-		if (err instanceof ValidationError) error(400, err.message);
-		if (err instanceof NotFoundError) error(404, 'Not Found');
-		throw err;
+		handleMemoError(err);
 	}
 };
 
 export const DELETE: RequestHandler = async ({ locals, platform, params }) => {
-	if (!locals.user) error(401, 'Unauthorized');
-	if (!platform?.env.DB) error(500, 'platform.env.DB is not available');
-
-	const db = createDb(platform.env.DB);
+	const { user, db } = requireAuthedDb({ locals, platform });
 	try {
-		await archiveMemo(db, locals.user.id, params.id);
+		await archiveMemo(db, user.id, params.id);
 		return new Response(null, { status: 204 });
 	} catch (err) {
-		if (err instanceof NotFoundError) error(404, 'Not Found');
-		throw err;
+		handleMemoError(err);
 	}
 };

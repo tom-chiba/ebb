@@ -7,6 +7,11 @@ export default defineConfig(async () => {
 	const migrations = await readD1Migrations(migrationsPath);
 
 	return defineProject({
+		resolve: {
+			// $lib は SvelteKit の vite プラグイン経由でしか解決されないため、
+			// このテスト専用の vite 設定では明示的にエイリアスする。
+			alias: { $lib: path.join(import.meta.dirname, 'src/lib') }
+		},
 		plugins: [
 			cloudflareTest({
 				wrangler: {
