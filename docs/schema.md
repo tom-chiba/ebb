@@ -61,8 +61,8 @@ erDiagram
 
 復習間隔のプリセット。`user_id` が `NULL` の行は**システム標準プリセット**（短期集中 /
 標準 / 長期）、値が入っている行はユーザーのカスタムプリセット。`intervals` は
-時間単位の間隔配列（例 `[1, 6, 24, 72]`）を JSON で持つ（`text(..., { mode: 'json' })`
-+ `$type<number[]>()`）。
+時間単位の間隔配列（例 `[1, 6, 24, 72]`）を JSON で持つ
+（`text(..., { mode: 'json' }).$type<number[]>()`）。
 
 **システム標準プリセットの実データ投入（seed）はこの Issue のスコープ外にした。**
 `interval_presets` に `user_id: null` の行を用意するテーブル形状の定義までがこの
@@ -87,14 +87,22 @@ production）ごとに `id` がずれ、アプリ側が「標準プリセット�
 張らない。`reviews_memoId_idx` と同じ理由だが、こちらは `no action` であり
 カスケード削除の効率化ではない点に注意）。
 
-**DB 層では強制できない不変条件**: `memos.interval_preset_id` は「同じユーザーの
+**テナント分離はトリガーで強制する**: `memos.interval_preset_id` は「同じユーザーの
 カスタムプリセット、またはシステム標準プリセット（`interval_presets.user_id IS NULL`）」
-のみを指すべきだが、SQLite/D1 の単純な FK では他テーブルの別カラムをまたいだ
-整合性チェック（複合 FK 相当）ができない。他ユーザーの custom プリセットを
-参照する行が作れてしまうため、**#16（メモ作成）と #18（プリセット選択 UI）は
-アプリ層で `intervalPresets.userId === memos.userId OR intervalPresets.userId IS NULL`
-を検証すること**。この検証を怠ると、参照先プリセットの所有者を削除しようとした際に
-`no action` の FK 違反でユーザー削除自体が失敗する不具合につながる。
+のみを指すべきだが、FK は「参照先が存在するか」しか見ないため、他ユーザーの custom
+プリセットを参照する行も FK 上は素通りしてしまう（複合 FK 相当のチェックが必要）。
+最初は「アプリ層で検証すること」という申し送りのみにしていたが、レビューで
+「アプリ層に倒すと、書き漏らし・リトライ・メンテナンスクエリなど、あらゆる書き込み
+経路で bypass されうる」と指摘され、`memos` への `BEFORE INSERT` / `BEFORE UPDATE
+OF interval_preset_id, user_id` トリガー（`0004_memos_interval_preset_owner_trigger.sql`）
+で DB 層に強制するよう変更した。トリガーは
+`interval_presets.user_id IS NULL OR interval_presets.user_id = NEW.user_id`
+を満たさない行の INSERT/UPDATE を `RAISE(ABORT, ...)` で拒否する。同一ユーザーの
+参照・システムプリセットの参照・他ユーザーの参照拒否・UPDATE 経由での拒否の
+4パターンを実機（ローカル D1）で確認済み（後述）。
+`interval_presets.user_id`（プリセットの所有者）を後から付け替える操作は現時点で
+どの Issue にも存在しないため、そちらのトリガーは追加していない（#18 で
+プリセットの譲渡のような機能を追加する場合は改めて検討すること）。
 
 ### `reviews`
 
@@ -144,8 +152,21 @@ in-place で編集する**場合（#18 のプリセット編集 UI）も同様�
 
 `(scheduled_at, completed_at)` に複合インデックスを追加した。#12 Issue 本文が
 明示的に要求している唯一のインデックス（scheduler が毎分「期限到来かつ未完了」を
-検索するため）。ローカル D1 に投入し `EXPLAIN QUERY PLAN` で実際にこのインデックスが
-使われることを確認済み（後述）。
+検索するため）。
+
+**この複合インデックスだけでは完了済み行の蓄積でスキャンが劣化する**（レビューで
+指摘）。`scheduled_at` が先頭の範囲条件のため、後続の `completed_at` では絞り込めず、
+`notified_at` はインデックスに含まれてすらいない。完了済み `reviews` は削除されず
+履歴として残り続ける方針（このドキュメントのどこにも「削除する」とは書いていない）
+のため、時間が経つほど scheduler のクエリはこのインデックス上で完了済み行を
+読み飛ばす量が増えていく。対策として `reviews_pending_scheduledAt_idx`
+（`scheduled_at` に対する部分インデックス、`WHERE completed_at IS NULL AND
+notified_at IS NULL`）を追加した。未完了・未通知の行だけを持つため、完了済み履歴の
+量に関係なく件数が一定に保たれる。scheduler の実クエリ（後述）がこちらの部分
+インデックスを使うことを `EXPLAIN QUERY PLAN` で確認済み。
+`(scheduled_at, completed_at)` の複合インデックス自体は #12 Issue 本文の明示的な
+要求のため残しており、完了済みも含めた履歴の時系列クエリ（復習履歴一覧、#17）
+などで使われる想定。
 
 `memo_id` 単体にも索引を追加（`reviews_memoId_idx`）。SQLite は FK に自動で索引を
 張らないため、`ON DELETE CASCADE` によるカスケード削除の効率と、#17 の「1メモの
@@ -234,16 +255,24 @@ relational query は使えず、`db.select().from(memos).where(eq(memos.userId, 
 ## 検証結果
 
 - `pnpm db:generate`: `ping` の削除と新規4テーブルの追加を1つの diff で行うと
-  drizzle-kit が「rename か」を対話式で確認しようとし非対話シェルで失敗したため、
-  削除のみ・追加のみの2段階（`0003_steep_mimic.sql` / `0004_thick_wendell_rand.sql`）
-  に分けて生成した
-- `0003_steep_mimic.sql` の `DROP TABLE `ping`;` は `DROP TABLE IF EXISTS `ping`;`
-  に変更した。`ping` は #4 で本番にも適用済みの前提だが、本番の適用状態をこの
-  セッションから確認する手段がない（後述）ため、万一 `ping` が存在しない環境で
-  このマイグレーションバッチが失敗しないよう防御的にした
+  drizzle-kit が「rename か」を対話式で確認しようとし非対話シェルで失敗する。
+  当初は削除のみ・追加のみの2段階に分けて生成したが、レビューで「deploy
+  ワークフローは migrate → deploy の順で実行するため、`ping` を DROP すると
+  旧バージョンの scheduler/debug ページ（まだ `ping` を参照している）が、
+  自身の deploy が完了するまでの間 `no such table: ping` で壊れる」と指摘された
+  （`docs/design-decisions.md` の #7 節が明記する「破壊的マイグレーションは
+  この順序前提を崩す」に該当）。**`ping` の DROP はこの PR に含めず、
+  `packages/db/src/schema.ts` に `ping` のテーブル定義を残したまま新規4テーブルの
+  追加だけを行う `0003_purple_hemingway.sql` を生成し直した**。`ping` は
+  デプロイが完了し旧バージョンを参照するコードが無くなったことを確認できた
+  後続 PR で改めて DROP する
+- `0004_memos_interval_preset_owner_trigger.sql`（`drizzle-kit generate --custom`
+  で作成、テナント分離のトリガー）と `0005_dear_reptil.sql`（`reviews` の
+  部分インデックス）を追加で生成した
 - `pnpm db:migrate:local`: ローカル D1 の状態を一度削除してゼロから
   `apps/web` と `apps/scheduler` の両方に適用できることを確認
-  （別インスタンス、`docs/design-decisions.md` の #5 節を参照）
+  （別インスタンス、`docs/design-decisions.md` の #5 節を参照）。トリガー・
+  部分インデックスを含む全マイグレーションの適用後に以下を再検証した
 - FK カスケードが実際に有効（`PRAGMA foreign_keys` = 1）であることをローカルで確認。
   **本番 D1 でも同様に有効かは未確認**（この設定はランタイム既定値に依存し、
   ローカルの miniflare と本番 workerd で挙動が異なる可能性を排除できていない）
@@ -257,17 +286,32 @@ relational query は使えず、`db.select().from(memos).where(eq(memos.userId, 
   （ユーザー・プリセット・メモ・レビューを1件ずつ挿入した状態からの削除）
 - `reviews (memo_id, step)` の unique 制約が重複 INSERT を実際に拒否することを確認
   （`UNIQUE constraint failed: reviews.memo_id, reviews.step`）
-- `EXPLAIN QUERY PLAN SELECT * FROM reviews WHERE scheduled_at <= ? AND completed_at
-  IS NULL AND notified_at IS NULL ORDER BY scheduled_at LIMIT 20` が
-  `SEARCH reviews USING INDEX reviews_scheduledAt_completedAt_idx` を使うことを確認。
-  先頭カラム `scheduled_at` が範囲条件のため `completed_at` 自体では絞り込めないが、
-  全件走査にはならず `ORDER BY` も追加の SORT なしで満たされる。将来 #21 実装後、
-  完了済み行の蓄積でこの走査が無視できないコストになるようなら、
-  `.where(sql`completed_at IS NULL AND notified_at IS NULL`)` による部分インデックス
-  の追加を検討する（drizzle-orm の sqlite-core が対応済みであることは確認済み、
-  実測に基づく必要が生じるまでは追加しない）
+- **テナント分離トリガーの実機確認**（2ユーザー・2プリセットを用意し、それぞれ
+  独立したステートメントで検証。同一コマンド内の複数 INSERT は1トランザクションとして
+  一括ロールバックされるため、成功/失敗のケースは分けて実行する必要があった）:
+  - 自分のカスタムプリセットを参照する INSERT → 成功
+  - システム標準プリセット（`user_id IS NULL`）を参照する INSERT → 成功
+  - 他ユーザーのカスタムプリセットを参照する INSERT →
+    `memos.interval_preset_id must reference a system preset or a preset owned
+by the same user: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)`
+    で拒否
+  - 既存行の `interval_preset_id` を他ユーザーのプリセットに UPDATE → 同様に拒否
+    （`BEFORE UPDATE OF interval_preset_id, user_id` トリガーが対象。これが無いと
+    UPDATE 経由の書き換えは INSERT 用トリガーをすり抜けることも合わせて実機確認した）
+- **部分インデックスの実機確認**: `EXPLAIN QUERY PLAN SELECT * FROM reviews WHERE
+scheduled_at <= ? AND completed_at IS NULL AND notified_at IS NULL ORDER BY
+scheduled_at LIMIT 20` が `SEARCH reviews USING INDEX
+reviews_pending_scheduledAt_idx` を使うことを確認（旧 `EXPLAIN QUERY PLAN` は
+  `reviews_scheduledAt_completedAt_idx` を使っていたが、部分インデックス追加後は
+  こちらが選ばれるようになった）。未完了・未通知の行のみを持つインデックスのため、
+  完了済み履歴が増えてもスキャン対象は増えない
+- `pnpm format:check` / `pnpm lint`: 当初 `docs/schema.md` とマイグレーションの
+  `meta/*.json` が未フォーマットで CI の必須チェックに失敗する状態だった
+  （レビュー指摘）。`pnpm format` で解消し、`format:check` が通ることを確認した
 - `pnpm check`（ルート）: 0 errors
 - `pnpm db:migrate:remote`: このサンドボックスに `CLOUDFLARE_API_TOKEN` が無いため
   未実行（`docs/design-decisions.md` の #7 節どおり、本番適用は deploy ワークフロー
   が担当する）。したがって「マイグレーションが本番にも適用できる」という受け入れ条件は
-  **未検証**。上記の `IF EXISTS` は、この未検証性が残ることへの防御的な対応
+  **未検証**。`ping` を DROP しない方針にしたことで、この PR のマイグレーションは
+  純粋に追加的（後方互換）になっており、`docs/design-decisions.md` #7 節が前提とする
+  migrate-then-deploy の順序を崩さない

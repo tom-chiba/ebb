@@ -1,0 +1,1 @@
+CREATE INDEX `reviews_pending_scheduledAt_idx` ON `reviews` (`scheduled_at`) WHERE "reviews"."completed_at" is null and "reviews"."notified_at" is null;

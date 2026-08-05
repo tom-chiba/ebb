@@ -1,8 +1,8 @@
 {
 	"version": "6",
 	"dialect": "sqlite",
-	"id": "bf33372c-5ec1-4d0d-98fc-fc280f0d2a97",
-	"prevId": "96cf308e-3f61-4a0c-a94d-94e79b995536",
+	"id": "834e1e0d-ed76-4e21-b9d4-cdafa3ab87f5",
+	"prevId": "1ef67852-9004-4f02-9c80-4f7839991010",
 	"tables": {
 		"interval_presets": {
 			"name": "interval_presets",
@@ -317,6 +317,12 @@
 					"name": "reviews_scheduledAt_completedAt_idx",
 					"columns": ["scheduled_at", "completed_at"],
 					"isUnique": false
+				},
+				"reviews_pending_scheduledAt_idx": {
+					"name": "reviews_pending_scheduledAt_idx",
+					"columns": ["scheduled_at"],
+					"isUnique": false,
+					"where": "\"reviews\".\"completed_at\" is null and \"reviews\".\"notified_at\" is null"
 				},
 				"reviews_memoId_step_unique": {
 					"name": "reviews_memoId_step_unique",
