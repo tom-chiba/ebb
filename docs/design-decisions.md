@@ -541,6 +541,23 @@ google is missing clientId or clientSecret` の warning のみで両ページと
   （`pnpm/pnpm` discussion #11084 で同事象が報告されている。乗っ取りではないことを確認済み）
   - 同時に `@prisma/client` / `better-sqlite3`（`@better-auth/cli` が依存する、使用しない
     アダプター向けのビルドスクリプト）を `allowBuilds` で `false` にした
+- **`rateLimit` を明示的に有効化した**（Codex によるレビューで指摘）。既定は
+  `enabled ?? isProduction`（`NODE_ENV === 'production'` 判定）だが、Workers はそれを
+  自動で立てないため実質無効になっていた。既定の in-memory storage は Workers の
+  isolate ごとに独立しカウントが共有されないため `storage: 'database'` にし、
+  `rateLimit` テーブルを D1 に持たせた（`auth-cli-config.ts` にも同じ設定を追加して
+  スキーマ生成に反映している）。`/sign-in/social` は `verification` テーブルへの insert を
+  伴うため `customRules` で既定より厳しく絞った（60秒あたり10回）。ローカルで
+  `/api/auth/sign-in/social` に11回連続でリクエストし、11回目から `429` が返ることと
+  `rate_limit` テーブルに実際に行が作られることを実測確認済み
+- **deploy ワークフローに `wrangler secret list` で必須 secret の有無を確認するステップを
+  追加した**（Codex によるレビューで指摘）。`BETTER_AUTH_SECRET` 未設定だとサイト全体が
+  500 になる（このファイルの secret の登録の項）ため、`wrangler secret put` を merge 前に
+  実行し忘れた場合に自動デプロイでそのまま本番へ出てしまう問題を防ぐ。値は出力せず
+  名前の有無だけを見る。**このステップ自体は実際の Cloudflare 環境に対しては未実行**
+  （サンドボックスから Cloudflare の API に到達できないため）。コマンド構文が実際に
+  パースされること（ネットワークエラーで止まり、構文エラーでは止まらないこと）と、
+  `jq` によるパース・不足検出ロジックをモックの JSON で確認したのみ
 
 ## 開発の進め方
 
