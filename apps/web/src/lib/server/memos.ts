@@ -1,3 +1,4 @@
+import { error } from '@sveltejs/kit';
 import { and, count, desc, eq, isNull, or, intervalPresets, memos, type Db } from '@ebb/db';
 
 export const TITLE_MAX_LENGTH = 200;
@@ -16,6 +17,8 @@ interface ListOptions {
 
 // archivedAt は「一覧・取得できる memo は常に非アーカイブ」という不変条件により
 // 公開 API 上は常に null にしかならないため、レスポンスから落とす。
+// createdAt/updatedAt は JSON 化前の中間表現としての型で、`+server.ts` の
+// json() でシリアライズされた後の実際のワイヤ上の値は ISO 文字列になる。
 export interface MemoResponse {
 	id: string;
 	userId: string;
@@ -172,4 +175,12 @@ export async function archiveMemo(db: Db, userId: string, id: string) {
 	const archived = rows[0];
 	if (!archived) throw new NotFoundError('memo not found');
 	return archived;
+}
+
+// ValidationError はクライアント自身の入力に関する情報なのでメッセージをそのまま返す。
+// NotFoundError は「存在しない」と「他人のもの」を区別させないため、常に固定文言にする。
+export function handleMemoError(err: unknown): never {
+	if (err instanceof ValidationError) error(400, err.message);
+	if (err instanceof NotFoundError) error(404, 'Not Found');
+	throw err;
 }

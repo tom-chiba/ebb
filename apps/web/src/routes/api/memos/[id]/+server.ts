@@ -1,6 +1,6 @@
 import { error, json } from '@sveltejs/kit';
-import { handleMemoError, requireAuthedDb, requireJsonContentType } from '$lib/server/api';
-import { archiveMemo, getMemo, updateMemo } from '$lib/server/memos';
+import { requireAuthedDb, requireJsonContentType } from '$lib/server/api';
+import { archiveMemo, getMemo, handleMemoError, updateMemo } from '$lib/server/memos';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async ({ locals, platform, params }) => {

@@ -337,6 +337,45 @@ describe('updateMemo', () => {
 		expect(final.content).toBe('new content');
 	});
 
+	it('bumps updatedAt when a field actually changes', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		const updated = await updateMemo(db, ownerId, memo.id, { title: 'new title' });
+		expect(updated.updatedAt.getTime()).toBeGreaterThanOrEqual(memo.updatedAt.getTime());
+	});
+
+	it('returns the current memo unchanged for a no-op update (empty body)', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		const result = await updateMemo(db, ownerId, memo.id, {});
+		expect(result).toEqual(memo);
+	});
+
+	it('throws NotFoundError for a no-op update on another user memo', async () => {
+		const memo = await createMemo(db, otherUserId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: otherUserPresetId
+		});
+		await expect(updateMemo(db, ownerId, memo.id, {})).rejects.toThrow(NotFoundError);
+	});
+
+	it('throws NotFoundError for a no-op update on an archived memo', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		await archiveMemo(db, ownerId, memo.id);
+		await expect(updateMemo(db, ownerId, memo.id, {})).rejects.toThrow(NotFoundError);
+	});
+
 	it('rejects switching to a preset owned by another user', async () => {
 		const memo = await createMemo(db, ownerId, {
 			title: 'title',
