@@ -2,6 +2,21 @@
 
 D1 用の Drizzle スキーマとマイグレーション。
 
+## Better Auth スキーマの生成
+
+`user` / `session` / `account` / `verification` テーブル（`src/auth-schema.ts`）は
+手書きせず、Better Auth の設定変更（プラグイン追加など）があったら以下で再生成する。
+
+```
+pnpm --filter @ebb/db run generate:auth-schema
+```
+
+D1 の内部テーブル `_cf_METADATA` を Kysely の introspection が読もうとして失敗する既知の罠
+（`better-auth generate` を実際の D1 に接続した状態で実行すると起きる）を避けるため、
+`auth-cli-config.ts`（CLI 専用、アプリからは import しない）はダミーの D1 インスタンスに
+`drizzleAdapter` を使う。生成後は `pnpm db:generate` を実行してマイグレーション SQL に反映する。
+詳細な経緯は `docs/design-decisions.md` の `## Better Auth + Google OAuth (#10)` を参照。
+
 ## マイグレーションの生成
 
 `src/schema.ts` を変更したら、ルートで以下を実行する。

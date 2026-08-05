@@ -8,6 +8,20 @@
 			"when": 1785768570200,
 			"tag": "0000_living_stellaris",
 			"breakpoints": true
+		},
+		{
+			"idx": 1,
+			"version": "6",
+			"when": 1785863531202,
+			"tag": "0001_unknown_vance_astro",
+			"breakpoints": true
+		},
+		{
+			"idx": 2,
+			"version": "6",
+			"when": 1785892374412,
+			"tag": "0002_elite_gwen_stacy",
+			"breakpoints": true
 		}
 	]
 }

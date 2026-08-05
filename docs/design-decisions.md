@@ -59,6 +59,10 @@
    → Queues 無料枠は 1万オペ/日（保持 24h）= 実質 1日1万通知が上限
 3. **Better Auth + D1 の既知の罠**: D1 の内部テーブル `_cf_METADATA` を Kysely の
    introspection が読もうとして `better-auth generate` が失敗する
+   - #10 で確定した。この罠は `database: env.DB`（D1 バインディングを直接渡す、built-in
+     Kysely アダプター経路）を使った場合にのみ起きる。`drizzleAdapter` はスキーマ生成時に
+     DB へ一切問い合わせないため、この経路を採用すれば構造的に避けられる（詳細は
+     `## Better Auth + Google OAuth (#10)` を参照）
 4. cron は「通知時刻」ではなく「巡回間隔」。通知時刻は `reviews.scheduled_at` が持つ
    → cron 間隔 = 通知の最大遅延。毎分実行でも無料枠に余裕（1440回/日 ≪ 10万/日）
 5. SvelteKit の Worker は `fetch()` のみ公開 → Cron 用 Worker を分ける必要がある
@@ -409,6 +413,151 @@
   留めた**（ユーザー了承済み）。iOS/iPadOS 16.4 で Web Push はホーム画面追加済みの Web App
   にのみ対応する形で追加されており、Chrome の `beforeinstallprompt` に相当する自動インストール
   バナーは存在しない（WebKit 公式ブログで確認。詳細は `docs/pwa-notification-receive.md`）
+
+## Better Auth + Google OAuth (#10)
+
+- **`_cf_METADATA` の罠は「D1 に実接続する経路」でのみ起きる**。`betterAuth({ database: env.DB })`
+  （D1 バインディングを直接渡す、built-in Kysely アダプター経路）で `generate`/`migrate` を実行すると
+  Kysely の introspection が D1 の内部テーブル `_cf_METADATA` を読もうとして失敗する。
+  **`drizzleAdapter` はスキーマ生成時に DB へ一切問い合わせない**（フィールド定義から
+  コードを組み立てるだけ）ため、`drizzleAdapter` 経路を採用してさえいれば、実際に本物の D1 に
+  繋がなくても Kysely introspection 自体が走らず、この罠を構造的に避けられる。
+  `packages/db/auth-cli-config.ts` は `drizzle({} as D1Database)`（未使用のダミー）に
+  `drizzleAdapter` を被せているだけで、元の失敗を再現して確認したわけではない
+  （再現には本物の D1 バインディングが要り、`better-auth generate` を Node から実行する CLI の
+  実行コンテキストではそもそも D1 バインディングを持てない）
+  - Context7 経由で得たドキュメント（GitHub `main` ブランチ由来）には `generate --adapter drizzle
+--dialect sqlite`（DB 接続なしで生成できる新フラグ）が載っていたが、実際に導入した
+    `@better-auth/cli@1.4.21`（npm 公開済みの最新）には未実装だった（`error: unknown option
+'--adapter'` で実測確認済み）。ドキュメントが先行しリリースが追いついていない状態だったため、
+    `--config` + ダミー DB 方式（`better-auth-cloudflare` コミュニティパッケージが採用している
+    パターンと同型）に変更した
+- **`auth-cli-config.ts` に `socialProviders`/`plugins` は書かない**。Google OAuth は
+  追加のテーブル・カラムを生成しないため、生成結果に一切影響しない（`socialProviders` を
+  含む版と含まない版で `generate:auth-schema` の出力が完全に一致することを実測確認済み）。
+  書いても「google 固有のフィールドが生成に影響する」という誤解を招くだけなので削除した
+- **`packages/db` は `better-auth`/`@better-auth/cli` を devDependency にしか持たない**。
+  `auth-cli-config.ts` はスキーマ生成専用のツール設定（`drizzle.config.ts` と同種）であり、
+  アプリケーションコードからは import されない。実行時の設定（`socialProviders` の実値含む）は
+  `apps/web/src/lib/server/auth.ts` の `createAuth(env, origin)` に別途持つ。
+  「依存の向きは `apps/* → packages/*` のみ」を保つため
+- **`createAuth` はファクトリ関数**。D1 バインディング（`platform.env.DB`）はリクエストごとにしか
+  手に入らないため、モジュールスコープで単一の `auth` インスタンスを作れない
+  （`createDb` と同じ制約）。`baseURL` もリクエストの `event.url.origin` から都度導出する
+- **`apps/web/src/routes/api/auth/[...all]/+server.ts` は作らなかった**（Issue の作業内容には
+  明記されていたが、意図的に外した）。`better-auth/svelte-kit` の `isAuthPath(url, options)` は
+  実際には `_url.origin !== baseURL.origin` を見ている（origin 非依存という当初の記述は誤りで、
+  レビューで訂正した）。`baseURL.origin` は `options.baseURL` が文字列なら `new URL(baseURL).origin`
+  になり、`createAuth(env, origin)` は毎リクエスト `event.url.origin` を `baseURL` に渡すため、
+  比較対象の2つの origin は常に「同じリクエストの origin」同士になり必ず一致する。
+  つまり local/production どちらでもマッチするのは「origin を見ないから」ではなく
+  「`baseURL` をリクエスト毎の origin から都度導出しているから」。この不変条件が崩れる変更
+  （例: `baseURL` を固定の env 変数に変える）をする場合は、対応するルートファイルが無いことに
+  注意すること（`isAuthPath` が false を返すと `/api/auth/*` は静かに 404 になる）
+- **`hooks.server.ts` は `svelteKitHandler` を使わず、`isAuthPath` + `auth.handler` を直接呼ぶ**。
+  `svelteKitHandler` は内部で `getSession` を呼ばないため、公式サンプル通りに
+  `getSession` → `svelteKitHandler` の順で書くと、`/api/auth/*` へのリクエストでも
+  `getSession`（D1 read）が実行されてから `auth.handler` に委譲され、その `getSession` の結果は
+  どの `locals` 読み取りにも到達せず捨てられる。`isAuthPath` は `better-auth/svelte-kit` から
+  そのまま import できるので、これで早期リターンしてから `getSession` を呼ぶことで、
+  `/api/auth/*` に対する無駄な D1 読み取りとレイテンシを避けた
+- **`createAuth` に `sveltekitCookies(getRequestEvent)` を最後の plugin として追加した**。
+  `hooks.server.ts` は `auth.api.getSession(...)` を `auth.handler` 経由ではなく直接呼ぶため、
+  `getSession` 内部でセッションが延長・削除される際の `Set-Cookie`
+  （`node_modules` 内の実装を確認: `ctx.context.responseHeaders` に書かれるだけで、
+  `auth.handler` の `Response` を経由しない呼び出しでは誰も読まない）が
+  `sveltekitCookies` を挟まない限り失われる。公式ドキュメントの
+  「Server Action Cookies」節がこの plugin を要求している理由と同じ機構
+  - **この修正は動作確認できていない**。再現には `session.updateAge`（既定1日）を超えて
+    古いセッションが必要で、実際の Google アカウントでのログインが前提のため
+    このセッションでは検証手段がない。better-auth のソース（`sveltekitCookies` の
+    `_flag === "router"` ガード）と公式ドキュメントの記述に基づいて適用したのみ
+  - `sveltekitCookies` は `getRequestEvent`（`$app/server`、AsyncLocalStorage 依存）を
+    使うため、`pnpm build && wrangler dev`（実際の workerd ランタイム、`nodejs_compat`
+    有効）で `/` `/debug/d1` を確認し、AsyncLocalStorage 関連のエラーが出ないことは確認した
+    （`/debug/auth` は本番ビルドでは 404 になるが、これも実際に確認した）。
+    ただし `getRequestEvent()` の呼び出し自体は「`getSession` が実際に Set-Cookie を
+    生成したとき」だけ実行される分岐にあり、未ログイン状態の `getSession` 呼び出しは
+    そこに到達しない。つまり ALS がモジュール解決・Worker 起動を壊さないことは確認できたが、
+    実際に `getRequestEvent()` が呼ばれる分岐そのものは上記と同じ理由で未検証
+  - レビューで機構自体（動作確認できていない、と上で書いた部分）の裏取りが進んだ:
+    SvelteKit 本体の `respond.js` は `handle` フック全体を `with_request_store(...)` で
+    ラップしており、`hooks.server.ts` 内の `getRequestEvent()` は常にこの ALS コンテキスト内
+    から呼ばれる。また `sveltekitCookies` の `_flag === "router"` ガードは `auth.handler`
+    経由（レスポンス自身の Set-Cookie で完結する）のときだけ処理をスキップし、
+    `getSession` 直接呼び出しの経路では `event.cookies.set()` → SvelteKit の
+    `add_cookies_to_headers` を通って `resolve(event)` のレスポンスに正しく載る配線に
+    なっていることをソースで確認した。**これは「配線が正しく組まれている」という静的な
+    裏取りであり、実際に `session.updateAge` を超えたセッションで Set-Cookie が発生する
+    場面を動かして確認したわけではない**。その一点（挙動そのものの動作確認）は
+    実際の Google アカウントでのログインが前提のため、依然としてユーザー側の実機確認が必要
+- **`hooks.server.ts` の `getSession` 呼び出しを `try/catch` で囲んだ**。セッション行の競合削除
+  （別デバイスでのサインアウト等）や D1 の一時的な失敗で `getSession` が例外を投げると、
+  `resolve(event)` の手前でその例外が伝播し、認証と無関係な通常ページの閲覧まで
+  500 になってしまう。失敗時は `locals.user`/`locals.session` を `null` にフォールバックする
+- **Google Cloud Console に登録するリダイレクト URI**（OAuth クライアント作成時にユーザーが登録）:
+  - local: `http://localhost:5173/api/auth/callback/google`（`pnpm dev` = `vite dev` の既定ポート）
+  - production: `https://ebb.tom-chiba.com/api/auth/callback/google`
+  - **OAuth 同意画面の公開設定にも注意**: 個人アカウントで新規作成した GCP プロジェクトは
+    既定で「テスト」公開状態になり、Google Cloud Console の「対象ユーザー」でテストユーザーとして
+    明示的に追加したアカウントしか同意画面を通過できない（アプリコードとは無関係に
+    `access_blocked` になる）。自分の Google アカウントをテストユーザーに追加すること
+- **secret の登録**: `BETTER_AUTH_SECRET` / `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` は
+  ローカルは `.dev.vars`、本番は `wrangler secret put <NAME>`（#8 の VAPID 鍵と同じ方針で
+  **ユーザーが実行する**。このセッションでは未実行）。`BETTER_AUTH_SECRET` はランダム値でよく、
+  `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"` で生成できる
+  （`.dev.vars.example` は空欄のままなので、clone 後は各自このコマンドで生成して埋める）
+  - **`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` が未登録のまま merge しても、サイト全体は
+    落ちない**ことを実測済み。`.dev.vars` から該当行を丸ごと削除して（空文字ではなく未定義の
+    状態を再現）`pnpm dev` → `/` `/debug/d1` を確認したところ、`[Better Auth]: Social provider
+google is missing clientId or clientSecret` の warning のみで両ページとも正常に描画された。
+    影響は `/api/auth/*` の実処理（サインイン試行時に 500 `CLIENT_ID_AND_SECRET_REQUIRED`）に留まる
+  - **`BETTER_AUTH_SECRET` は未登録だとサイト全体が 500 になる（意図的）**。better-auth は
+    secret 未設定時、公開されている固定文字列 `"better-auth-secret-12345678901234567890"`
+    （`node_modules` 内 `utils/constants.mjs` の `DEFAULT_SECRET`）にフォールバックし、
+    `NODE_ENV === 'production'` のときだけ throw するガードしか持たない
+    （`@better-auth/core/env` の `isProduction`）。Cloudflare Workers は `NODE_ENV` を
+    自動で立てないため、本番でこのガードに頼ると**session cookie が誰でも知っている鍵で
+    署名される**（session forgery）まま気付かない可能性がある。そのためこちらのガードには
+    頼らず、`hooks.server.ts` で `BETTER_AUTH_SECRET` 未設定を明示的に検出し 500 にしている
+    （利用不可にはなるが、黒塗りセッションを本番で握るよりは安全という判断）
+- **Step 5 の検証は「コード起点」に限定した**（実際の Google アカウントでの同意画面通過は未検証、
+  ユーザー判断）。確認したのは (1) `/api/auth/sign-in/social` が `accounts.google.com` への
+  正しい `client_id` を含む URL を返すこと（ダミーの Client ID で検証。Google 側が
+  `invalid_client` で即エラーになるため、`redirect_uri` の値そのものは未確認）、
+  (2) `hooks.server.ts` が `locals.user`/`locals.session` を解決するコードパス自体が
+  型検査・実装レベルで正しいこと、(3) `drizzleAdapter` によるスキーマ解決と D1 への
+  実書き込みが機能すること — ダミー Client ID でのサインイン試行時に `verification`
+  テーブルへ実際に `callbackURL`/`codeVerifier`/`oauthState` を含む行が insert されることを
+  ローカル D1（`wrangler d1 execute ebb --local`）で確認し、確認後に削除した。これにより
+  `db._.fullSchema` 経由のテーブル解決・カラムマッピング（`timestamp_ms` 等）が
+  実際に機能することまでは実証済み。`redirect_uri` の一致確認、同意画面以降の完了、
+  ログアウト後の Cookie 削除、リロード後のセッション維持の**実機確認**はユーザーが
+  Google Cloud Console でクライアントを作成した後に `/debug/auth`（dev 限定ページ、
+  既存の `/debug/push` `/debug/d1` と同じパターン）で行う
+- **`pnpm-workspace.yaml` に `semver@6.3.1` を `trustPolicyExclude` へ追加した**。
+  `@better-auth/cli` 経由で入る依存で、pnpm の `no-downgrade` チェックが無関係な
+  `semver@7.x` 系（provenance あり）の公開日時と比較して誤検知する既知の false positive
+  （`pnpm/pnpm` discussion #11084 で同事象が報告されている。乗っ取りではないことを確認済み）
+  - 同時に `@prisma/client` / `better-sqlite3`（`@better-auth/cli` が依存する、使用しない
+    アダプター向けのビルドスクリプト）を `allowBuilds` で `false` にした
+- **`rateLimit` を明示的に有効化した**（Codex によるレビューで指摘）。既定は
+  `enabled ?? isProduction`（`NODE_ENV === 'production'` 判定）だが、Workers はそれを
+  自動で立てないため実質無効になっていた。既定の in-memory storage は Workers の
+  isolate ごとに独立しカウントが共有されないため `storage: 'database'` にし、
+  `rateLimit` テーブルを D1 に持たせた（`auth-cli-config.ts` にも同じ設定を追加して
+  スキーマ生成に反映している）。`/sign-in/social` は `verification` テーブルへの insert を
+  伴うため `customRules` で既定より厳しく絞った（60秒あたり10回）。ローカルで
+  `/api/auth/sign-in/social` に11回連続でリクエストし、11回目から `429` が返ることと
+  `rate_limit` テーブルに実際に行が作られることを実測確認済み
+- **deploy ワークフローに `wrangler secret list` で必須 secret の有無を確認するステップを
+  追加した**（Codex によるレビューで指摘）。`BETTER_AUTH_SECRET` 未設定だとサイト全体が
+  500 になる（このファイルの secret の登録の項）ため、`wrangler secret put` を merge 前に
+  実行し忘れた場合に自動デプロイでそのまま本番へ出てしまう問題を防ぐ。値は出力せず
+  名前の有無だけを見る。**このステップ自体は実際の Cloudflare 環境に対しては未実行**
+  （サンドボックスから Cloudflare の API に到達できないため）。コマンド構文が実際に
+  パースされること（ネットワークエラーで止まり、構文エラーでは止まらないこと）と、
+  `jq` によるパース・不足検出ロジックをモックの JSON で確認したのみ
 
 ## 開発の進め方
 
