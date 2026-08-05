@@ -9,10 +9,13 @@
 	},
 	"scripts": {
 		"check": "tsc --noEmit",
-		"generate": "drizzle-kit generate"
+		"generate": "drizzle-kit generate",
+		"generate:auth-schema": "better-auth generate --config ./auth-cli-config.ts --output ./src/auth-schema.ts -y && prettier --write ./src/auth-schema.ts"
 	},
 	"devDependencies": {
+		"@better-auth/cli": "^1.4.21",
 		"@cloudflare/workers-types": "^4.20260702.1",
+		"better-auth": "^1.6.25",
 		"drizzle-kit": "^0.31.10",
 		"typescript": "catalog:"
 	},

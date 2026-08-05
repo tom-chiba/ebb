@@ -15,11 +15,21 @@ trustPolicy: no-downgrade
 
 # chokidar@4.0.2/4.0.3 は provenance attestation なしで公開された（乗っ取りではなく
 # CI 変更由来と判明済み。5.0.0 で provenance は復活している）ため個別に許可する
+#
+# semver@6.3.1（npm 公式 npm-cli-ops による legacy dist-tag "latest-6"、公開は
+# 2023-07-10）は provenance を持たないが、pnpm の no-downgrade は無関係な semver@7.x
+# 系（provenance あり）の公開日時と比較して誤検知する（乗っ取りではなくメジャー系列を
+# 跨いだ比較起因と判明済み。pnpm/pnpm discussion #11084 で同事象が報告されている）
 trustPolicyExclude:
   - chokidar@4.0.3
+  - semver@6.3.1
 
 # strictDepBuilds（既定 true）によりビルドスクリプトが既定でブロックされる依存を許可する
 allowBuilds:
+  # @better-auth/cli 経由で入るが、Prisma / better-sqlite3 アダプターは使わない
+  # （drizzleAdapter + D1 のみ）ため、ネイティブビルドは実行不要
+  '@prisma/client': false
+  better-sqlite3: false
   esbuild: true
   workerd: true
 
