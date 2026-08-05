@@ -1,0 +1,20 @@
+{
+	// vitest-pool-workers 専用の設定。apps/web/wrangler.jsonc の main は
+	// ビルド成果物（.svelte-kit/cloudflare/_worker.js）を指しており、
+	// pnpm build を経ないと存在しないため、テストではここに切り出した
+	// D1 バインディングのみの最小構成を使う。
+	"name": "ebb-web-test",
+	// vitest-pool-workers@0.18.8 が内部で使う miniflare@4.20260722.0 に同梱の
+	// workerd バイナリが対応する最新の compatibility_date（実測）。
+	// apps/web/wrangler.jsonc 側の日付とは独立して管理してよい（テスト専用設定のため）。
+	"compatibility_date": "2026-07-29",
+	"compatibility_flags": ["nodejs_compat"],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "ebb",
+			"database_id": "9d613b4c-3fa7-454d-a7d9-0c0930eb7b40",
+			"migrations_dir": "../../packages/db/migrations"
+		}
+	]
+}
