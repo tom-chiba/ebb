@@ -1,8 +1,9 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { createDb, intervalPresets, user, type Db } from '@ebb/db';
+import { createDb, eq, intervalPresets, memos, user, type Db } from '@ebb/db';
 import {
 	archiveMemo,
+	CONTENT_MAX_LENGTH,
 	createMemo,
 	getMemo,
 	listMemos,
@@ -74,7 +75,9 @@ describe('createMemo', () => {
 			intervalPresetId: ownerPresetId
 		});
 		expect(memo.userId).toBe(ownerId);
-		expect(memo.archivedAt).toBeNull();
+		// archivedAt は「取得できる memo は常に非アーカイブ」で常に null にしかならないため
+		// レスポンスから落としている。
+		expect(memo).not.toHaveProperty('archivedAt');
 	});
 
 	it('creates a memo referencing a system preset', async () => {
@@ -121,6 +124,34 @@ describe('createMemo', () => {
 			})
 		).rejects.toThrow(ValidationError);
 	});
+
+	it('rejects content over the length limit', async () => {
+		await expect(
+			createMemo(db, ownerId, {
+				title: 'title',
+				content: 'a'.repeat(CONTENT_MAX_LENGTH + 1),
+				intervalPresetId: ownerPresetId
+			})
+		).rejects.toThrow(ValidationError);
+	});
+
+	it('accepts a title exactly at the length limit', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'a'.repeat(TITLE_MAX_LENGTH),
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		expect(memo.title).toHaveLength(TITLE_MAX_LENGTH);
+	});
+
+	it('accepts content exactly at the length limit', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'a'.repeat(CONTENT_MAX_LENGTH),
+			intervalPresetId: ownerPresetId
+		});
+		expect(memo.content).toHaveLength(CONTENT_MAX_LENGTH);
+	});
 });
 
 describe('listMemos / getMemo', () => {
@@ -153,19 +184,84 @@ describe('listMemos / getMemo', () => {
 		expect(result.total).toBe(1);
 	});
 
-	it('paginates with limit/offset', async () => {
+	it('paginates with limit/offset without overlap or omission across pages', async () => {
+		const created = [];
 		for (let i = 0; i < 3; i++) {
-			await createMemo(db, ownerId, {
-				title: `memo ${i}`,
-				content: 'c',
-				intervalPresetId: ownerPresetId
-			});
+			created.push(
+				await createMemo(db, ownerId, {
+					title: `memo ${i}`,
+					content: 'c',
+					intervalPresetId: ownerPresetId
+				})
+			);
 		}
 		const page1 = await listMemos(db, ownerId, { limit: 2, offset: 0 });
 		const page2 = await listMemos(db, ownerId, { limit: 2, offset: 2 });
 		expect(page1.items).toHaveLength(2);
 		expect(page2.items).toHaveLength(1);
 		expect(page1.total).toBe(3);
+
+		const seenIds = [...page1.items, ...page2.items].map((m) => m.id).sort();
+		expect(seenIds).toEqual([...created.map((m) => m.id)].sort());
+	});
+
+	it('defaults to a limit of 20 when not specified', async () => {
+		for (let i = 0; i < 25; i++) {
+			await createMemo(db, ownerId, {
+				title: `memo ${i}`,
+				content: 'c',
+				intervalPresetId: ownerPresetId
+			});
+		}
+		const result = await listMemos(db, ownerId);
+		expect(result.limit).toBe(20);
+		expect(result.items).toHaveLength(20);
+		expect(result.total).toBe(25);
+	});
+
+	it('clamps a limit above the maximum down to 100', async () => {
+		const result = await listMemos(db, ownerId, { limit: 1000 });
+		expect(result.limit).toBe(100);
+	});
+
+	it('clamps a non-positive limit up to 1', async () => {
+		const zero = await listMemos(db, ownerId, { limit: 0 });
+		const negative = await listMemos(db, ownerId, { limit: -5 });
+		expect(zero.limit).toBe(1);
+		expect(negative.limit).toBe(1);
+	});
+
+	it('clamps a negative offset up to 0', async () => {
+		const result = await listMemos(db, ownerId, { offset: -10 });
+		expect(result.offset).toBe(0);
+	});
+
+	it('returns an empty page when offset is past the total', async () => {
+		await createMemo(db, ownerId, { title: 'only', content: 'c', intervalPresetId: ownerPresetId });
+		const result = await listMemos(db, ownerId, { offset: 50 });
+		expect(result.items).toEqual([]);
+		expect(result.total).toBe(1);
+	});
+
+	it('breaks createdAt ties using id for a stable order', async () => {
+		const a = await createMemo(db, ownerId, {
+			title: 'a',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const b = await createMemo(db, ownerId, {
+			title: 'b',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const tiedTimestamp = new Date();
+		await db.update(memos).set({ createdAt: tiedTimestamp }).where(eq(memos.id, a.id));
+		await db.update(memos).set({ createdAt: tiedTimestamp }).where(eq(memos.id, b.id));
+
+		const result = await listMemos(db, ownerId);
+		const orderedIds = result.items.map((m) => m.id);
+		const expectedOrder = [a.id, b.id].sort().reverse();
+		expect(orderedIds).toEqual(expectedOrder);
 	});
 
 	it('throws NotFoundError for another user memo', async () => {
@@ -202,6 +298,43 @@ describe('updateMemo', () => {
 		const updated = await updateMemo(db, ownerId, memo.id, { title: 'new title' });
 		expect(updated.title).toBe('new title');
 		expect(updated.content).toBe('content');
+	});
+
+	it('rejects an empty title on update', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		await expect(updateMemo(db, ownerId, memo.id, { title: '  ' })).rejects.toThrow(
+			ValidationError
+		);
+	});
+
+	it('rejects content over the length limit on update', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		await expect(
+			updateMemo(db, ownerId, memo.id, { content: 'a'.repeat(CONTENT_MAX_LENGTH + 1) })
+		).rejects.toThrow(ValidationError);
+	});
+
+	it('concurrent partial updates on different fields do not clobber each other', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		await Promise.all([
+			updateMemo(db, ownerId, memo.id, { title: 'new title' }),
+			updateMemo(db, ownerId, memo.id, { content: 'new content' })
+		]);
+		const final = await getMemo(db, ownerId, memo.id);
+		expect(final.title).toBe('new title');
+		expect(final.content).toBe('new content');
 	});
 
 	it('rejects switching to a preset owned by another user', async () => {

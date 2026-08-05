@@ -14,13 +14,37 @@ interface ListOptions {
 	offset?: number;
 }
 
+// archivedAt は「一覧・取得できる memo は常に非アーカイブ」という不変条件により
+// 公開 API 上は常に null にしかならないため、レスポンスから落とす。
+export interface MemoResponse {
+	id: string;
+	userId: string;
+	title: string;
+	content: string;
+	intervalPresetId: string;
+	createdAt: Date;
+	updatedAt: Date;
+}
+
+function toMemoResponse(memo: typeof memos.$inferSelect): MemoResponse {
+	return {
+		id: memo.id,
+		userId: memo.userId,
+		title: memo.title,
+		content: memo.content,
+		intervalPresetId: memo.intervalPresetId,
+		createdAt: memo.createdAt,
+		updatedAt: memo.updatedAt
+	};
+}
+
 function ownMemo(userId: string, id: string) {
 	return and(eq(memos.id, id), eq(memos.userId, userId), isNull(memos.archivedAt));
 }
 
 export async function listMemos(db: Db, userId: string, options: ListOptions = {}) {
 	const limit = clamp(options.limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT);
-	const offset = Math.max(0, options.offset ?? 0);
+	const offset = Math.max(0, Math.trunc(options.offset ?? 0));
 	const where = and(eq(memos.userId, userId), isNull(memos.archivedAt));
 
 	const [items, totalRows] = await Promise.all([
@@ -28,35 +52,40 @@ export async function listMemos(db: Db, userId: string, options: ListOptions = {
 			.select()
 			.from(memos)
 			.where(where)
-			.orderBy(desc(memos.createdAt))
+			// createdAt はミリ秒精度で同時刻の行が起こり得るため、id を tie-breaker にして
+			// ページ間の順序を安定させる。
+			.orderBy(desc(memos.createdAt), desc(memos.id))
 			.limit(limit)
 			.offset(offset)
 			.all(),
 		db.select({ total: count() }).from(memos).where(where).all()
 	]);
 
-	return { items, total: totalRows[0]?.total ?? 0, limit, offset };
+	return { items: items.map(toMemoResponse), total: totalRows[0]?.total ?? 0, limit, offset };
 }
 
 export async function getMemo(db: Db, userId: string, id: string) {
 	const rows = await db.select().from(memos).where(ownMemo(userId, id)).limit(1).all();
 	const memo = rows[0];
 	if (!memo) throw new NotFoundError('memo not found');
-	return memo;
+	return toMemoResponse(memo);
 }
 
 function clamp(value: number, min: number, max: number) {
-	if (Number.isNaN(value)) return min;
-	return Math.min(Math.max(value, min), max);
+	if (!Number.isFinite(value)) return min;
+	return Math.min(Math.max(Math.trunc(value), min), max);
 }
 
-function assertTitleAndContent(title: string, content: string) {
+function assertTitle(title: string) {
 	if (title.trim().length === 0) {
 		throw new ValidationError('title is required');
 	}
 	if (title.length > TITLE_MAX_LENGTH) {
 		throw new ValidationError(`title must be ${TITLE_MAX_LENGTH} characters or fewer`);
 	}
+}
+
+function assertContent(content: string) {
 	if (content.length > CONTENT_MAX_LENGTH) {
 		throw new ValidationError(`content must be ${CONTENT_MAX_LENGTH} characters or fewer`);
 	}
@@ -86,7 +115,8 @@ export interface CreateMemoInput {
 }
 
 export async function createMemo(db: Db, userId: string, input: CreateMemoInput) {
-	assertTitleAndContent(input.title, input.content);
+	assertTitle(input.title);
+	assertContent(input.content);
 	await assertPresetAccessible(db, userId, input.intervalPresetId);
 
 	const rows = await db
@@ -101,36 +131,33 @@ export async function createMemo(db: Db, userId: string, input: CreateMemoInput)
 		.all();
 	const memo = rows[0];
 	if (!memo) throw new Error('failed to create memo');
-	return memo;
+	return toMemoResponse(memo);
 }
 
-export interface UpdateMemoInput {
-	title?: string;
-	content?: string;
-	intervalPresetId?: string;
-}
+export type UpdateMemoInput = Partial<CreateMemoInput>;
 
 export async function updateMemo(db: Db, userId: string, id: string, input: UpdateMemoInput) {
-	const existing = await getMemo(db, userId, id);
-
-	const nextTitle = input.title ?? existing.title;
-	const nextContent = input.content ?? existing.content;
-	assertTitleAndContent(nextTitle, nextContent);
-
-	const nextIntervalPresetId = input.intervalPresetId ?? existing.intervalPresetId;
+	if (input.title !== undefined) assertTitle(input.title);
+	if (input.content !== undefined) assertContent(input.content);
 	if (input.intervalPresetId !== undefined) {
 		await assertPresetAccessible(db, userId, input.intervalPresetId);
 	}
 
-	const rows = await db
-		.update(memos)
-		.set({ title: nextTitle, content: nextContent, intervalPresetId: nextIntervalPresetId })
-		.where(ownMemo(userId, id))
-		.returning()
-		.all();
+	// 指定されたフィールドだけを SET することで、他フィールドを対象にした同時 PATCH の
+	// 変更を古い読み取り値で上書きしてしまう read-modify-write のロストアップデートを避ける。
+	const set: Partial<typeof memos.$inferInsert> = {};
+	if (input.title !== undefined) set.title = input.title;
+	if (input.content !== undefined) set.content = input.content;
+	if (input.intervalPresetId !== undefined) set.intervalPresetId = input.intervalPresetId;
+
+	if (Object.keys(set).length === 0) {
+		return getMemo(db, userId, id);
+	}
+
+	const rows = await db.update(memos).set(set).where(ownMemo(userId, id)).returning().all();
 	const updated = rows[0];
 	if (!updated) throw new NotFoundError('memo not found');
-	return updated;
+	return toMemoResponse(updated);
 }
 
 export async function archiveMemo(db: Db, userId: string, id: string) {
