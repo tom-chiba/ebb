@@ -612,6 +612,157 @@ google is missing clientId or clientSecret` の warning のみで両ページと
   署名付き Cookie をブラウザにセットすることでログイン済み状態を再現した
   （実際の Google OAuth を経由しない）。検証後は insert した行を削除した
 
+## メモの CRUD API (#13)
+
+- **form actions ではなく `+server.ts` の JSON API にした**（`/api/memos`、
+  `/api/memos/[id]`）。Issue タイトルが「CRUD API」であること、UI（#14）が
+  form actions 前提の設計をまだ決めていないこと、認可・バリデーション・クエリを
+  `$lib/server/memos.ts` に切り出せば #14 が form actions を被せたくなっても
+  この層は無変更で済むことから採用した
+- **`intervalPresetId` は作成・更新時の必須入力にした**。`interval_presets` の
+  システム標準プリセットの実データ投入（seed）は #15 のスコープであり、この Issue の
+  時点では1件も存在しない（`docs/schema.md` に明記済み）。作成 API は
+  `intervalPresetId` を必須で受け取り、`interval_presets` に対して
+  「自分の custom プリセット、またはシステム標準プリセット（`user_id IS NULL`）」で
+  存在するかを事前チェックし、無ければ 400 を返す（DB 側のテナント分離トリガー
+  `0004_memos_interval_preset_owner_trigger.sql` の `RAISE(ABORT, ...)` を
+  生の 500 としてクライアントに漏らさないため）。#15 でシステム標準プリセットが
+  seed されたら、クライアント側で「未指定なら標準プリセットを使う」ような
+  デフォルト値の付与を検討できる
+- **削除は論理削除**（`memos.archived_at` を立てる）。物理削除にしなかった理由は
+  スキーマに既に `archived_at` カラムが用意されているため。**アーカイブ済みの
+  メモへの GET / PATCH / 再 DELETE はすべて 404** にした（一覧からも除外する）。
+  「アーカイブ済みかどうか」を区別して見せる UI・API（復元機能等）は本 Issue の
+  スコープ外
+- **他ユーザーのメモ ID を指定した場合は 404 に統一**（403 は使わない）。存在の有無を
+  レスポンスの違いから推測できないようにするため
+- **title は200文字、content は50,000文字を上限**にした（`apps/web/src/lib/server/memos.ts`
+  の `TITLE_MAX_LENGTH`/`CONTENT_MAX_LENGTH`）。仕様・DB スキーマのどこにも具体値の
+  指定がないため決め打ちした値であり、#14 が同じ上限を UI 側のバリデーションに
+  使う場合はこの値を参照すること
+- **バリデーションロジックは `packages/core` ではなく `apps/web/src/lib/server/memos.ts`
+  に置いた**。`packages/core` は #15/#16 が `nextReviewAt` 等の計算ロジックと
+  あわせてプリセット値そのものの置き場所を決める Issue であり、#13 が先に
+  住人を増やすと #14/#15 の設計判断を縛ってしまうため、あえて `apps/web` 側に
+  留めた
+- **`packages/db/src/index.ts` に `eq`/`and`/`or`/`isNull`/`desc` を re-export
+  追加した**。既存の `count` の re-export と同じ理由（「依存の向きは
+  `apps/* → packages/*` のみ」を保つため、`apps/web` に `drizzle-orm` を
+  直接の依存として足さない）
+- **`apps/web` に `vitest` + `@cloudflare/vitest-pool-workers` を導入した**
+  （このリポジトリ初）。受け入れ条件が「統合テストで検証している」ことを求めており、
+  実 D1（miniflare）に対するテストが必要だったため。`packages/db` の migrations を
+  `readD1Migrations`/`applyD1Migrations`（setup file）で適用し、`$lib/server/memos.ts`
+  の関数を直接呼ぶ形にした（`+server.ts` は認可チェック + 関数呼び出し + JSON化 だけの
+  薄いアダプタにし、HTTP 経由でのテストは行っていない）
+  - `@cloudflare/vitest-pool-workers` は `minimumReleaseAge`（7日）に収まる
+    `0.18.8` に固定した（`^0.18.8` は npm semver のルール上パッチ更新のみを許容
+    するため、より新しい 0.19.x/0.20.x へは上がらない）
+  - **`apps/web/wrangler.test.jsonc` を本番の `wrangler.jsonc` とは別ファイルにした**。
+    本番設定の `main` はビルド成果物（`.svelte-kit/cloudflare/_worker.js`）を
+    指しており、`pnpm build` を経ないと存在しないため、テストではそもそも `main`
+    を持たない（D1 バインディングのみの）最小構成にした
+  - **`compatibility_date` は本番設定と独立して `2026-07-29` に固定した**。
+    `@cloudflare/vitest-pool-workers@0.18.8` が内部に同梱する
+    `miniflare@4.20260722.0`/`workerd` バイナリがサポートする最新の日付がこれで、
+    本番設定の日付（`2026-08-03`）をそのまま使うと
+    `This Worker requires compatibility date ... but the newest date supported
+by this server binary is ...` で起動に失敗することを実測した
+  - `apps/web/test/env.d.ts` で `TEST_MIGRATIONS` を `Cloudflare.Env`（global）に
+    型として追加している。**`declare global { namespace Cloudflare { ... } }` で
+    包む必要がある**点に注意（ファイルが `import type` を持つ ES module である
+    ため、`declare namespace` を素で書くとローカルスコープの宣言になり global の
+    `Cloudflare.Env` にマージされない。最初これで `svelte-check` が
+    `Property 'TEST_MIGRATIONS' does not exist` を出し、修正した）
+- **検証は「コード起点 + 手動の実地確認」に限定した**（#10/#11 と同じ方針）。
+  統合テスト（vitest-pool-workers、20 tests）で `$lib/server/memos.ts` の
+  5操作・バリデーション・テナント分離・アーカイブ後 404・トリガーの存在を確認した上で、
+  UI が存在しない（#14 未着手）ため playwright-cli ではなく `pnpm dev` +
+  手動署名 Cookie（#11 と同じ手法で `user`/`session`/`interval_presets`/`memos`
+  行をローカル D1 に直接 insert）で実際の HTTP 経由の動作を curl で確認した
+  （認証・404・400・204 のステータスコードを含む）。検証後は insert した行を削除した。
+  この手動確認で **GET `/api/memos` のクエリパラメータ未指定時に `limit` が
+  既定値 20 ではなく 1 になるバグ**（`Number(null)` が `NaN` ではなく `0` を返し、
+  `clamp(0, 1, 100)` が `1` に丸めていた）を発見し、修正した
+  （`vitest` の統合テストは `$lib/server/memos.ts` を直接呼ぶため、`+server.ts` の
+  クエリパラメータ解析はカバーしておらず、この手動確認がなければ埋没していた）
+- **レビュー（4観点並列）で見つかった不備を差し戻して修正した**:
+  - `updateMemo` が `getMemo` で読んだ既存値を使って毎回3カラムまとめて書き戻す
+    read-modify-write だったため、異なるフィールドを狙った同時 PATCH が互いの
+    変更を古い値で上書きしうるロストアップデートがあった。指定された
+    フィールドだけを `SET` する形に変え、`vitest-pool-workers` で
+    `Promise.all` による同時 PATCH のテストを追加した
+  - クエリパラメータの `limit`/`offset` が非数値チェック（`Number.isNaN`）
+    のみで、小数（`limit=2.5`）や指数表記（`1e21`）を渡すと D1 の
+    `LIMIT`/`OFFSET` に渡した時点で `SQLITE_MISMATCH` により 500 になることを
+    実測した。`$lib/server/pagination.ts` の `parsePaginationParam` で
+    非負整数のみを正規表現で受理し、不正な値は 400 にする形に変更した
+    （空文字を `undefined` ではなく `0` として通してしまう不具合も同時に解消）
+  - `content-type` の完全一致比較が `application/json; charset=utf-8` を
+    弾いていたため、先頭のメディアタイプのみを比較するように変更した
+  - `listMemos` の並び順が `createdAt`（ミリ秒精度）のみで、同一ミリ秒の
+    行が複数あるとページ間で順序が不安定になり得た。`id` を tie-breaker に
+    追加した
+  - レスポンスが DB の行をそのまま返しており、非アーカイブの memo にしか
+    到達しないため常に `null` にしかならない `archivedAt` が漏れていた。
+    `MemoResponse` として明示的に必要なフィールドだけ返すようにした
+    （#15 でカラムが増えても自動でレスポンスに混入しないようにする狙いもある）
+  - `locals.user`/`platform.env.DB` のチェックとエラー→HTTPマッピングが
+    5つのハンドラに複製されていたため、`$lib/server/api.ts` の
+    `requireAuthedDb`/`handleMemoError`/`requireJsonContentType` に共通化した
+  - **`+server.ts` から HTTP ハンドラ以外の named export（`parsePaginationParam`）
+    をテスト用に追加したところ、`pnpm build` が
+    `Invalid export 'parsePaginationParam' in /api/memos` で失敗した**。
+    SvelteKit は `+server.ts` から `GET`/`POST`/... 等の決まった名前以外の
+    export を許可しない（ビルド後の静的解析で検証される）。`svelte-check`・
+    `vitest`・`eslint` はいずれもこの制約を検知せず `pnpm build` でのみ
+    顕在化したため、`parsePaginationParam` を `$lib/server/pagination.ts`
+    に切り出した。**「型検査・lint・テストが全部通っても `pnpm build` は
+    別に流す必要がある」ことを再確認した一件**
+- **Codex（`codex:review`/`codex:adversarial-review`）によるレビューで、4周の
+  人力ライクな並列レビューでも見つからなかった不具合が3件見つかり、対応した**:
+  - **PATCH は指定フィールドの内容に関わらず、まず対象メモの存在・所有権・
+    非アーカイブを確認するようにした**（`updateMemo` 冒頭で `getMemo` を呼ぶ）。
+    以前はバリデーションを先に行っていたため、他人のメモやアーカイブ済みの
+    メモに不正な `title`/`content`/`intervalPresetId` を送ると、本来の404では
+    なく400が返っていた（`docs/design-decisions.md` が定めた「他人のメモは
+    常に404」という契約に反する）。この並び順は round-1 の read-modify-write
+    修正（既存値をマージに使わないための SET 限定化）とは独立した話で、
+    「存在確認」と「マージ用の値読み取り」を混同していたのが原因
+  - **PATCH に楽観的並行性制御を追加した**。round-1 でロストアップデート
+    （read-modify-write による無条件上書き）は解消していたが、**同一
+    フィールドへの同時更新**は依然として後勝ちで無条件に上書きされ、
+    `updatedAt` を返しているのにクライアント側の再送・古いタブからの
+    autosave 等でユーザーの入力が黙って消える余地が残っていた
+    （adversarial-review で指摘）。`PATCH` のリクエストボディに
+    `expectedUpdatedAt`（クライアントが最後に読んだ `updatedAt` の ISO
+    文字列）を**必須**にし、`UPDATE ... WHERE ... AND updated_at = ?` の
+    条件に含めるようにした。0行しか更新されなかった場合、対象がそもそも
+    存在しない（同時アーカイブ等）のか、バージョンが古い（同時更新）のかを
+    再クエリで区別し、後者は 409 を返す。**これは破壊的な API 変更**
+    （PATCH に `expectedUpdatedAt` が無いと 400 になる）だが、#14 がまだ
+    実装されておらずこの契約に依存するコードが存在しないため、このタイミングで
+    導入した
+  - **POST に冪等性キーを追加した**。以前はサーバーが毎回 `crypto.randomUUID()`
+    で id を採番していたため、insert 成功後にレスポンスが失われてクライアントが
+    リトライすると、区別のつかない内容のメモが重複して作られる余地があった
+    （adversarial-review で指摘）。`CreateMemoInput.id` を任意のクライアント
+    生成 id として受け付け、同じ id で再送された場合は新規作成せず既存の行を
+    そのまま返す。id が明示されていれば `$defaultFn`（`crypto.randomUUID()`）
+    は使われない（`docs/schema.md` の ID 生成の節どおり）。実装は
+    「事前に SELECT で存在確認」＋「INSERT が UNIQUE 制約違反で落ちた場合も
+    再度 SELECT して返す」の二段構え（前者だけだと SELECT と INSERT の間の
+    競合を取りこぼす）。他ユーザーが既に同じ id を使っていた場合は
+    `ValidationError`（400）にする
+  - **見送った指摘**: 「メモ作成が通常デプロイの DB では使用不能（システム
+    標準プリセットが未 seed）」という adversarial-review の指摘は、#12 が
+    「標準プリセットの seed は #15 の責務」と明示的に決定済みであり、これを
+    #13 で先取りすると値の出所を一箇所（#15）に保つという既存方針と衝突する
+    ため、ユーザー判断で対応しないことにした。#13 の統合テストが
+    `beforeEach` でプリセットを直接 insert しているのは、この既知の
+    依存関係（#15 が先に必要）を前提にした正当なテスト分離であり、#13 の
+    バグではない。#14（UI）・本番投入までに #15 が完了している必要がある
+
 ## 開発の進め方
 
 - リポジトリ: public
