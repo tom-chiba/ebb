@@ -762,6 +762,285 @@ by this server binary is ...` で起動に失敗することを実測した
     `beforeEach` でプリセットを直接 insert しているのは、この既知の
     依存関係（#15 が先に必要）を前提にした正当なテスト分離であり、#13 の
     バグではない。#14（UI）・本番投入までに #15 が完了している必要がある
+    - **追記（#14）**: 上記の「#13 で先取りしない」という判断そのものは変えていないが、
+      #14 の実装時点で UI が動作確認すらできない状態は許容できないと判断し、
+      複数プリセットの管理・計算ロジックには一切踏み込まない形で「システム標準
+      プリセット1件だけを固定 id で seed する」という最小限の対応に変更した
+      （ユーザー承認済み）。値の出所を一箇所に保つという方針とは、#15 が
+      同じ「標準」プリセットの値をこの Issue本文で既に確定させているため、
+      #14 はそれをコピーするのではなく先取りして固定しただけ、という位置づけ。
+      詳細は下の #14 節を参照
+
+## メモの CRUD UI と Markdown レンダリング (#14)
+
+- **`/api/memos` の JSON API は使わず、`+page.server.ts` の load/form actions から
+  `$lib/server/memos.ts` を直接呼ぶ**。#13 が「UI が form actions 前提の設計を
+  まだ決めていない」として明示的に #14 に委ねていた決定。form actions は
+  progressive enhancement（JS 無効でも動く）と相性がよく、`requireAuthedDb` を
+  そのまま流用できて認可チェックの実装が重複しないため採用した。既存の
+  `/api/memos`・`/api/memos/[id]` はそのまま残し、将来の別クライアント
+  （モバイルアプリ等）向けに温存する
+  - `/app/+layout.server.ts` はページの `load` だけを保護し、form actions は
+    別経路で呼ばれる（#11 の既存の注意点と同じ理由）ため、追加した全 load/action
+    で `requireAuthedDb` を個別に呼んでいる
+- **メモ作成 API が必須とする `intervalPresetId` を、暫定シードで解決した**。
+  複数プリセットの管理・計算ロジックは #15 のスコープで未着手だが、#15 の
+  Issue 本文が既に定義済みの「標準」プリセット（`[1h,1d,3d,7d,14d,30d]` =
+  `[1,24,72,168,336,720]` 時間）を、固定 id `system-standard`・`user_id: NULL`
+  の1行として migration `0006_seed_system_interval_preset.sql` で先行投入した。
+  UI 側はプリセット選択を見せず、`$lib/server/interval-presets.ts` の
+  `DEFAULT_INTERVAL_PRESET_ID` を既定値として送信する。#15/#16 が着地したら
+  ユーザーによるプリセット選択 UI に置き換える前提の暫定措置。GitHub Issue 上には
+  この承認の記録はない（`gh issue view 14 --json comments` は空）が、実装着手前に
+  この PR の作業セッション内でユーザー本人にオプション提示（暫定シード/未実装のまま
+  進める/プリセットCRUDまで作り込む、の3択）の上で選択してもらった判断であり、
+  GitHub コメントとしては残していない
+- **Markdown レンダラは `markdown-it`（`html: false`）を採用し、DOMPurify 等の
+  サニタイザは使わない**。このアプリは Cloudflare Workers（`nodejs_compat` 有効）
+  で動くため DOM を持たず、DOMPurify や `isomorphic-dompurify`（内部で jsdom を
+  使う）は実行環境と相性が悪い。`markdown-it` は純粋な文字列処理のみで DOM に
+  依存せず、`html: false`（既定値）により本文中の生 HTML タグは常にエスケープ
+  されるため、「生 HTML を許可しないレンダラ設定にする」という Issue の要件を
+  設定だけで構造的に満たす。`<script>` を含む本文を保存しても実行されないことは
+  `apps/web/src/lib/server/markdown.test.ts` で確認した
+  - `breaks: true` にした。design mock 自身が想定する「思いついたことを雑に、
+    AI の出力を貼るだけでもいい」という書き方では、CommonMark 既定の
+    「単一の改行は無視される」挙動がユーザーの体感に反するため
+  - `linkify: false`（既定値のまま）。オートリンクは Issue のスコープ外
+- **メモ作成時に冪等性キー（`memos.id`）を `new/+page.server.ts` の `load`
+  （サーバー側）で `crypto.randomUUID()` により生成し、hidden field 経由でフォームに
+  埋め込む**。#13 の `createMemo` が既にこの key による重複作成防止をサポートしており、
+  UI 側で使わなければ機能が死んだままになる。二重送信（ネットワーク再送・多重
+  クリック）で同じ内容のメモが重複作成される事故を無料で防げる
+  - **ただし `createMemo` の冪等性チェックは同じ id の再送を「内容を比較せず」
+    既存 memo をそのまま返す仕様**（#13）。ブラウザの戻る/進むによる bfcache 復元で
+    このページに戻ると、直前の送信と同じ draftId・入力途中の値が復元されるため、
+    ここで新しい内容に書き換えて送信すると `createMemo` は古い内容の memo を
+    返してしまい、ユーザーの新しい入力が黙って破棄される（curl で同一 id を
+    2回 POST し、2件目の内容が保存されないことを実際に確認した）。
+    `/app/memos/new` の `load` に `event.setHeaders({'cache-control':'no-store'})`
+    を追加してこのページを bfcache の対象外にしたが、**これはヒントに過ぎず、
+    全ブラウザでの bfcache 除外を保証するものではない**（未検証。特に Safari は
+    `no-store` でも bfcache を維持する場合があると知られており、このアプリの
+    主要ターゲットである iOS Safari で無効化される保証はない）。そのため
+    `no-store` だけに依存せず、`new/+page.server.ts` の action 側で
+    `createMemo` の戻り値（`memo.title`/`memo.content`）を今回の送信内容と比較し、
+    一致しなければ（＝古い draftId が使い回され、内容が黙って破棄されようと
+    している）409 を返す形にした。
+    - **これは `/app/memos/new` という単一の呼び出し元でのみ閉じた対処であり、
+      `createMemo`（`$lib/server/memos.ts`, #13）自体の契約や、それを直接呼ぶ
+      `/api/memos` POST（#13, 本 PR では無変更）の挙動は変えていない**（設計
+      レビューで「根本原因を閉じている」という記述が誤りだと指摘され訂正した）。
+      `/api/memos` に同じ id を異なる内容で2回 POST すれば、201 で古い内容が
+      返る余地は今も残っている。ただしこれは #13 で既に存在していた仕様であり
+      #14 が持ち込んだ回帰ではない。bfcache によるサイレントな二重送信は
+      ブラウザの通常のフォーム送信（本 PR が新設した `/app/memos/new`）でしか
+      発生しないため、UI 側の対処で十分と判断した。`createMemo` 自体に
+      内容比較を持たせる、あるいは `ValidationError` に判別用の `code` を
+      持たせるといった、より根本的な改修は #13 のスコープに踏み込むため
+      本 Issue では行わない
+- **編集フォームは `expectedUpdatedAt`（最後に読んだ `updatedAt` の ISO 文字列）
+  を hidden field で保持し、`updateMemo` の楽観的並行性制御にそのまま渡す**。
+  競合（409）時はエラーメッセージを表示し、フォームの入力内容は保持したまま
+  再送を促す
+  - **`fail(409, …)` のレスポンスに `expectedUpdatedAt` を（`data.memo.updatedAt` では
+    なく）今回の送信で使った古い値のまま含めて返す**（設計レビューで発見・修正）。
+    SvelteKit の form action は `fail()` を返す際もページの `load` を再実行するため、
+    hidden field を素朴に `data.memo.updatedAt` から描画すると、409 で再描画された
+    フォームの `expectedUpdatedAt` が競合相手の書き込みによる**最新の** `updatedAt`
+    に自動的に更新されてしまう。ユーザーがエラーメッセージに気付かず「保存」を
+    もう一度押すと、その時点では最新の `updatedAt` と一致するため何の警告もなく
+    通過し、フォームに残っていた古い入力内容で競合相手の変更を上書きしてしまう
+    ——楽観的並行性制御が本来防ぐはずのロストアップデートがそのまま発生する。
+    実際に curl で連続 POST して確認した上で修正した。修正後は、409 発生時は
+    常に「同じ古い `expectedUpdatedAt` で送信 → 再度 409」になるため、最新の内容を
+    取得して手動でマージするには実際にページを再読み込みする（＝ `form` が
+    リセットされ、`data.memo` から真に最新の値を描画し直す）以外の経路がない
+- **削除は確認なしの `<form method="POST" action="?/delete">` + クライアント側の
+  `confirm()` のみ**。design mock のアカウント削除のような専用モーダルは、
+  メモ削除（`archived_at` を立てる論理削除で取り消し不能ではない）には過大と判断し、
+  「素の CSS で最低限整える」という技術スタックの方針に沿って作らなかった
+- **一覧のページネーションは `offset` クエリパラメータのみで実装し、`limit` は
+  20 固定**。タグ・全文検索は #28 のスコープ外のため、design mock にある検索欄・
+  タグフィルタは実装していない
+- **SvelteKit 2.26 で追加された `resolve()`（`$app/paths`）を全ての内部 `<a href>`
+  に使った**。`eslint-plugin-svelte` の `svelte/no-navigation-without-resolve`
+  ルールが有効になっており、リテラルの `href` 文字列では lint が落ちる。
+  このリポジトリで内部リンクを持つページを追加したのは #14 が初めてで、これまで
+  このルールに触れていなかった
+- **`{@html}` の ESLint 警告（`svelte/no-at-html-tags`）は詳細画面の該当行に
+  ピンポイントで `eslint-disable-next-line` した**。理由は `renderMarkdown()` の
+  `html: false` 設定により生 HTML が構造的に混入し得ないため（上記の Markdown
+  レンダラの節を参照）。ルール自体を無効化すると、将来 `{@html}` を無検証の値に
+  対して使うコードが追加されても検知できなくなるため、行単位に留めた
+- **作成・編集フォームの `maxlength` は `TITLE_MAX_LENGTH`/`CONTENT_MAX_LENGTH`
+  （`$lib/server/memos.ts`）の値をリテラルで複製せず、`+page.server.ts` の `load`
+  から `data.titleMaxLength`/`data.contentMaxLength` として渡す形にした**（設計
+  レビューで指摘）。`.svelte` は `$lib/server/*` を直接 import できないため、
+  load 経由で値を渡す以外に重複を避ける手段がない
+- **`packages/db/migrations/0006_seed_system_interval_preset.sql` が投入する
+  `interval_presets` 行の削除・置き換え手順は本 Issue では設計していない**
+  （設計レビューで指摘）。`memos.interval_preset_id` の FK には `onDelete` が
+  指定されていない（既定 `NO ACTION`）ため、この行を本番投入後にメモが作られた
+  状態で削除しようとすると、参照している memo 側の `interval_preset_id` を
+  先に付け替えるデータ移行が必要になる。#15/#16 でプリセット管理を実装する際に
+  対応すること
+- **`+page.server.ts` の load/actions に対する自動テストは追加していない**。
+  このリポジトリは `$lib/server/*.ts` のロジックを vitest-pool-workers で、
+  ルート層の実際の挙動を playwright-cli / 手動確認で検証する、という役割分担
+  （#10/#11/#13 で確立済み）を踏襲した。今回の実装が薄いラッパーに留まらず
+  実質的なロジック（フォームパース・エラー→fail 変換・冪等性キー・楽観的
+  並行性制御）を持つことは認識しており、レビューで発見された不具合
+  （上記の409再送問題、bfcache二重送信問題）はいずれも curl による直接リクエストで
+  再現・修正確認した。自動テストとしては固定化していない
+- **一覧・詳細ページの `load` は、テンプレートが表示に使わない `content`（Markdown
+  原文、最大 50,000 文字）をクライアントへ返さない**（設計レビューで指摘）。一覧は
+  `excerpt()`（先頭 80 文字程度への切り詰め）をテンプレート側ではなく `load` 側で
+  行い `excerpt` フィールドだけを返す。詳細ページは `renderMarkdown()` 済みの
+  `renderedContent` しか表示に使わないため、`memo` は `id`/`title` だけに絞って返す。
+  20 件 × 最大 50,000 文字を毎回まるごとハイドレーションペイロードに乗せていた
+  無駄を解消した
+- **`$lib/server/memos.ts`（#13）の `ValidationError` が投げる英語のメッセージ
+  （`title is required` 等）や、内部フィールド名を含むメッセージ
+  （`intervalPresetId does not reference an accessible preset`）を、そのまま
+  `fail()` 経由でユーザーに見せていた**（要件レビューで指摘）。UI 全体が日本語で
+  統一されているのに対する不整合であり、後者はプリセット選択 UI 自体を持たない
+  この画面にとって技術的すぎる内部詳細の漏洩でもある。
+  `apps/web/src/lib/server/form-messages.ts` に `translateMemoValidationMessage()`
+  を追加し、既知のメッセージ（タイトル必須・タイトル/本文の文字数上限）だけを
+  日本語に翻訳し、それ以外（`intervalPresetId` 関連や将来追加されるメッセージ）は
+  内容を漏らさない汎用メッセージにフォールバックする。フォーム解析失敗時の
+  メッセージも `INVALID_FORM_SUBMISSION_MESSAGE` という定数にして同じファイルに
+  集約し、`new`/`edit` 双方の `+page.server.ts` で複製しないようにした
+  （設計レビューで「新設した集約先を使わず3箇所に直書きされている」と指摘され修正）。
+  この対応表は `memos.ts` 側のメッセージ文字列と正規表現で結合している脆い設計
+  であるため、当初 `apps/web/src/lib/server/form-messages.test.ts` に
+  `TITLE_MAX_LENGTH`/`CONTENT_MAX_LENGTH` を使ってテスト側で文字列を組み立てて
+  検証するテストを追加した（要件レビューで「他の `$lib/server/*.ts` にはテストが
+  あるのにこのファイルにはない」と指摘され追加）。
+  - **しかしこのテストには実効性が無いことが後続のレビュー（正確性・要件の
+    2エージェントが独立に、`memos.ts` の実際のメッセージ文言を書き換えて
+    テストを再実行するという同じ方法で）指摘された**。テストが
+    `translateMemoValidationMessage()` に渡す入力は `memos.ts` の文言を
+    テスト側で手打ちで再現した文字列であり、`assertTitle`/`assertContent` を
+    実際に呼んで例外メッセージを取得していなかったため、`memos.ts` 側の文言が
+    変わってもテストの入力は変化せず、常に green のまま通り続けていた
+    （実際に `assertTitle` のメッセージを書き換えて再実行し、この不備を
+    自分でも再現確認した上で修正した）。修正後は `cloudflare:test` の `env.DB`
+    を使い、`createMemo` を実際に呼んで発生した本物の `ValidationError.message`
+    を `translateMemoValidationMessage()` に通す形に書き直した。この修正が
+    実際に機能することも、`assertTitle` のメッセージを一時的に書き換えて
+    テストが red になることを確認してから元に戻す、という同じ手法で検証した
+  - **`ValidationError` に判別用の `code`（例: `'title_required'`）を持たせて
+    文字列マッチを排除する、という、より頑健な代替案は採らなかった**（設計
+    レビューで提案されたが見送った）。`ValidationError` のクラス定義・全ての
+    throw 箇所は `$lib/server/memos.ts`（#13、既にクローズ済みで #14 は無変更の
+    ままにする方針）にあり、そこへ手を入れるのは #13 のスコープに踏み込む
+    ことになるため
+  - **`intervalPresetId does not reference an accessible preset`
+    （システム標準プリセットの行が欠落した場合のみ発生しうる）を、ユーザー起因の
+    400 ではなくシステム障害として 500 系で扱う、という案も見送った**（設計・
+    要件レビューで指摘）。現状のコードベースには `interval_presets` 行を削除する
+    経路が一切存在しない（#15/#16 未着手）ため、本 Issue の時点ではこの分岐は
+    到達不能であり、到達しない異常系のために特別なハンドリングを持たせるのは
+    過剰と判断した。#15/#16 でプリセットの削除・置き換えが可能になったら、
+    この分岐の扱いを再検討すること
+- **タイトル入力に `required` 属性を追加した**（要件レビューで指摘）。`maxlength`
+  はあったが空タイトルを弾く仕組みがなく、`assertTitle` の「空文字列は
+  `ValidationError`」という既存の制約（#13）にブラウザの標準バリデーションで
+  先回りできていなかった
+- **編集フォームの hidden field `expectedUpdatedAt` が欠落した改ざんリクエストの
+  場合、`fail()` に `''`（空文字列）ではなく `undefined` を返すよう修正した**
+  （要件レビューで指摘）。`+page.svelte` 側は `form?.expectedUpdatedAt ?? data.memo.updatedAt...`
+  という `??` によるフォールバックを使っており、`''` は falsy だが nullish ではないため
+  フォールバックされず、hidden field が空のまま再送され続けて `new Date('')` が
+  invalid になり、手動リロードでしか抜けられなくなっていた。通常の操作では
+  到達しない経路（フォームを直接改ざんした場合のみ）だが、安価に直せるため修正した
+- **`/app/memos/new` の `load` でも `requireAuthedDb(event)` を呼ぶようにした**
+  （設計レビューで指摘）。この `load` は DB もユーザー固有データも読まないため
+  実害はなかったが、「追加した全 load/action で個別に認可チェックする」という
+  このファイル内の既存の記述（#11 節を参照）と実装が食い違っていた。将来この
+  `load` がユーザー固有の値を返すよう変更された際に、認可チェックを追加し忘れる
+  リスクをなくすため、無害なうちに揃えた
+- **編集ページの `load` も、一覧・詳細ページと同じ projection の方針に揃えた**
+  （設計レビューで指摘）。`getMemo` の戻り値（`id`/`userId`/`title`/`content`/
+  `intervalPresetId`/`createdAt`/`updatedAt`）をそのまま返していたが、
+  テンプレートが使うのは `id`/`title`/`content`/`updatedAt` だけなので、
+  未使用の `userId`/`intervalPresetId`/`createdAt` を落とした
+- **`/app/memos/new` の 409 メッセージを「ページを再読み込みしてから」ではなく
+  「もう一度『保存』を押してください」に修正した**（設計レビューで指摘・実機で
+  再現確認）。SvelteKit の form action は `fail()` を返す際もこのページの
+  `load` を再実行するため、409 の時点で hidden field の `id` は
+  `crypto.randomUUID()` により既に新しい draftId へ更新されている。そのため
+  実際にはページを手動でリロードしなくても、「保存」をもう一度押すだけで
+  新しい id により正しい内容のメモが作られる（curl で実際に、409後に
+  埋め込まれる hidden id が新しい値になっており、その値のまま再送すると
+  成功することを確認した）。「再読み込みが必要」という誤った操作を要求する
+  メッセージになっていたのを修正した。この `id` の扱いは、編集ページの
+  `expectedUpdatedAt`（送信時の値を固定し、load 再実行に追従させない）とは
+  意図的に逆方向の対処であり、`[id]/edit/+page.server.ts` の該当コメントに
+  「揃えないこと」を明記した
+- **一覧の `excerptOf()` を `String#slice`（UTF-16 コード単位）ではなく
+  `Array.from()`（コードポイント単位）で切り詰めるよう修正した**（正確性
+  レビューで2名のレビューアが独立に指摘）。80文字目付近に絵文字等のサロゲート
+  ペア文字があると、ペアが分断されて文字化けした表示になり得た
+- **一覧の空状態メッセージを、`data.total === 0`（メモが1件もない）と
+  `data.items.length === 0` かつ `data.total > 0`（他タブでの削除や `offset`
+  の手動書き換えで、今のページには表示するものがないだけ）とで出し分けるように
+  した**（要件レビューで指摘）。後者でも「まだメモがありません」と表示すると、
+  実際にはメモが存在するのに誤解を招く
+- **`excerptOf()` を `apps/web/src/routes/app/memos/+page.server.ts` 内の非公開
+  関数から `apps/web/src/lib/server/excerpt.ts` に切り出し、
+  `excerpt.test.ts`（サロゲートペア境界のケースを含む）を追加した**（要件
+  レビューで指摘）。ルート層（`+page.server.ts`）のロジックはこのリポジトリの
+  規約でテスト対象外だが、このロジックは一度サロゲートペア分断のバグを
+  実際に埋め込んだ実績があり、`markdown.ts`/`form-messages.ts` と同じ
+  「実質的なロジックを持つ `$lib/server/*.ts` にはテストを書く」規約の対象に
+  すべきと判断し、非公開のまま留めず切り出した
+- **フォーム送信された `content` を、DB へ渡す前に CRLF を LF へ正規化する
+  （`apps/web/src/lib/server/text.ts` の `normalizeLineEndings()`）**（要件
+  レビューで指摘）。ブラウザは `&lt;textarea&gt;` の送信時に改行を CRLF へ正規化する
+  仕様があるが、クライアント側の `maxlength` はライブの DOM 値（LF）で文字数を
+  数える。改行を多く含む本文をブラウザ上でちょうど `CONTENT_MAX_LENGTH` まで
+  入力できても、送信後は CRLF 化された分だけ文字数が増え、サーバー側の
+  `assertContent` に弾かれて本人の認識と食い違うエラーになり得た。また
+  `/api/memos`（JSON、CRLF化されない）経由の保存と改行コードが不揃いになる
+  問題も併せて解消した
+- **編集フォームで `NotFoundError`（他タブでの同時アーカイブ等）が発生した場合、
+  入力中のタイトル・本文を保持せず、通常の `error(404, …)` に委ねる挙動は
+  意図的に変えなかった**（要件レビューで、`ValidationError`/`ConflictError`
+  との「入力保持の一貫性のなさ」として指摘されたが見送った）。`ValidationError`/
+  `ConflictError` は「対象は存在するが入力かタイミングを直せば成功しうる」
+  失敗であり、入力を保持して再入力の手間を省く価値がある。一方
+  `NotFoundError` は「対象そのものが既に無い」失敗であり、そこへは何を
+  再送しても成功しない。この違いにより、404 は下記の `+error.svelte` で
+  日本語のメッセージと一覧への導線を出すに留め、入力保持の対称性はあえて
+  揃えなかった
+- **`&lt;textarea&gt;{content}&lt;/textarea&gt;` という記法により、本文が改行で
+  始まる場合に HTML 仕様上その改行が失われるのではないか、という懸念が
+  4周目のレビューでも改めて提起された**。これは1周目のレビューで advisor から
+  指摘され、実際に先頭が改行のメモを作成しローカルの Chromium
+  （playwright-cli）で編集画面を開いて `textarea.value` を直接取得する形で
+  実測済みであり、先頭の改行は失われないことを確認している（詳細は本ファイルの
+  1周目の検証記録、および実装時のセッションログを参照）。4周目のレビューは
+  この検証を再実行しておらず理論上の懸念に留まるものだったため、既存の実測結果を
+  優先し、追加の対応はしていない
+- **`/app/+error.svelte` を新設し、`error(401/404/409/500, …)`（#10/#13 由来、
+  `requireAuthedDb`/`handleMemoError`）が投げるエラーを日本語で表示するようにした**
+  （設計レビューで指摘）。これらは元々 `/api/*`（JSON API）と `/debug/*`（開発者
+  専用ページ）でしか使われておらず、SvelteKit 既定の英語・無装飾エラーページで
+  問題にならなかったが、#14 で `/app/memos/*` という実際のユーザー向け HTML
+  ページから初めて到達可能になった。別タブでの削除後に詳細・編集を開く（404）、
+  編集中のセッション切れ（401）などは実際に踏みやすい経路であり、「ページ全体を
+  日本語で統一する」という本節自身の方針（`translateMemoValidationMessage` 導入の
+  動機と同じ）と矛盾しないよう、404/401/409 は個別のメッセージと導線（ログイン
+  画面 / 一覧画面へのリンク）を、それ以外は汎用メッセージを表示する
+- **`docs/design-decisions.md` に記載した「ユーザー承認済み」は GitHub Issue 上の
+  記録ではない**（スコープ外レビューで、`gh issue view 14 --json comments` が
+  空であることを指摘され、経緯を明記した）。この PR の作業セッション内で
+  ユーザー本人に選択肢（暫定シード/未実装のまま進める/プリセットCRUDまで
+  作り込む）を提示し、その場で選んでもらった判断であり、GitHub コメントとしては
+  残していない
 
 ## 開発の進め方
 

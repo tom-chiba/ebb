@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { authClient } from '$lib/auth-client';
 	import type { LayoutProps } from './$types';
 
@@ -17,6 +18,10 @@
 </script>
 
 <header>
+	<nav>
+		<a href={resolve('/app')}>ホーム</a>
+		<a href={resolve('/app/memos')}>メモ</a>
+	</nav>
 	<span>{data.user.name}</span>
 	<button onclick={signOut}>ログアウト</button>
 </header>
@@ -34,5 +39,10 @@
 		justify-content: space-between;
 		padding: 0.75rem 1rem;
 		border-bottom: 1px solid #ccc;
+	}
+
+	nav {
+		display: flex;
+		gap: 1rem;
 	}
 </style>
