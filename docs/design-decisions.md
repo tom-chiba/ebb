@@ -559,6 +559,59 @@ google is missing clientId or clientSecret` の warning のみで両ページと
   パースされること（ネットワークエラーで止まり、構文エラーでは止まらないこと）と、
   `jq` によるパース・不足検出ロジックをモックの JSON で確認したのみ
 
+## ログイン / ログアウト UI とルート保護 (#11)
+
+- **`redirectTo` クエリパラメータはオープンリダイレクト対策として `$lib/server/safe-redirect.ts`
+  の `toSafeRedirect` でサニタイズする**。当初「単一の `/` で始まり `//`・`/\` でない」という
+  手書きの正規表現チェックで実装したが、レビューで指摘され実測確認した通りこれでは不十分
+  だった: ブラウザの URL パーサーは解釈前に文字列中の ASCII タブ/改行をすべて除去するため、
+  `redirectTo=%2F%09%2Fevil.com`（デコード後 `"/\t/evil.com"`）は正規表現を通過しつつ、
+  実際に `Location` ヘッダーとして解決されると `"//evil.com"` 相当になり外部オリジンへの
+  オープンリダイレクトが成立してしまう（`new URL("/\t/evil.com", "https://example.com/")`
+  が `https://evil.com/` になることを実測確認済み）。手書きの禁止パターンを増やす対症療法
+  ではなく、ブラウザが実際に使うのと同じ WHATWG URL パーサー（Node の `URL`）にダミーの
+  ベース URL を渡して解決し、**解決後も origin が変わっていないか**で判定する方式に変更した。
+  これによりタブ/改行に限らず、同じパーサーが認識するあらゆる scheme-relative / 絶対 URL
+  表現を一律に弾ける。**比較対象は `SAFE_BASE` の文字列そのものではなく
+  `new URL(SAFE_BASE).origin`（`SAFE_ORIGIN`）から導出する**（レビュー指摘）。
+  `SAFE_BASE` に将来パスや末尾スラッシュが付く変更が入ると `origin` の文字列表現と
+  食い違い、比較が常に不一致になって全リダイレクトが黙って `fallback` に落ちる
+  （安全側だが機能的なリグレッション）ため、`URL#origin` の値同士で比較する。
+  検証は `/login/+page.server.ts` の `load` に集約し、コンポーネント側
+  （`callbackURL` に渡す値）は `data.redirectTo` を素通しするだけにした。同じ値を
+  `/app/+layout.server.ts` 側でも扱うが、そちらは `url.pathname + url.search` から
+  自前で組み立てた値（常に同一オリジン）なのでサニタイズ不要
+- **`/app/+layout.server.ts` はページのみを保護する**。SvelteKit の layout load は
+  ページ（`+page.svelte`）にのみ実行され、`+server.ts`（API エンドポイント）には
+  適用されない。今後 `/app` 配下に `+server.ts` を追加する場合は、そのファイル自身で
+  `locals.user` を確認する必要がある（「まとめて保護する」はページ限定の意味）
+- **`/app/+page.svelte` に専用の `+page.server.ts` は作らなかった**。SvelteKit は
+  祖先の layout load が返したデータを子孫の `PageProps`（`./$types` 経由）にマージするため、
+  `/app/+layout.server.ts` が返す `user` を `/app/+page.svelte` からそのまま参照できる
+- **既にログイン済みで `/login` に直接アクセスした場合は `redirectTo`（既定 `/app`）へ
+  即リダイレクトする**。ログインフォームを再度見せる意味がなく、実装も
+  `/login/+page.server.ts` の `load` に3行足すだけのため許容した
+- **`/app/+layout.svelte` のログアウトボタンは `authClient.signOut()` の戻り値
+  `{ error }` を確認し、失敗時は `location.reload()` を呼ばずメッセージを表示する**。
+  当初は戻り値を無視して常に reload していたが、レビューで `debug/auth/+page.svelte`
+  （#10）の既存パターンとの後退を指摘され修正した。戻り値を見ないと、sign-out
+  リクエスト失敗時にサーバー側 Cookie が破棄されないままリロードされ、
+  `/app/+layout.server.ts` は `locals.user` が真のままなので何も起きず、
+  ユーザーには失敗が一切通知されない
+- **検証は「コード起点」に限定した**（#10 の Step 5 と同じ方針）。確認したのは
+  (1) 未ログインで `/app` を開くと `/login?redirectTo=%2Fapp` へ 303 リダイレクトされること、
+  (2) ログイン済み状態（後述の方法で D1 に直接セッションを作って再現）で `/app` を開くと
+  ヘッダーにユーザー名が表示されリダイレクトされないこと、(3) ログアウトボタンで
+  セッションが破棄され `/login` に戻ること。実際の Google 同意画面を通したログイン→
+  元ページへの復帰そのものは、実アカウントでの操作が前提のためユーザー側の実機確認が必要
+  （#10 と同じ制約）
+- **ログイン済み状態を作る方法**: better-auth のセッション Cookie（`better-auth.session_token`）
+  は生の `session.token` ではなく `` `${token}.${base64(HMAC-SHA256(token, BETTER_AUTH_SECRET))}` ``
+  を `encodeURIComponent` した値（`better-call` の `signCookieValue`、実装をソースで確認済み）。
+  検証用に `user`/`session` 行をローカル D1 に直接 insert し、上記アルゴリズムで計算した
+  署名付き Cookie をブラウザにセットすることでログイン済み状態を再現した
+  （実際の Google OAuth を経由しない）。検証後は insert した行を削除した
+
 ## 開発の進め方
 
 - リポジトリ: public
