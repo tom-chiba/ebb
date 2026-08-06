@@ -1,8 +1,9 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createDb, intervalPresets, user, type Db } from '@ebb/db';
+import { ValidationError } from './errors';
 import { translateMemoValidationMessage } from './form-messages';
-import { CONTENT_MAX_LENGTH, createMemo, TITLE_MAX_LENGTH, ValidationError } from './memos';
+import { CONTENT_MAX_LENGTH, createMemo, TITLE_MAX_LENGTH } from './memos';
 
 let db: Db;
 let userId: string;

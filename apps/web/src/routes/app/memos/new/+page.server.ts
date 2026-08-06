@@ -4,13 +4,9 @@ import {
 	INVALID_FORM_SUBMISSION_MESSAGE,
 	translateMemoValidationMessage
 } from '$lib/server/form-messages';
+import { ValidationError } from '$lib/server/errors';
 import { DEFAULT_INTERVAL_PRESET_ID } from '$lib/server/interval-presets';
-import {
-	CONTENT_MAX_LENGTH,
-	createMemo,
-	TITLE_MAX_LENGTH,
-	ValidationError
-} from '$lib/server/memos';
+import { CONTENT_MAX_LENGTH, createMemo, TITLE_MAX_LENGTH } from '$lib/server/memos';
 import { normalizeLineEndings } from '$lib/server/text';
 import type { Actions, PageServerLoad } from './$types';
 

@@ -4,15 +4,8 @@ import {
 	INVALID_FORM_SUBMISSION_MESSAGE,
 	translateMemoValidationMessage
 } from '$lib/server/form-messages';
-import {
-	CONTENT_MAX_LENGTH,
-	ConflictError,
-	getMemo,
-	handleMemoError,
-	TITLE_MAX_LENGTH,
-	updateMemo,
-	ValidationError
-} from '$lib/server/memos';
+import { ConflictError, handleDomainError, ValidationError } from '$lib/server/errors';
+import { CONTENT_MAX_LENGTH, getMemo, TITLE_MAX_LENGTH, updateMemo } from '$lib/server/memos';
 import { normalizeLineEndings } from '$lib/server/text';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -29,7 +22,7 @@ export const load: PageServerLoad = async (event) => {
 			contentMaxLength: CONTENT_MAX_LENGTH
 		};
 	} catch (err) {
-		handleMemoError(err);
+		handleDomainError(err);
 	}
 };
 
@@ -122,7 +115,7 @@ export const actions: Actions = {
 					conflict: true
 				});
 			}
-			handleMemoError(err);
+			handleDomainError(err);
 		}
 	}
 };

@@ -20,6 +20,7 @@
 <header>
 	<nav>
 		<a href={resolve('/app')}>ホーム</a>
+		<a href={resolve('/app/reviews')}>今日の復習</a>
 		<a href={resolve('/app/memos')}>メモ</a>
 	</nav>
 	<span>{data.user.name}</span>

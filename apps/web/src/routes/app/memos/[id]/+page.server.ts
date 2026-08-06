@@ -1,7 +1,8 @@
 import { redirect } from '@sveltejs/kit';
 import { requireAuthedDb } from '$lib/server/api';
+import { handleDomainError } from '$lib/server/errors';
 import { renderMarkdown } from '$lib/server/markdown';
-import { archiveMemo, getMemo, handleMemoError } from '$lib/server/memos';
+import { archiveMemo, getMemo } from '$lib/server/memos';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async (event) => {
@@ -16,7 +17,7 @@ export const load: PageServerLoad = async (event) => {
 			renderedContent: renderMarkdown(memo.content)
 		};
 	} catch (err) {
-		handleMemoError(err);
+		handleDomainError(err);
 	}
 };
 
@@ -26,7 +27,7 @@ export const actions: Actions = {
 		try {
 			await archiveMemo(db, user.id, event.params.id);
 		} catch (err) {
-			handleMemoError(err);
+			handleDomainError(err);
 		}
 		redirect(303, '/app/memos');
 	}

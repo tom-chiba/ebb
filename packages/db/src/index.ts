@@ -3,7 +3,8 @@ import type { D1Database } from '@cloudflare/workers-types';
 import * as schema from './schema';
 
 export * from './schema';
-export { and, count, desc, eq, isNull, or } from 'drizzle-orm';
+export { and, asc, count, desc, eq, exists, gt, isNull, lte, or, sql } from 'drizzle-orm';
+export type { BatchItem } from 'drizzle-orm/batch';
 
 export function createDb(d1: D1Database) {
 	return drizzle(d1, { schema });

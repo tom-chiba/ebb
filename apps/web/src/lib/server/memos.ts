@@ -1,4 +1,3 @@
-import { error } from '@sveltejs/kit';
 import {
 	and,
 	count,
@@ -12,6 +11,8 @@ import {
 	type Db
 } from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
+import { ConflictError, NotFoundError, ValidationError } from './errors';
+import { clamp, normalizeOffset, type PaginationOptions } from './pagination';
 
 export const TITLE_MAX_LENGTH = 200;
 export const CONTENT_MAX_LENGTH = 50_000;
@@ -19,15 +20,7 @@ export const CONTENT_MAX_LENGTH = 50_000;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
-export class ValidationError extends Error {}
-export class NotFoundError extends Error {}
-// 楽観的並行性制御で、更新対象が最後に読んだ状態から変わっていた場合に投げる。
-export class ConflictError extends Error {}
-
-interface ListOptions {
-	limit?: number;
-	offset?: number;
-}
+type ListOptions = PaginationOptions;
 
 // archivedAt は「一覧・取得できる memo は常に非アーカイブ」という不変条件により
 // 公開 API 上は常に null にしかならないため、レスポンスから落とす。
@@ -61,7 +54,7 @@ function ownMemo(userId: string, id: string) {
 
 export async function listMemos(db: Db, userId: string, options: ListOptions = {}) {
 	const limit = clamp(options.limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT);
-	const offset = Math.max(0, Math.trunc(options.offset ?? 0));
+	const offset = normalizeOffset(options.offset);
 	const where = and(eq(memos.userId, userId), isNull(memos.archivedAt));
 
 	const [items, totalRows] = await Promise.all([
@@ -86,11 +79,6 @@ export async function getMemo(db: Db, userId: string, id: string) {
 	const memo = rows[0];
 	if (!memo) throw new NotFoundError('memo not found');
 	return toMemoResponse(memo);
-}
-
-function clamp(value: number, min: number, max: number) {
-	if (!Number.isFinite(value)) return min;
-	return Math.min(Math.max(Math.trunc(value), min), max);
 }
 
 function assertTitle(title: string) {
@@ -345,14 +333,4 @@ export async function archiveMemo(db: Db, userId: string, id: string) {
 	const archived = archivedRows[0];
 	if (!archived) throw new NotFoundError('memo not found');
 	return archived;
-}
-
-// ValidationError はクライアント自身の入力に関する情報なのでメッセージをそのまま返す。
-// NotFoundError は「存在しない」と「他人のもの」を区別させないため、常に固定文言にする。
-// ConflictError はクライアントに再取得の上でのリトライを促すため 409 にする。
-export function handleMemoError(err: unknown): never {
-	if (err instanceof ValidationError) error(400, err.message);
-	if (err instanceof NotFoundError) error(404, 'Not Found');
-	if (err instanceof ConflictError) error(409, err.message);
-	throw err;
 }
