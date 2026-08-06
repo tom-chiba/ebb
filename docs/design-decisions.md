@@ -1346,6 +1346,98 @@ PR #46 作成後、Codex の通常レビューと adversarial レビュー（`/c
   import してはいなかった（スコープ外の変更レビューで、この点の記述が不正確だったと
   指摘され訂正した）。
 
+## 間隔設定の変更 UI と既存 reviews の再計算 (#18)
+
+- **設定画面（`/app/settings`）のスコープはプリセット管理のみに絞った**（ユーザー承認済み）。
+  プリセットの一覧・作成（自由入力のパース）・`intervals` の編集・削除、新規メモの
+  既定プリセット選択を行う。既存の個別メモに対するプリセット切替 UI
+  （`updateMemo` の `intervalPresetId` を変更する UI）は今回のスコープに含めない。
+  `updateMemo` 自体は #13 時点から `intervalPresetId` を受け付けるが、呼び出し元の
+  UI が存在しないため実質未使用のまま残る。この経路（`/api/memos/[id]` の PATCH）から
+  `intervalPresetId` を変更した場合、reviews は再計算されない（#16 の時点からの既知の
+  制約がそのまま残る）。恒久的な解消は将来 Issue に委ねる。
+
+- **プリセットの `intervals` は作成後も編集可能にし、編集時にそのプリセットを使っている
+  全ての非アーカイブメモへ再計算を適用する**（`docs/schema.md` の reviews 節が委ねていた
+  二択のうち、「作成後は編集不可にし削除・新規作成のみ許可する」ではなくこちらを
+  採用。ユーザー承認済み）。
+
+- **再計算のレシピ**（`$lib/server/reviews.ts` の `planReviewRecalculation`）:
+  対象メモの未完了 `reviews` を、**期限到来済み（due）のものも含めて全て削除**し、
+  完了済みステップ数を起点に新しい `intervals` から残りステップを再生成する。
+  完了済み（`completedAt IS NOT NULL`）の行には一切触れない。
+  - **due 行も特別扱いせず作り直す**（ユーザー承認済み）。Issue 本文の「注意」は
+    「期限が来ている分まで動かすと混乱する」として due 行を保持する案を示唆していたが、
+    `docs/schema.md` のレシピ（未完了行を全 DELETE）をそのまま採用する方を選んだ。
+    「今日の復習」に出ていた項目の予定が変わる可能性があることは、設定画面の
+    「N 件の予定が更新されます」プレビューで事前に明示する。
+  - **baseTime は「最新の完了済みステップの `completedAt`（無ければ `memos.createdAt`）」**
+    とした（advisor の指摘で、docs のどこにも明記されていないことが判明した未決定事項）。
+    #17 の `completeReview` が残りステップを再アンカリングする際の基準
+    （完了時刻を起点にする）と揃えており、計算モデルの一貫性を保つ。
+  - **新しい `intervals` の要素数が既存の完了済みステップ数以下の場合、残りステップは
+    生成せず、そのメモは全ステップ完了扱いになる**（エラーにはしない。ユーザー承認済み。
+    `docs/schema.md` が #18 に委ねていたエッジケースへの回答）。
+  - 「常に最小の未完了 step から完了させる」不変条件（#17 の `assertIsCurrentStep` が
+    保証）に依存しており、完了済み行数は「最大の完了済み step + 1」と一致する
+    （欠番が発生しない）ため、完了済み行を1件1件数えるクエリを別に発行する必要はない。
+
+- **アーカイブ済みメモは再計算対象・件数プレビューの両方から除外する**
+  （advisor の指摘）。`archiveMemo`（#16）が未完了 reviews を削除して成立させている
+  「アーカイブ済みメモに未完了 reviews が残らない」という `docs/schema.md` の不変条件を、
+  素朴な再計算が静かに復活させてしまうため。`$lib/server/interval-presets.ts` の
+  `collectAffectedMemoIds` で `memos.archivedAt IS NULL` を必ず条件に含める。
+
+- **「N 件の予定が更新されます」のプレビューと実際の更新は同じ定義を共有する**
+  （`countReviewsAffectedByPresetChange` と `updateCustomPresetIntervals` が実行時に
+  返す件数）。「非アーカイブメモの未完了 reviews 件数」という同一の定義を使い、
+  #17 で指摘されたバナー件数と一覧のズレと同型の不整合が起きないようにしている。
+  確定時（`confirmed=true` での再送信）に返す件数も、送信された hidden field の数値を
+  信用せず、実行直前に読み直した実数の合計を使う（advisor の指摘。別タブでの操作等による
+  ズレを防ぐ）。
+
+- **1回の `db.batch()` に積む文の数に上限（`MAX_BATCH_STATEMENTS = 500`）を設けた**
+  （advisor の指摘）。プリセット編集は「プリセット UPDATE + 影響メモ数 ×
+  (DELETE 1 + INSERT 最大 `MAX_INTERVAL_COUNT` 件)」を1つのバッチにまとめるため、
+  影響メモ数に応じて文の数が増える。「Free プランは CPU 10ms/リクエスト」という既知の
+  制約（`docs/design-decisions.md` の要注意点2）に対し、無制限に積む設計を避けるための
+  安全弁。本アプリの想定ユーザー規模ではまず到達しない、十分に大きい値として選んだ
+  任意の上限。超過時は `ValidationError` で拒否する。
+
+- **`user_settings` テーブルを新設し、新規メモ作成時の既定プリセットをユーザーごとに
+  持たせた**。Better Auth 生成物（`auth-schema.ts`、手動編集しない）に `additionalFields`
+  を足す案も検討したが、生成・実行時設定の二重管理（`rateLimit.storage` と同じ運用上の
+  負担）が増え、業務データを `schema.ts` 側に集約する既存の境界とも合わないため見送った。
+  `default_interval_preset_id` は `memos.interval_preset_id` と同じ「他ユーザーの
+  custom プリセットを指せてしまう」問題を持つため、`0004` と同型のトリガー（`0009`）で
+  テナント分離を DB 層に強制する。一方 `onDelete` は `memos.interval_preset_id`
+  （`no action`）とは異なり `set null` にし、既定プリセットとして参照されているだけの
+  カスタムプリセットの削除まではブロックしない（削除可否の判定は `memos` の使用有無だけを
+  見る。ユーザー承認済み、詳細は `docs/schema.md` の `user_settings` 節）。
+  `apps/web/src/routes/app/memos/new/+page.server.ts` は、固定値
+  `DEFAULT_INTERVAL_PRESET_ID` の送信から `getDefaultPresetId(db, user.id)`
+  （未設定ならシステム標準にフォールバック）に切り替えた。
+
+- **プリセットのバリデーション（最小1時間・整数・厳密昇順・要素数上限）と、
+  自由入力のパース・表示用フォーマットは `packages/core` に置いた**
+  （値の出所を1箇所に保つ既存方針、`packages/core` は無依存なので単体テストが軽い）。
+  対応する単位は Issue 本文の例（`1h, 12h, 2d, 10d`）に合わせて `h`/`d` のみとし、
+  カレンダー単位（`w`/`m` 等）は導入しなかった。#15 が `intervals` を
+  「カレンダー概念を持たない時間単位の配列」と確定させているため、曖昧な
+  "1ヶ月" 相当の単位を増やすと #15 の決定と矛盾する。要素数上限
+  （`MAX_INTERVAL_COUNT = 20`）は Issue 本文が具体的な数を指定していないため、
+  既存のシステムプリセット最長（6ステップ）に十分な余裕を持たせた任意の値。
+  「厳密昇順」は同値も拒否する（重複禁止）。表示用フォーマット
+  （`formatIntervals`）はパースの逆変換で、24時間で割り切れる値は `d` 表記に
+  正規化する。編集フォームに保存済み値を表示し直す際、そのまま再送しても同じ値が
+  復元できることをテストで確認している（`parse(format(x)) === x` の往復）。
+
+- **`getAccessiblePreset`（#13 で `memos.ts` に定義）を `interval-presets.ts` へ移設した**。
+  新規メモの既定プリセット設定（`setDefaultPresetForUser`）でも同じ「自分の custom
+  プリセット、またはシステム標準プリセット」というアクセス可否チェックが必要になり、
+  `interval_presets` に関するチェックロジックの置き場所を1箇所に保つため。`memos.ts`
+  は `interval-presets.ts` から import するだけになった（動作の変更はない）。
+
 ## 開発の進め方
 
 - リポジトリ: public
