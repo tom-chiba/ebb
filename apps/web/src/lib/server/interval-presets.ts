@@ -176,6 +176,23 @@ async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[
 	return rows.map((row) => row.id);
 }
 
+// planReviewRecalculation が1メモあたりに積む文数の上限（DELETE 1 + INSERT 1）。
+// 実際の文数はこれより少ないことがある（完了済み行のみで DELETE 不要、新
+// intervals が0件で INSERT 不要、等）ため、実行系（updateCustomPresetIntervals）
+// はここではなく実際に組み立てた statements.length で判定する。プレビューは
+// 逆に、実行前に安全側（悲観的）に見積もる必要があるため、この上限値を使う。
+const MAX_STATEMENTS_PER_MEMO = 2;
+
+// 対象メモ数から、update 実行時に db.batch() へ積む文数（プリセット UPDATE 1件 +
+// 各メモ最大 MAX_STATEMENTS_PER_MEMO 件）の悲観的上限を超えるかを判定する。
+// 実際の文数は常にこの悲観的上限以下になるため、これを満たさない場合は
+// updateCustomPresetIntervals が必ず MAX_BATCH_STATEMENTS で拒否する（＝プレビューが
+// 「N件の予定が更新されます」と成功を示したのに、確定操作だけが後から拒否される
+// 非対称を防ぐ。正確性レビューで指摘）。
+function exceedsBatchStatementLimit(memoCount: number): boolean {
+	return 1 + memoCount * MAX_STATEMENTS_PER_MEMO > MAX_BATCH_STATEMENTS;
+}
+
 // 対象メモ群の未完了 reviews 件数。プレビュー（countだけ必要）と実行結果の返り値
 // （updateCustomPresetIntervals、実際に削除された件数の合計）の両方が
 // 「非アーカイブメモの未完了 reviews」という同じ定義を共有するための唯一の実装。
@@ -210,6 +227,9 @@ export async function previewPresetIntervalsUpdate(
 	parseIntervalsOrValidationError(rawIntervals);
 
 	const memoIds = await collectAffectedMemoIds(db, presetId);
+	if (exceedsBatchStatementLimit(memoIds.length)) {
+		throw new ValidationError('このプリセットを使っているメモが多すぎるため、一度に更新できません');
+	}
 	return { previewCount: await countIncompleteReviewsForMemos(db, memoIds) };
 }
 

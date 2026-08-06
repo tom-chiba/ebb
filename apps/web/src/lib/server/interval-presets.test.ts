@@ -159,6 +159,29 @@ describe('previewPresetIntervalsUpdate', () => {
 		expect(previewCount).toBe(6); // 2メモ × 3ステップ
 		expect(updatedReviewsCount).toBe(previewCount);
 	});
+
+	it('returns zero when the preset is not yet used by any memo', async () => {
+		const { previewCount } = await previewPresetIntervalsUpdate(db, ownerId, ownerPresetId, '2h');
+		expect(previewCount).toBe(0);
+	});
+
+	it('rejects the preview when the update would exceed MAX_BATCH_STATEMENTS, before it ever succeeds', async () => {
+		// 実行系（updateCustomPresetIntervals）と同じメモ数を使い、プレビューが
+		// 「N件の予定が更新されます」と成功を返した直後に確定操作だけが拒否される
+		// 非対称（正確性レビューで指摘）が起きないことを確認する。
+		const memoCount = Math.ceil((MAX_BATCH_STATEMENTS - 1) / 2) + 1;
+		for (let i = 0; i < memoCount; i++) {
+			await createMemo(db, ownerId, {
+				title: `memo-${i}`,
+				content: 'c',
+				intervalPresetId: ownerPresetId
+			});
+		}
+
+		await expect(
+			previewPresetIntervalsUpdate(db, ownerId, ownerPresetId, '1h, 2h')
+		).rejects.toThrow(ValidationError);
+	});
 });
 
 describe('updateCustomPresetIntervals', () => {
@@ -301,6 +324,65 @@ describe('updateCustomPresetIntervals', () => {
 		const rows = await db.select().from(reviews).where(eq(reviews.memoId, memo.id)).all();
 		expect(rows).toHaveLength(1);
 		expect(rows[0]?.completedAt).not.toBeNull();
+	});
+
+	it('succeeds with zero updated reviews when the preset is not yet used by any memo', async () => {
+		const { updatedReviewsCount } = await updateCustomPresetIntervals(
+			db,
+			ownerId,
+			ownerPresetId,
+			'2h'
+		);
+		expect(updatedReviewsCount).toBe(0);
+		const [preset] = await db
+			.select()
+			.from(intervalPresets)
+			.where(eq(intervalPresets.id, ownerPresetId))
+			.all();
+		expect(preset?.intervals).toEqual([2]);
+	});
+
+	it(`succeeds when the resulting batch is exactly at MAX_BATCH_STATEMENTS (${MAX_BATCH_STATEMENTS})`, async () => {
+		// 1（プリセット UPDATE）+ 249メモ × 2文（DELETE + INSERT、completedCount=0 <
+		// 新 intervals の長さ1）+ 1メモ × 1文（DELETE のみ、事前に step0 を完了させて
+		// completedCount=1 が新 intervals の長さ1以上になり INSERT が不要になる）
+		// = 500文ちょうど、で成功することを確認する（超過時に拒否する既存テストと対の境界値）。
+		const plainMemoCount = Math.floor((MAX_BATCH_STATEMENTS - 1) / 2);
+		for (let i = 0; i < plainMemoCount; i++) {
+			await createMemo(db, ownerId, {
+				title: `memo-${i}`,
+				content: 'c',
+				intervalPresetId: ownerPresetId
+			});
+		}
+
+		const specialMemo = await createMemo(db, ownerId, {
+			title: 'special',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(Date.now() - 1000) })
+			.where(eq(reviews.memoId, specialMemo.id));
+		const [due] = await db
+			.select({ id: reviews.id })
+			.from(reviews)
+			.where(eq(reviews.memoId, specialMemo.id))
+			.orderBy(reviews.step)
+			.limit(1)
+			.all();
+		if (!due) throw new Error('fixture setup failed');
+		await completeReview(db, ownerId, due.id);
+
+		const { updatedReviewsCount } = await updateCustomPresetIntervals(
+			db,
+			ownerId,
+			ownerPresetId,
+			'1h'
+		);
+		// plainMemoCount 件 × 元3ステップ + special の残り2ステップ（step1・step2）。
+		expect(updatedReviewsCount).toBe(plainMemoCount * 3 + 2);
 	});
 
 	it(`rejects the update when the resulting batch would exceed MAX_BATCH_STATEMENTS (${MAX_BATCH_STATEMENTS})`, async () => {
