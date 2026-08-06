@@ -1,14 +1,16 @@
 import { env } from 'cloudflare:test';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDb, eq, intervalPresets, reviews, userSettings, type Db } from '@ebb/db';
-import { NotFoundError, ValidationError } from './errors';
+import { ConflictError, NotFoundError, ValidationError } from './errors';
 import {
-	countReviewsAffectedByPresetChange,
 	createCustomPreset,
 	deleteCustomPreset,
 	DEFAULT_INTERVAL_PRESET_ID,
 	getDefaultPresetId,
 	listPresetsForUser,
+	MAX_BATCH_STATEMENTS,
+	PRESET_NAME_MAX_LENGTH,
+	previewPresetIntervalsUpdate,
 	setDefaultPresetForUser,
 	updateCustomPresetIntervals
 } from './interval-presets';
@@ -94,6 +96,69 @@ describe('createCustomPreset', () => {
 	it('rejects invalid intervals (validation delegated to packages/core)', async () => {
 		await expect(createCustomPreset(db, ownerId, 'bad', '2h, 1h')).rejects.toThrow(ValidationError);
 	});
+
+	it(`rejects a name longer than ${PRESET_NAME_MAX_LENGTH} characters`, async () => {
+		const tooLong = 'a'.repeat(PRESET_NAME_MAX_LENGTH + 1);
+		await expect(createCustomPreset(db, ownerId, tooLong, '1h')).rejects.toThrow(ValidationError);
+	});
+
+	it(`accepts a name exactly ${PRESET_NAME_MAX_LENGTH} characters long`, async () => {
+		const exactly = 'a'.repeat(PRESET_NAME_MAX_LENGTH);
+		const preset = await createCustomPreset(db, ownerId, exactly, '1h');
+		expect(preset.name).toBe(exactly);
+	});
+});
+
+// previewPresetIntervalsUpdate は updateCustomPresetIntervals（確定側）と全く同じ
+// 所有権チェック・構文検証を通る必要がある。片方だけ検証を通す実装に戻すと、
+// confirmed=false のプレビュー経路だけが認可・検証を素通りし、他ユーザーの
+// custom プリセットやシステムプリセットの id を渡すことでそのプリセットを使っている
+// （自分のものではない）メモの未完了 reviews 件数を取得できてしまう
+// （正確性レビューで指摘された情報漏洩の回帰テスト）。
+describe('previewPresetIntervalsUpdate', () => {
+	it('rejects previewing a system preset without leaking its usage count', async () => {
+		await expect(previewPresetIntervalsUpdate(db, ownerId, systemPresetId, '1h')).rejects.toThrow(
+			ValidationError
+		);
+	});
+
+	it('rejects previewing another users custom preset without revealing it exists', async () => {
+		await expect(
+			previewPresetIntervalsUpdate(db, ownerId, otherUserPresetId, '1h')
+		).rejects.toThrow(NotFoundError);
+	});
+
+	it('rejects a nonexistent presetId', async () => {
+		await expect(previewPresetIntervalsUpdate(db, ownerId, 'does-not-exist', '1h')).rejects.toThrow(
+			NotFoundError
+		);
+	});
+
+	it('rejects invalid intervals before showing any preview count', async () => {
+		await expect(
+			previewPresetIntervalsUpdate(db, ownerId, ownerPresetId, '2h, 1h')
+		).rejects.toThrow(ValidationError);
+	});
+
+	it('returns the same count that updateCustomPresetIntervals later reports as updated', async () => {
+		await createMemo(db, ownerId, { title: 'a', content: 'c', intervalPresetId: ownerPresetId });
+		await createMemo(db, ownerId, { title: 'b', content: 'c', intervalPresetId: ownerPresetId });
+
+		const { previewCount } = await previewPresetIntervalsUpdate(
+			db,
+			ownerId,
+			ownerPresetId,
+			'2h, 5h'
+		);
+		const { updatedReviewsCount } = await updateCustomPresetIntervals(
+			db,
+			ownerId,
+			ownerPresetId,
+			'2h, 5h'
+		);
+		expect(previewCount).toBe(6); // 2メモ × 3ステップ
+		expect(updatedReviewsCount).toBe(previewCount);
+	});
 });
 
 describe('updateCustomPresetIntervals', () => {
@@ -174,7 +239,7 @@ describe('updateCustomPresetIntervals', () => {
 		});
 		await archiveMemo(db, ownerId, archivedMemo.id);
 
-		const previewCount = await countReviewsAffectedByPresetChange(db, ownerPresetId);
+		const { previewCount } = await previewPresetIntervalsUpdate(db, ownerId, ownerPresetId, '2h');
 		expect(previewCount).toBe(3); // active memo だけの3ステップ
 
 		const { updatedReviewsCount } = await updateCustomPresetIntervals(
@@ -237,6 +302,87 @@ describe('updateCustomPresetIntervals', () => {
 		expect(rows).toHaveLength(1);
 		expect(rows[0]?.completedAt).not.toBeNull();
 	});
+
+	it(`rejects the update when the resulting batch would exceed MAX_BATCH_STATEMENTS (${MAX_BATCH_STATEMENTS})`, async () => {
+		// 1メモあたりの文数は「DELETE 1件 + INSERT 1件（複数行分をまとめた1文）」の
+		// 2文（completedCount=0 かつ新 intervals に1件以上残る場合、
+		// $lib/server/reviews.ts の planReviewRecalculation を参照）。
+		// 1（プリセット UPDATE） + memoCount * 2 が上限を超えるように十分な数のメモを作る。
+		const memoCount = Math.ceil((MAX_BATCH_STATEMENTS - 1) / 2) + 1;
+		for (let i = 0; i < memoCount; i++) {
+			await createMemo(db, ownerId, {
+				title: `memo-${i}`,
+				content: 'c',
+				intervalPresetId: ownerPresetId
+			});
+		}
+
+		await expect(updateCustomPresetIntervals(db, ownerId, ownerPresetId, '1h, 2h')).rejects.toThrow(
+			ValidationError
+		);
+
+		// プリセット自体も更新されていない（拒否時点で何も実行されない）ことを確認する。
+		const [preset] = await db
+			.select()
+			.from(intervalPresets)
+			.where(eq(intervalPresets.id, ownerPresetId))
+			.all();
+		expect(preset?.intervals).toEqual([1, 24, 72]);
+	});
+
+	// planReviewRecalculation の SELECT（完了済みステップ数・未完了行の読み取り）と
+	// この db.batch() 実行の間に、別リクエストの completeReview が同じメモの対象
+	// ステップを完了させる真の競合を再現する（#17 の completeReview 自身が同種の
+	// ハザードに対し wonThisCompletion ガードで対処しているのと同じ根本原因。
+	// 正確性レビューで指摘）。db.batch を1回だけ横取りし、実際の batch 実行前に
+	// completeReview を割り込ませることで、古い completedCount を前提にした INSERT が
+	// 既に完了済みの step 番号と衝突する状況を決定的に再現する。
+	it('translates a concurrent completion race into a ConflictError instead of a raw DB error', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'm', // ownerPreset の intervals: [1, 24, 72]
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(Date.now() - 1000) })
+			.where(eq(reviews.memoId, memo.id));
+		const [due] = await db
+			.select({ id: reviews.id })
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.limit(1)
+			.all();
+		if (!due) throw new Error('fixture setup failed');
+
+		const originalBatch = db.batch.bind(db);
+		const batchSpy = vi
+			.spyOn(db, 'batch')
+			.mockImplementationOnce(async (queries: Parameters<typeof originalBatch>[0]) => {
+				// updateCustomPresetIntervals の SELECT はこの時点で完了しており
+				// completedCount=0 を前提に step0 から INSERT しようとしている。
+				// ここで step0 を完了させることで、その前提を古くする。
+				await completeReview(db, ownerId, due.id);
+				return originalBatch(queries);
+			});
+
+		try {
+			await expect(
+				updateCustomPresetIntervals(db, ownerId, ownerPresetId, '2h, 5h')
+			).rejects.toThrow(ConflictError);
+		} finally {
+			batchSpy.mockRestore();
+		}
+
+		// バッチ全体がロールバックされ、プリセット自体も更新されていない。
+		const [preset] = await db
+			.select()
+			.from(intervalPresets)
+			.where(eq(intervalPresets.id, ownerPresetId))
+			.all();
+		expect(preset?.intervals).toEqual([1, 24, 72]);
+	});
 });
 
 describe('deleteCustomPreset', () => {
@@ -267,6 +413,10 @@ describe('deleteCustomPreset', () => {
 
 	it('rejects deleting another users custom preset without revealing it exists', async () => {
 		await expect(deleteCustomPreset(db, ownerId, otherUserPresetId)).rejects.toThrow(NotFoundError);
+	});
+
+	it('rejects deleting a nonexistent presetId', async () => {
+		await expect(deleteCustomPreset(db, ownerId, 'does-not-exist')).rejects.toThrow(NotFoundError);
 	});
 
 	it('clears (does not block) a user default that pointed at the deleted preset', async () => {

@@ -15,6 +15,12 @@ export const MIN_INTERVAL_HOURS = 1;
 // UI 上の任意の上限（issue 本文が具体的な数を指定していないため、既存のシステム
 // プリセット最長（6ステップ）に十分な余裕を持たせた値を採用した）。
 export const MAX_INTERVAL_COUNT = 20;
+// 10年分（365 * 24 * 10）。上限を設けない場合、`baseTime.getTime() + hours * 3600000`
+// が JS の Date の表現可能範囲（epoch から約 ±8.64e15ms）を超えて Invalid Date になり、
+// それが NOT NULL の reviews.scheduledAt へそのまま INSERT されてしまう
+// （正確性レビューで指摘）。10年は「間隔反復」という用途に対して十分に大きく、
+// かつ Date のオーバーフローには全く近づかない安全な値として選んだ任意の上限。
+export const MAX_INTERVAL_HOURS = 24 * 365 * 10;
 
 // "1h, 12h, 2d, 10d" 形式の自由入力を時間単位の配列にパースし、その場で
 // バリデーションする（最小1時間・整数・厳密昇順・重複禁止・要素数上限・空配列禁止）。
@@ -44,6 +50,9 @@ export function parseIntervals(raw: string): number[] {
 		const hours = unit === 'd' ? amount * 24 : amount;
 		if (hours < MIN_INTERVAL_HOURS) {
 			throw new Error(`intervals must be at least ${MIN_INTERVAL_HOURS} hour`);
+		}
+		if (hours > MAX_INTERVAL_HOURS) {
+			throw new Error(`intervals must be at most ${MAX_INTERVAL_HOURS} hours`);
 		}
 		return hours;
 	});

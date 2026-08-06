@@ -11,6 +11,7 @@ export {
 	eq,
 	exists,
 	gt,
+	inArray,
 	isNotNull,
 	isNull,
 	lte,

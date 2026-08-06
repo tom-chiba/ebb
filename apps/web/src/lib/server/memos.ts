@@ -1,6 +1,11 @@
 import { and, count, desc, eq, isNull, intervalPresets, memos, reviews, type Db } from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
-import { ConflictError, NotFoundError, ValidationError } from './errors';
+import {
+	ConflictError,
+	isUniqueConstraintViolation,
+	NotFoundError,
+	ValidationError
+} from './errors';
 import { getAccessiblePreset } from './interval-presets';
 import { clamp, normalizeOffset, type PaginationOptions } from './pagination';
 
@@ -104,16 +109,6 @@ async function findOwnMemoById(db: Db, userId: string, id: string) {
 		.limit(1)
 		.all();
 	return rows[0];
-}
-
-// indexHint で該当テーブル/カラムのユニーク制約違反かを絞り込む。単に
-// "UNIQUE constraint failed" だけを見ると、同じ操作内で複数のユニーク制約
-// （memos.id と reviews_memoId_step_unique 等）が存在する場合に取り違える。
-function isUniqueConstraintViolation(err: unknown, indexHint: string): boolean {
-	if (!(err instanceof Error)) return false;
-	const cause = err.cause instanceof Error ? err.cause.message : '';
-	const message = `${err.message} ${cause}`;
-	return /UNIQUE constraint failed/i.test(message) && message.includes(indexHint);
 }
 
 // preset.intervals の全ステップ分の reviews 行を作る。baseTime は呼び出し側から

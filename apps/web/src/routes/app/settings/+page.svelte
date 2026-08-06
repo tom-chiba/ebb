@@ -107,7 +107,7 @@
 				type="text"
 				name="name"
 				value={form && form.action === 'createPreset' && 'name' in form ? form.name : ''}
-				maxlength="100"
+				maxlength={data.presetNameMaxLength}
 				required
 			/>
 		</label>

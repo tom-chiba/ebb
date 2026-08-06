@@ -3,6 +3,7 @@ import {
 	fixedIntervalStrategy,
 	formatIntervals,
 	MAX_INTERVAL_COUNT,
+	MAX_INTERVAL_HOURS,
 	nextReviewAt,
 	parseIntervals,
 	SYSTEM_INTERVAL_PRESETS
@@ -114,8 +115,10 @@ describe('parseIntervals', () => {
 		expect(() => parseIntervals('   ')).toThrow();
 	});
 
-	it('最小単位（1時間）未満は拒否する（0h等）', () => {
+	it('最小単位（1時間）未満は拒否する（0h・0d・負数）', () => {
 		expect(() => parseIntervals('0h')).toThrow();
+		expect(() => parseIntervals('0d')).toThrow(); // 日単位でも同じ境界が効く
+		expect(() => parseIntervals('-1h')).toThrow();
 	});
 
 	it('降順・同値は拒否する（厳密昇順のみ許容）', () => {
@@ -127,7 +130,13 @@ describe('parseIntervals', () => {
 	it('未知の単位・不正なトークンは拒否する', () => {
 		expect(() => parseIntervals('1w')).toThrow();
 		expect(() => parseIntervals('1.5h')).toThrow();
+		expect(() => parseIntervals('1.5d')).toThrow(); // 日単位でも非整数は同じ経路で拒否される
 		expect(() => parseIntervals('abc')).toThrow();
+	});
+
+	it(`1間隔あたりの上限（${MAX_INTERVAL_HOURS}時間）を超えると拒否する（Date のオーバーフロー防止）`, () => {
+		expect(() => parseIntervals(`${MAX_INTERVAL_HOURS + 1}h`)).toThrow();
+		expect(parseIntervals(`${MAX_INTERVAL_HOURS}h`)).toEqual([MAX_INTERVAL_HOURS]);
 	});
 
 	it(`要素数が上限（${MAX_INTERVAL_COUNT}）を超えると拒否する`, () => {

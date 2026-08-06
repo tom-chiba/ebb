@@ -1,6 +1,7 @@
 import {
 	and,
 	eq,
+	inArray,
 	intervalPresets,
 	isNull,
 	memos,
@@ -10,8 +11,13 @@ import {
 	type BatchItem,
 	type Db
 } from '@ebb/db';
-import { MAX_INTERVAL_COUNT, parseIntervals } from '@ebb/core';
-import { NotFoundError, ValidationError } from './errors';
+import { parseIntervals } from '@ebb/core';
+import {
+	ConflictError,
+	isUniqueConstraintViolation,
+	NotFoundError,
+	ValidationError
+} from './errors';
 import { planReviewRecalculation } from './reviews';
 
 // #15/#16 が着地する前の暫定値として #14 で導入された、システム標準プリセットの
@@ -156,10 +162,12 @@ async function getOwnedCustomPreset(db: Db, userId: string, presetId: string) {
 	return preset;
 }
 
+// このプリセットを使っている、非アーカイブメモの id 一覧。プレビュー（件数のみ必要）
+// と実行（再計算対象そのもの）の両方が「対象メモをどう選ぶか」を必ずこの関数経由で
+// 決める。アーカイブ済みメモを対象外にする理由: archiveMemo（#16）はアーカイブと
+// 同時に未完了 reviews を削除しており、「アーカイブ済みメモに未完了 reviews が
+// 残らない」不変条件（docs/schema.md）を再計算対象に含めることで静かに破ってしまうため。
 async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[]> {
-	// アーカイブ済みメモは対象外にする。archiveMemo（#16）はアーカイブと同時に未完了
-	// reviews を削除しており、「アーカイブ済みメモに未完了 reviews が残らない」不変条件
-	// （docs/schema.md）を再計算対象に含めることで静かに破ってしまうため。
 	const rows = await db
 		.select({ id: memos.id })
 		.from(memos)
@@ -168,27 +176,41 @@ async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[
 	return rows.map((row) => row.id);
 }
 
-// プリセット変更（intervals の編集）で更新される reviews の件数（プレビュー用）。
-// updateCustomPresetIntervals が実行時に返す件数と同じ定義（非アーカイブメモの
-// 未完了 reviews）を使い、#17 で指摘されたバナー件数と実際の一覧のズレと
-// 同型の不整合が起きないようにしている。
-export async function countReviewsAffectedByPresetChange(
-	db: Db,
-	presetId: string
-): Promise<number> {
+// 対象メモ群の未完了 reviews 件数。プレビュー（countだけ必要）と実行結果の返り値
+// （updateCustomPresetIntervals、実際に削除された件数の合計）の両方が
+// 「非アーカイブメモの未完了 reviews」という同じ定義を共有するための唯一の実装。
+async function countIncompleteReviewsForMemos(db: Db, memoIds: string[]): Promise<number> {
+	if (memoIds.length === 0) return 0;
 	const rows = await db
 		.select({ id: reviews.id })
 		.from(reviews)
-		.innerJoin(memos, eq(reviews.memoId, memos.id))
-		.where(
-			and(
-				eq(memos.intervalPresetId, presetId),
-				isNull(memos.archivedAt),
-				isNull(reviews.completedAt)
-			)
-		)
+		.where(and(inArray(reviews.memoId, memoIds), isNull(reviews.completedAt)))
 		.all();
 	return rows.length;
+}
+
+// プリセット変更（intervals の編集）で更新される reviews の件数のプレビュー。
+// 「N 件の予定が更新されます」の表示用。所有権チェック（getOwnedCustomPreset）と
+// intervals の構文検証（parseIntervalsOrValidationError）を実行系（
+// updateCustomPresetIntervals）と全く同じ順序で行う。これを省略すると、
+// 未確定（confirmed=false）のプレビュー経路だけが認可・検証をすべて素通りし、
+// 他ユーザーの custom プリセットやシステムプリセットの id を渡すことでそのプリセットを
+// 使っている（自分のものではない）メモの未完了 reviews 件数を取得できてしまう
+// （正確性レビューで指摘された情報漏洩）。
+export async function previewPresetIntervalsUpdate(
+	db: Db,
+	userId: string,
+	presetId: string,
+	rawIntervals: string
+): Promise<{ previewCount: number }> {
+	await getOwnedCustomPreset(db, userId, presetId);
+	// 構文検証のみ行い、結果（新しい intervals）自体はプレビューの件数計算には
+	// 使わない。「N件」は既存の未完了行のうち削除・作り直しの対象になる件数であり、
+	// 新しい intervals の長さに依存しないため（詳細は countIncompleteReviewsForMemos）。
+	parseIntervalsOrValidationError(rawIntervals);
+
+	const memoIds = await collectAffectedMemoIds(db, presetId);
+	return { previewCount: await countIncompleteReviewsForMemos(db, memoIds) };
 }
 
 export async function updateCustomPresetIntervals(
@@ -221,7 +243,25 @@ export async function updateCustomPresetIntervals(
 		throw new ValidationError('このプリセットを使っているメモが多すぎるため、一度に更新できません');
 	}
 
-	await db.batch(statements);
+	try {
+		await db.batch(statements);
+	} catch (err) {
+		// planReviewRecalculation の SELECT（completedCount・未完了行の読み取り）と
+		// この db.batch() 実行の間に、対象メモのいずれかで別リクエストの completeReview
+		// が割り込むと、そこで計算した完了済みステップ数が古くなり、新しい INSERT が
+		// 既に完了済みの step 番号と衝突して reviews_memoId_step_unique に違反しうる
+		// （#17 の completeReview が同種の SELECT-then-write ハザードに対し
+		// wonThisCompletion ガードで対処しているのと同じ根本原因。正確性レビューで
+		// 指摘）。D1 の batch は単一の暗黙トランザクションのため、この違反時は
+		// プリセット自体の UPDATE も含めてロールバックされる。生の DB エラーとして
+		// 500 になるのではなく、ユーザーにリトライを促す 409 として扱う。
+		if (isUniqueConstraintViolation(err, 'reviews.step')) {
+			throw new ConflictError(
+				'このプリセットを使っているメモの復習予定が同時に更新されました。もう一度お試しください。'
+			);
+		}
+		throw err;
+	}
 
 	// hidden field 等でクライアントから渡された件数を信用せず、実行直前に読み直した
 	// 実数の合計を返す（#17 のバナー件数ズレと同型の罠を避けるため）。
@@ -280,5 +320,3 @@ export async function getDefaultPresetId(db: Db, userId: string): Promise<string
 		.all();
 	return rows[0]?.defaultIntervalPresetId ?? DEFAULT_INTERVAL_PRESET_ID;
 }
-
-export { MAX_INTERVAL_COUNT };

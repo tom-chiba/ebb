@@ -1438,6 +1438,50 @@ PR #46 作成後、Codex の通常レビューと adversarial レビュー（`/c
   `interval_presets` に関するチェックロジックの置き場所を1箇所に保つため。`memos.ts`
   は `interval-presets.ts` から import するだけになった（動作の変更はない）。
 
+- **レビューで検出・修正した不具合**:
+  - **プレビュー（`confirmed=false`）経路が認可・検証を素通りしていた**（正確性レビューで
+    指摘）。当初 `countReviewsAffectedByPresetChange(db, presetId)` は所有権チェック
+    （`getOwnedCustomPreset`）も `intervals` の構文検証も一切通らず、他ユーザーの
+    custom プリセットやシステムプリセットの id をフォームアクションへ直接 POST すると、
+    自分のものではないメモの未完了 reviews 件数が取得できてしまっていた。確定
+    （`confirmed=true`）経路だけが `updateCustomPresetIntervals` 内部で検証を通っており、
+    同じ入力に対して `confirmed` の値だけで検証の有無が変わっていたのが根本原因。
+    `previewPresetIntervalsUpdate` として関数自体を作り直し、`getOwnedCustomPreset` と
+    `parseIntervalsOrValidationError` を確定経路と全く同じ順序で呼ぶようにした。
+  - **`planReviewRecalculation` の SELECT と `db.batch()` 実行の間の競合**（正確性レビューで
+    指摘）。対象メモの完了済みステップ数を事前に読んでから `db.batch()` を実行する間に、
+    別リクエストの `completeReview` が同じメモの対象ステップを完了させると、古い
+    完了済みステップ数を前提にした INSERT が既に完了済みの step 番号と衝突し
+    `reviews_memoId_step_unique` に違反する（#17 の `completeReview` 自身が
+    `wonThisCompletion` ガードで対処している、同じ SELECT-then-write ハザード）。
+    D1 の batch は単一の暗黙トランザクションのため、この違反はプリセット自体の
+    UPDATE も含めてバッチ全体をロールバックさせるが、修正前はこれが未捕捉のまま
+    生の DB エラー（500）としてクライアントに漏れていた。この違反を検知し
+    `ConflictError`（409、リトライを促す）に変換するようにした。`isUniqueConstraintViolation`
+    は memos.ts（#16）にあった同名のプライベート関数と全く同じロジックだったため、
+    `errors.ts` に共有関数として切り出した。
+  - **`parseIntervals` に1間隔あたりの上限が無かった**（正確性レビューで指摘）。
+    上限が無いと、`baseTime.getTime() + hours * 3600000` が JS の `Date` の表現可能範囲
+    （epoch から約 ±8.64e15ms）を超えて `Invalid Date` になり、それが NOT NULL の
+    `reviews.scheduledAt` へそのまま INSERT されてしまう（`Invalid Date` は `Date`
+    インスタンスなので truthy であり、`nextReviewAt` の呼び出し側にある
+    `if (scheduledAt)` ガードでは弾けない）。`MAX_INTERVAL_HOURS`（10年、Date の
+    オーバーフローには全く近づかない任意の上限）を追加した。
+  - **設定画面のフォームアクションの型設計が判別可能 union を実質的に破壊していた**
+    （設計レビューで指摘）。`presetActionFail(err, action: string, extra: Record<string,
+unknown>)` という非ジェネリックな型のため、失敗時の返り値は `action` がリテラル型に
+    絞られず、`extra` で積んだフィールド（`name`/`intervals` 等）も型上は存在しなくなり、
+    `+page.svelte` 側の `'name' in form` という判別が `unknown` にしか narrowing できず
+    実質的に型安全性が失われていた。`presetActionFail` をジェネリック化
+    （`<A extends string, E extends Record<string, unknown>>`）してリテラル型と
+    フィールドの型を保持するようにした。
+  - **`PRESET_NAME_MAX_LENGTH` がクライアントに渡らず、`+page.svelte` の
+    `maxlength="100"` がマジックナンバーとして重複定義されていた**（設計レビューで指摘）。
+    `MAX_INTERVAL_COUNT` と同じく `load` 経由でクライアントへ渡すようにした。
+  - **`interval-presets.ts` からの `MAX_INTERVAL_COUNT` の再エクスポートが未使用だった**
+    （設計レビューで指摘）。`+page.server.ts` は `@ebb/core` から直接 import しており、
+    この再エクスポートを経由するコードは存在しなかったため削除した。
+
 ## 開発の進め方
 
 - リポジトリ: public

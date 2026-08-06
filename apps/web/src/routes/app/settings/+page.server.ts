@@ -1,13 +1,14 @@
 import { fail } from '@sveltejs/kit';
 import { formatIntervals, MAX_INTERVAL_COUNT } from '@ebb/core';
 import { requireAuthedDb } from '$lib/server/api';
-import { NotFoundError, ValidationError } from '$lib/server/errors';
+import { ConflictError, NotFoundError, ValidationError } from '$lib/server/errors';
 import {
-	countReviewsAffectedByPresetChange,
 	createCustomPreset,
 	deleteCustomPreset,
 	getDefaultPresetId,
 	listPresetsForUser,
+	PRESET_NAME_MAX_LENGTH,
+	previewPresetIntervalsUpdate,
 	setDefaultPresetForUser,
 	updateCustomPresetIntervals
 } from '$lib/server/interval-presets';
@@ -25,19 +26,31 @@ export const load: PageServerLoad = async (event) => {
 			intervalsText: formatIntervals(preset.intervals)
 		})),
 		defaultPresetId,
-		maxIntervalCount: MAX_INTERVAL_COUNT
+		maxIntervalCount: MAX_INTERVAL_COUNT,
+		presetNameMaxLength: PRESET_NAME_MAX_LENGTH
 	};
 };
 
-// ValidationError/NotFoundError をフォームアクションの fail() へ変換する。
+// ValidationError/NotFoundError/ConflictError をフォームアクションの fail() へ変換する。
 // handleDomainError（$lib/server/errors）は SvelteKit の error() で投げる前提
 // （load・+server.ts 向け）のため、フォームアクションではここで別途変換する。
-function presetActionFail(err: unknown, action: string, extra: Record<string, unknown>) {
+// action・extra をジェネリクスで受けることで、fail() の返り値がリテラル型
+// （action）と実際のプロパティ（extra の各キー）を保持する。string/Record<string,
+// unknown> に広げると、+page.svelte 側の `'name' in form` 等の判別が `unknown` に
+// しか narrowing できなくなり、型ガードが実質的に機能しなくなる（設計レビューで指摘）。
+function presetActionFail<A extends string, E extends Record<string, unknown>>(
+	err: unknown,
+	action: A,
+	extra: E
+) {
 	if (err instanceof ValidationError) {
 		return fail(400, { action, message: err.message, ...extra });
 	}
 	if (err instanceof NotFoundError) {
 		return fail(404, { action, message: 'プリセットが見つかりません', ...extra });
+	}
+	if (err instanceof ConflictError) {
+		return fail(409, { action, message: err.message, ...extra });
 	}
 	throw err;
 }
@@ -75,7 +88,12 @@ export const actions: Actions = {
 
 		if (!confirmed) {
 			try {
-				const previewCount = await countReviewsAffectedByPresetChange(db, presetId);
+				const { previewCount } = await previewPresetIntervalsUpdate(
+					db,
+					user.id,
+					presetId,
+					intervals
+				);
 				return { action: 'updatePreset', presetId, intervals, previewCount };
 			} catch (err) {
 				return presetActionFail(err, 'updatePreset', { presetId, intervals });
