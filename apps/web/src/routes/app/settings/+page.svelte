@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { applyAction, deserialize } from '$app/forms';
+	import { deserialize } from '$app/forms';
 	import { urlBase64ToUint8Array } from '$lib/push-subscribe';
 	import type { PageProps } from './$types';
 
@@ -13,7 +13,43 @@
 	let pushBusy = $state(false);
 	let pushStatusMessage = $state('');
 
+	// pushManager.subscribe() が返した購読を ?/subscribePush へ保存する。成功時は
+	// true を返す。savePushSubscription は endpoint に対する upsert
+	// （$lib/server/push-subscriptions.ts 参照）のため、この呼び出しは常に
+	// 「今ログイン中のユーザーがこの endpoint の所有者になる」ことを意味する。
+	// このページでは SvelteKit の `form` プロパティ（プリセット系フォームの表示制御に
+	// のみ使用）を push 系の結果表示には使わず、`pushStatusMessage`/`subscribed` で
+	// 独自に状態を持っているため、`applyAction` は呼ばない。`applyAction` は
+	// `type: 'error'`（未処理例外による500）の結果を最寄りのエラーページへの
+	// 全画面遷移として扱うため、ここで呼ぶと `refreshSubscriptionState` からの
+	// バックグラウンド呼び出し（ユーザー操作なしで onMount から実行される）が
+	// サーバー側の一時的な失敗だけで設定画面全体をエラーページに差し替えてしまう
+	// （正確性レビューで指摘）。
+	async function submitSubscription(subscription: PushSubscription): Promise<boolean> {
+		const json = subscription.toJSON();
+		if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
+			throw new Error('購読情報の取得に失敗しました');
+		}
+		const body = new FormData();
+		body.set('endpoint', json.endpoint);
+		body.set('p256dh', json.keys.p256dh);
+		body.set('auth', json.keys.auth);
+		const response = await fetch('?/subscribePush', { method: 'POST', body });
+		const result = deserialize(await response.text());
+		return result.type === 'success';
+	}
+
+	// ブラウザ側に購読が残っていても、共有端末で別ユーザーが同じ endpoint を
+	// 購読し直していた場合（savePushSubscription の onConflictDoUpdate で所有権が
+	// 付け替わる）、DB 上の行は既に自分のものではない。ここで毎回 upsert し直す
+	// ことで「ブラウザの購読」と「DB 上の所有者」を必ず一致させ、他ユーザーの
+	// 端末で誤って「有効」と表示され続けることを防ぐ（正確性レビューで指摘）。
+	// ネットワーク失敗時は「有効」と誤表示しない方向へ倒し、静かに未購読扱いにする
+	// （ユーザー操作ではない読み込み時の処理のためエラーメッセージは出さない）。
 	async function refreshSubscriptionState() {
+		// vapidPublicKey が無い環境は通知を「利用できません」と表示するため
+		// （後述のマークアップ参照）、その裏で購読の所有権を書き換える通信をしない。
+		if (!data.vapidPublicKey) return;
 		if (typeof Notification === 'undefined') {
 			permissionState = 'unsupported';
 			return;
@@ -24,7 +60,16 @@
 			return;
 		}
 		const registration = await navigator.serviceWorker.ready;
-		subscribed = (await registration.pushManager.getSubscription()) !== null;
+		const subscription = await registration.pushManager.getSubscription();
+		if (!subscription) {
+			subscribed = false;
+			return;
+		}
+		try {
+			subscribed = await submitSubscription(subscription);
+		} catch {
+			subscribed = false;
+		}
 	}
 
 	onMount(() => {
@@ -34,6 +79,10 @@
 	// 許可ダイアログはユーザーがこのボタンを押したときにだけ出す
 	// （ページ表示直後に出すと拒否されやすいため。issue #19 の注意事項）。
 	async function enableNotifications() {
+		if (!data.vapidPublicKey) {
+			pushStatusMessage = '現在この環境では通知を利用できません。';
+			return;
+		}
 		pushBusy = true;
 		pushStatusMessage = '';
 		try {
@@ -52,24 +101,12 @@
 				userVisibleOnly: true,
 				applicationServerKey: urlBase64ToUint8Array(data.vapidPublicKey)
 			});
-			const json = subscription.toJSON();
-			if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
-				throw new Error('購読情報の取得に失敗しました');
-			}
-
-			const body = new FormData();
-			body.set('endpoint', json.endpoint);
-			body.set('p256dh', json.keys.p256dh);
-			body.set('auth', json.keys.auth);
-			const response = await fetch('?/subscribePush', { method: 'POST', body });
-			const result = deserialize(await response.text());
-			if (result.type === 'success') {
+			if (await submitSubscription(subscription)) {
 				subscribed = true;
 				pushStatusMessage = '通知を有効にしました。';
 			} else {
 				pushStatusMessage = 'サーバーへの保存に失敗しました。もう一度お試しください。';
 			}
-			await applyAction(result);
 		} catch (err) {
 			pushStatusMessage = `失敗しました: ${err instanceof Error ? err.message : String(err)}`;
 		} finally {
@@ -77,11 +114,10 @@
 		}
 	}
 
-	// サーバー側のレコード削除が先に成功した場合のみブラウザ側を unsubscribe する。
-	// 逆順だと、サーバー削除に失敗したときブラウザは既に購読解除済みで、
-	// このユーザーはもう通知を受け取れないのに DB 上は購読中に見える不整合が残る
-	// （advisor によるレビューで指摘。#20 未実装の現状、失効した購読の自動掃除手段が
-	// ないため、失敗時は購読を残してユーザーに再試行させる方向を優先した）。
+	// サーバー側のレコード削除が先に成功した場合のみブラウザ側を unsubscribe する
+	// （理由は $lib/server/push-subscriptions.ts の deletePushSubscription を参照）。
+	// 対象行が存在しない場合もサーバー側は成功を返すため、else 分岐に到達するのは
+	// 真に予期しない失敗のときだけになる。
 	async function disableNotifications() {
 		pushBusy = true;
 		pushStatusMessage = '';
@@ -104,7 +140,6 @@
 			} else {
 				pushStatusMessage = 'サーバーからの削除に失敗しました。もう一度お試しください。';
 			}
-			await applyAction(result);
 		} catch (err) {
 			pushStatusMessage = `失敗しました: ${err instanceof Error ? err.message : String(err)}`;
 		} finally {
@@ -117,7 +152,9 @@
 
 <section>
 	<h2>通知</h2>
-	{#if permissionState === 'unsupported'}
+	{#if !data.vapidPublicKey}
+		<p>現在この環境では通知を利用できません。</p>
+	{:else if permissionState === 'unsupported'}
 		<p>このブラウザは通知に対応していません。</p>
 	{:else if permissionState === 'denied'}
 		<p class="error">

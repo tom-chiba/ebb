@@ -74,9 +74,8 @@ describe('deletePushSubscription', () => {
 	it('deletes a subscription owned by the user', async () => {
 		await savePushSubscription(db, userId, 'https://push.example/a', 'p', 'a');
 
-		const result = await deletePushSubscription(db, userId, 'https://push.example/a');
+		await deletePushSubscription(db, userId, 'https://push.example/a');
 
-		expect(result.deletedCount).toBe(1);
 		const rows = await db
 			.select()
 			.from(pushSubscriptions)
@@ -85,12 +84,13 @@ describe('deletePushSubscription', () => {
 		expect(rows).toHaveLength(0);
 	});
 
-	it('does not delete another user own subscription', async () => {
+	it('does not delete another user own subscription, and does not throw', async () => {
 		await savePushSubscription(db, otherUserId, 'https://push.example/a', 'p', 'a');
 
-		const result = await deletePushSubscription(db, userId, 'https://push.example/a');
+		await expect(
+			deletePushSubscription(db, userId, 'https://push.example/a')
+		).resolves.toBeUndefined();
 
-		expect(result.deletedCount).toBe(0);
 		const rows = await db
 			.select()
 			.from(pushSubscriptions)
@@ -99,8 +99,28 @@ describe('deletePushSubscription', () => {
 		expect(rows).toHaveLength(1);
 	});
 
-	it('reports zero deleted for a non-existent endpoint', async () => {
-		const result = await deletePushSubscription(db, userId, 'https://push.example/missing');
-		expect(result.deletedCount).toBe(0);
+	it('does not throw for a non-existent endpoint (already in the desired state)', async () => {
+		await expect(
+			deletePushSubscription(db, userId, 'https://push.example/missing')
+		).resolves.toBeUndefined();
+	});
+
+	// 所有権付け替え後にこれを例外扱いすると無効化がデッドロックする理由は
+	// deletePushSubscription のコメントを参照。
+	it('does not throw when the endpoint has been reassigned to another user', async () => {
+		await savePushSubscription(db, userId, 'https://push.example/shared', 'p1', 'a1');
+		await savePushSubscription(db, otherUserId, 'https://push.example/shared', 'p2', 'a2');
+
+		await expect(
+			deletePushSubscription(db, userId, 'https://push.example/shared')
+		).resolves.toBeUndefined();
+
+		const rows = await db
+			.select()
+			.from(pushSubscriptions)
+			.where(eq(pushSubscriptions.endpoint, 'https://push.example/shared'))
+			.all();
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({ userId: otherUserId });
 	});
 });

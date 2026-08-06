@@ -26,18 +26,18 @@ export async function savePushSubscription(
 		});
 }
 
-// このユーザー自身が所有する購読のみ削除できる（他ユーザーの endpoint を指定しても
-// 何も起きない）。戻り値で実際に削除された件数を返し、呼び出し側が
-// 「本当に削除できたか」を確認できるようにする（#17 のバナー件数ズレと同型の
-// 「実際には起きていない操作を成功として報告する」問題を避けるため）。
+// このユーザー自身が所有する購読のみ削除する（他ユーザーの endpoint を指定しても
+// 何も起きない）。「この endpoint はもう購読されていない」という状態を実現する
+// 操作であり、対象行が最初から存在しない場合も目的の状態には既に達しているため
+// 何も例外を投げない（削除対象が見つからないことをエラー扱いにすると、
+// savePushSubscription が endpoint の所有権を別ユーザーへ付け替えた後にブラウザへ
+// 購読が残ったままの端末からは二度と無効化できなくなる。正確性レビューで指摘）。
 export async function deletePushSubscription(
 	db: Db,
 	userId: string,
 	endpoint: string
-): Promise<{ deletedCount: number }> {
-	const deleted = await db
+): Promise<void> {
+	await db
 		.delete(pushSubscriptions)
-		.where(and(eq(pushSubscriptions.endpoint, endpoint), eq(pushSubscriptions.userId, userId)))
-		.returning({ id: pushSubscriptions.id });
-	return { deletedCount: deleted.length };
+		.where(and(eq(pushSubscriptions.endpoint, endpoint), eq(pushSubscriptions.userId, userId)));
 }
