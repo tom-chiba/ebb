@@ -18,7 +18,7 @@ import {
 	NotFoundError,
 	ValidationError
 } from './errors';
-import { planReviewRecalculation } from './reviews';
+import { planReviewRecalculation, type ReviewRecalculationPlan } from './reviews';
 
 // #15/#16 が着地する前の暫定値として #14 で導入された、システム標準プリセットの
 // 固定 slug id。#18 でユーザーが一度も既定プリセットを選んでいない場合の
@@ -167,6 +167,10 @@ async function getOwnedCustomPreset(db: Db, userId: string, presetId: string) {
 // 決める。アーカイブ済みメモを対象外にする理由: archiveMemo（#16）はアーカイブと
 // 同時に未完了 reviews を削除しており、「アーカイブ済みメモに未完了 reviews が
 // 残らない」不変条件（docs/schema.md）を再計算対象に含めることで静かに破ってしまうため。
+// この SELECT から db.batch() 確定までの間に別リクエストが同じメモを archiveMemo
+// した場合の残存レースは、updateCustomPresetIntervals 側の再確認（
+// dropRecentlyArchivedMemoIds）で狭めているが完全には防げない（正確性レビューで
+// 指摘、docs/design-decisions.md の #18 節に記録）。
 async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[]> {
 	const rows = await db
 		.select({ id: memos.id })
@@ -202,17 +206,38 @@ function estimateWorstCaseBatchStatementCount(memoCount: number): number {
 	return 1 + memoCount * MAX_STATEMENTS_PER_MEMO;
 }
 
+// D1 は1クエリあたりの bind パラメータ数に上限があり（ローカル実行で実測したところ
+// ちょうど100件で、101件から `too many SQL variables` になる。Cloudflare の
+// ドキュメントが示す上限と一致）、MAX_BATCH_STATEMENTS（500）が許容する最大
+// メモ数（悲観的見積もりで最大249件）はこれを容易に超える。`inArray` にメモ id を
+// まとめて渡す箇所は必ずこの単位でチャンク分割してからクエリを発行する
+// （正確性レビューで指摘。実際に251件規模のテストで生の D1 エラーを再現して確認した）。
+const D1_MAX_BIND_PARAMS = 100;
+
+function chunk<T>(items: readonly T[], size: number): T[][] {
+	const chunks: T[][] = [];
+	for (let i = 0; i < items.length; i += size) {
+		chunks.push(items.slice(i, i + size));
+	}
+	return chunks;
+}
+
 // 対象メモ群の未完了 reviews 件数。プレビュー（countだけ必要）と実行結果の返り値
 // （updateCustomPresetIntervals、実際に削除された件数の合計）の両方が
 // 「非アーカイブメモの未完了 reviews」という同じ定義を共有するための唯一の実装。
 async function countIncompleteReviewsForMemos(db: Db, memoIds: string[]): Promise<number> {
 	if (memoIds.length === 0) return 0;
-	const rows = await db
-		.select({ id: reviews.id })
-		.from(reviews)
-		.where(and(inArray(reviews.memoId, memoIds), isNull(reviews.completedAt)))
-		.all();
-	return rows.length;
+	const counts = await Promise.all(
+		chunk(memoIds, D1_MAX_BIND_PARAMS).map(async (ids) => {
+			const rows = await db
+				.select({ id: reviews.id })
+				.from(reviews)
+				.where(and(inArray(reviews.memoId, ids), isNull(reviews.completedAt)))
+				.all();
+			return rows.length;
+		})
+	);
+	return counts.reduce((sum, count) => sum + count, 0);
 }
 
 // プリセット変更（intervals の編集）で更新される reviews の件数のプレビュー。
@@ -254,6 +279,41 @@ export async function updateCustomPresetIntervals(
 		memoIds.map((memoId) => planReviewRecalculation(db, memoId, intervals))
 	);
 
+	// collectAffectedMemoIds の SELECT から db.batch() 確定までの間に、対象メモの
+	// いずれかが別リクエストの archiveMemo によりアーカイブされていた場合、そのメモの
+	// 再計算（特に INSERT）を実行すると「アーカイブ済みメモに未完了 reviews が残らない」
+	// 不変条件を静かに破ってしまう（archiveMemo 自体は同期的に未完了行を削除するが、
+	// この db.batch() の INSERT はそれを知らずに新しい未完了行を作ってしまうため）。
+	// batch 実行の直前にもう一度だけアーカイブ状態を確認し、この時点までにアーカイブ
+	// された memoId を対象から外すことで競合の窓を大幅に狭める（#17 の completeReview
+	// が持つ同種の SELECT-then-write ハザードと同じ性質の残存レースであり、完全な排除
+	// ではないことは docs/design-decisions.md の #18 節に記録済み。正確性レビューで指摘）。
+	const stillActiveMemoIds =
+		memoIds.length > 0
+			? new Set(
+					(
+						await Promise.all(
+							chunk(memoIds, D1_MAX_BIND_PARAMS).map((ids) =>
+								db
+									.select({ id: memos.id })
+									.from(memos)
+									.where(and(inArray(memos.id, ids), isNull(memos.archivedAt)))
+									.all()
+							)
+						)
+					)
+						.flat()
+						.map((row) => row.id)
+				)
+			: new Set<string>();
+	const activePlans = memoIds
+		.map((memoId, index) => ({ memoId, plan: plans[index] }))
+		.filter((entry): entry is { memoId: string; plan: ReviewRecalculationPlan } =>
+			stillActiveMemoIds.has(entry.memoId)
+		)
+		.map(({ plan }) => plan);
+	const activeStatements = activePlans.flatMap((plan) => plan.statements);
+
 	const updatePresetStatement = db
 		.update(intervalPresets)
 		.set({ intervals })
@@ -263,7 +323,7 @@ export async function updateCustomPresetIntervals(
 	// updatePresetStatement は常に配列先頭にあるため実行時には常に1件以上になる。
 	const statements: [typeof updatePresetStatement, ...BatchItem<'sqlite'>[]] = [
 		updatePresetStatement,
-		...plans.flatMap((plan) => plan.statements)
+		...activeStatements
 	];
 
 	assertWithinBatchStatementLimit(statements.length);
@@ -289,8 +349,12 @@ export async function updateCustomPresetIntervals(
 	}
 
 	// hidden field 等でクライアントから渡された件数を信用せず、実行直前に読み直した
-	// 実数の合計を返す（#17 のバナー件数ズレと同型の罠を避けるため）。
-	return { updatedReviewsCount: plans.reduce((sum, plan) => sum + plan.affectedCount, 0) };
+	// 実数の合計を返す（#17 のバナー件数ズレと同型の罠を避けるため）。直前にアーカイブ
+	// されて対象から外れたメモ（activePlans に含まれない）分は実際には再計算していない
+	// ため、ここでも含めない。
+	return {
+		updatedReviewsCount: activePlans.reduce((sum, plan) => sum + plan.affectedCount, 0)
+	};
 }
 
 export async function deleteCustomPreset(db: Db, userId: string, presetId: string): Promise<void> {

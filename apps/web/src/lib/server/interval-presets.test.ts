@@ -182,6 +182,27 @@ describe('previewPresetIntervalsUpdate', () => {
 			previewPresetIntervalsUpdate(db, ownerId, ownerPresetId, '1h, 2h')
 		).rejects.toThrow(ValidationError);
 	});
+
+	it('counts correctly across D1s per-query bind parameter limit (100) without erroring', async () => {
+		// D1 は1クエリあたりの bind パラメータ数に上限があり（ローカル実測でちょうど100件、
+		// 101件から `too many SQL variables` になる）、countIncompleteReviewsForMemos が
+		// memoId をチャンク分割せずに inArray へまとめて渡すと、MAX_BATCH_STATEMENTS
+		// （500）が許容する規模（悲観的見積もりで最大249メモ）の範囲内でも生の D1 エラーに
+		// なりうる（正確性レビューで指摘、実測で確認した回帰）。ここでは
+		// MAX_BATCH_STATEMENTS には抵触しないが100件は超えるメモ数で実行し、
+		// チャンク分割が正しく機能して例外を投げないことを確認する。
+		const memoCount = 150;
+		for (let i = 0; i < memoCount; i++) {
+			await createMemo(db, ownerId, {
+				title: `memo-${i}`,
+				content: 'c',
+				intervalPresetId: ownerPresetId
+			});
+		}
+
+		const { previewCount } = await previewPresetIntervalsUpdate(db, ownerId, ownerPresetId, '2h');
+		expect(previewCount).toBe(memoCount * 3);
+	});
 });
 
 describe('updateCustomPresetIntervals', () => {

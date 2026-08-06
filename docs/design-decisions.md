@@ -1501,6 +1501,30 @@ unknown>)` という非ジェネリックな型のため、失敗時の返り値
     そのため縮小の結果メモが全ステップ完了扱いになる場合でも、プレビューはその旨を
     伝えず件数のみを示す。ユーザーへの影響明示としては不完全だが、既知の制約として
     残し、必要になれば別 Issue で対応する。
+  - **D1 は1クエリあたりの bind パラメータ数に上限（実測でちょうど100件、101件から
+    `too many SQL variables` エラー）があり、`countIncompleteReviewsForMemos` が
+    memoId をチャンク分割せずに `inArray` へまとめて渡していたため、
+    `MAX_BATCH_STATEMENTS`（500）が許容する規模（悲観的見積もりで最大249メモ）の
+    範囲内でも、対象メモが101件を超えるプリセットのプレビューで生の D1 エラーになる
+    ことを実測で確認した**（正確性レビューで指摘、advisor 指摘のプレビュー側上限
+    ガード追加作業中に発見）。`chunk()` ヘルパーで memoId を100件単位に分割し、
+    複数クエリの結果を合算するようにした。同じ問題を持つ、アーカイブ状態の
+    再確認クエリ（下記）にも同様の対処をした。
+  - **プリセット再計算（`updateCustomPresetIntervals`）と `archiveMemo` の間の
+    競合状態**（正確性レビューで指摘）。`collectAffectedMemoIds` の SELECT から
+    `db.batch()` 確定までの間に、対象メモのいずれかが別リクエストの `archiveMemo` に
+    よりアーカイブされると、`archiveMemo` が同期的に削除した未完了 reviews を
+    `planReviewRecalculation` の INSERT が知らずに作り直してしまい、「アーカイブ済み
+    メモに未完了 reviews が残らない」不変条件を静かに破る（#17 の `completeReview` と
+    同種の SELECT-then-write ハザードだが、DB 制約に触れないためエラーとして検知
+    できない点が異なる）。`db.batch()` 実行の直前にもう一度だけ対象メモのアーカイブ
+    状態を確認し、その時点までにアーカイブされた memoId を再計算対象・
+    `updatedReviewsCount` の両方から除外することで競合の窓を大幅に狭めた。
+    `completeReview` の `wonThisCompletion` と異なり、この確認と `db.batch()` 実行の
+    間には依然として僅かな窓が残る（DB 制約による検知ができないため、SQL の
+    WHERE 句に組み込む形での完全な排除は見送った）。現状のどの読み取り経路も
+    `isNull(memos.archivedAt)` でフィルタしているため、この残存レースが仮に起きても
+    アーカイブ済みメモの孤立した reviews 行が外部から見える・操作できることはない。
 
 ## 開発の進め方
 
