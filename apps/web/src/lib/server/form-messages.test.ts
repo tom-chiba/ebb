@@ -20,7 +20,7 @@ beforeEach(async () => {
 	presetId = preset.id;
 });
 
-// memos.ts の assertTitle/assertContent/assertPresetAccessible が実際に投げる
+// memos.ts の assertTitle/assertContent/getAccessiblePreset が実際に投げる
 // ValidationError.message を経由して translateMemoValidationMessage() に通す。
 // リテラル文字列を直接渡すテストだと、memos.ts 側の文言を変更してもテストの
 // 入力自体が固定されたままになり回帰を検知できない（実測で確認済み: 過去の
