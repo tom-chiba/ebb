@@ -72,6 +72,9 @@ importers:
       '@block65/webcrypto-web-push':
         specifier: ^1.0.2
         version: 1.0.2
+      '@ebb/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@ebb/db':
         specifier: workspace:*
         version: link:../../packages/db

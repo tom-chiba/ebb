@@ -178,14 +178,18 @@ notified_at IS NULL`）を追加した。未完了・未通知の行だけを持
 張らないため、`ON DELETE CASCADE` によるカスケード削除の効率と、#17 の「1メモの
 復習履歴一覧」用。
 
-**#21 への申し送り**: `memos.archived_at`（ソフトアーカイブ）は `reviews` に一切
-伝播しない。メモをアーカイブしても、紐づく未完了 `reviews` はこのテーブル単体では
-区別がつかず、scheduler のクエリ（後述の `EXPLAIN QUERY PLAN` 検証も `reviews` 単体
-で完結している）にそのまま拾われ続け、アーカイブ後も通知が送られ得る。#21 は
-「アーカイブ済みメモの reviews を `memos` との JOIN で除外する」か「アーカイブ時に
-未完了 reviews を削除/無効化する」かを決めること。前者を選ぶ場合、
-`(scheduled_at, completed_at)` の複合インデックスだけでは JOIN 後のフィルタに対する
-実行計画が変わりうるため、`EXPLAIN QUERY PLAN` で再確認が必要。
+**#21 への申し送りは #16 で解消済み**: 当初 `memos.archived_at`（ソフトアーカイブ）は
+`reviews` に一切伝播せず、「アーカイブ済みメモの reviews を `memos` との JOIN で除外する」か
+「アーカイブ時に未完了 reviews を削除/無効化する」かを #21 が決める、としていた。#16 の
+`archiveMemo`（`apps/web/src/lib/server/memos.ts`）が後者（削除する側）を採用し、
+アーカイブと同じ `db.batch()` で未完了（`completedAt IS NULL`）の `reviews` を削除するよう
+実装した（完了済みの行は履歴として残るため削除しない）。詳細は
+`docs/design-decisions.md` の「メモ作成時の reviews 生成とアーカイブ時の削除 (#16)」節を参照。
+#21 は「JOIN で除外するか削除するか」をこの2択で改めて検討する必要はない。ただし
+この不変条件（アーカイブ済みメモに未完了 reviews が残らない）は `archivedAt` を書く経路が
+`archiveMemo` のみであることに依存している。将来 `archivedAt` を書く別の経路（一括アーカイブ、
+管理者操作等）を追加する場合は、そちらでも同様に未完了 reviews を削除するか、この前提が
+崩れていないかを確認すること。
 
 ### `push_subscriptions`
 

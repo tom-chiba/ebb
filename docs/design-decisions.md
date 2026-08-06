@@ -1123,6 +1123,86 @@ PR #46 作成後、Codex の通常レビューと adversarial レビュー（`/c
   明示的に委ねた seed migration）に絞るため見送った。migration のコメントで
   `packages/core` を値の出所として明記するに留めている（既存の `0006` と同じ方式）
 
+## メモ作成時の reviews 生成とアーカイブ時の削除 (#16)
+
+- **`createMemo` は `memos` への INSERT と `reviews` の全ステップ分バッチ生成を
+  `db.batch()` で1つの暗黙トランザクションとして実行する**。D1 の batch API は
+  途中の1文が失敗すると全体がロールバックされるため、メモは作られたが reviews が
+  1件も無い（あるいはその逆）という中途半端な状態が生じない
+  - `id`・`createdAt`/`updatedAt` は呼び出し側（JS）で確定させてから両方の
+    INSERT に渡す。DB 側のデフォルト値（`unixepoch('subsecond')`）に生成を
+    任せると、`memos.createdAt` と `reviews.scheduledAt` の計算起点が別クロックに
+    なり得るため、`nextReviewAt` の `baseTime` と `memos.createdAt` を同一の
+    `Date` インスタンスに揃えた
+  - **`intervals` が空配列の場合は `createMemo` が `ValidationError` を投げて拒否する**
+    （当初は `reviews` の INSERT をスキップし0件生成を正当な結果として許容していたが、
+    Codex の通常レビュー・adversarial レビュー双方から指摘され修正した）。#15 の
+    設計判断（本ドキュメントの「復習間隔プリセットと計算ロジック」節）が
+    「#16 はループの前に `intervals.length` が 0 でないことを確認すること。確認しないと、
+    空のプリセットを持つメモが reviews を1件も持たないまま『静かに全ステップ完了状態』に
+    見えてしまう」と明記しており、0件生成を許容する当初の実装はこの申し送りに反していた。
+    `intervals` 自体の内容（最小単位・順序等）のバリデーションは引き続き #18 の責務だが、
+    メモ作成時点で空配列を検出した場合の拒否は #16 の責務とした
+- **`createMemo` の冪等性チェック（`findOwnMemoById`）が既存メモを見つけた場合、
+  `ensureReviewsExist` でそのメモの reviews の有無を確認し、無ければその場で生成する**
+  （Codex adversarial レビューで指摘）。#16 のデプロイ前（reviews 生成ロジックが
+  存在しなかった時点）に作られたメモが、同じクライアント生成 id で再送された場合に
+  reviews を持たないまま返されてしまう問題への対応。`memo.createdAt`（実際に持続化
+  された値）を `baseTime` として使うため、通常の生成経路と同じ日時になる
+  - **これは「同じ id で再送された場合」のみを治癒する、狙いを絞った対応であり、
+    #16 のデプロイ前に作られ、その後一度も同じ id で再送されていないメモまでは
+    救わない**。より広範なバックフィル（既存の全 non-archived メモを対象にした
+    一括生成）が必要かはユーザーに確認し、**本番 D1 にはこの PR 以前に作成された
+    実データがまだ存在しないことを確認した**（このプロジェクトは開発初期段階で、
+    本 PR 時点では #10〜#16 が同日にマージされている）ため、一括バックフィル
+    migration は追加しなかった。将来、本番に実データが存在する状態でこの種の
+    変更を行う場合は、改めてバックフィルの要否を検討すること
+  - 同時に複数のリトライが治癒を試みた場合に備え、`reviews_memoId_step_unique`
+    の違反は無視する（望む終状態は既に満たされているため）
+- **`isUniqueConstraintViolation` は違反したインデックス/カラム名（例:
+  `memos.id`）を明示的に指定して判定するよう変更した**。バッチに `memos` と
+  `reviews` 両方への INSERT が含まれるようになったため、単に
+  `"UNIQUE constraint failed"` の有無だけで判定すると、`reviews_memoId_step_unique`
+  の違反（本来起こり得ないはずだが）を「id が既に使われている」という
+  冪等性リトライのケースと取り違えかねない
+- **`archiveMemo` はメモの `archivedAt` 更新と、そのメモの未完了
+  （`completedAt IS NULL`）`reviews` の削除を同じ `db.batch()` で行う**。
+  `docs/schema.md` の reviews 節が #21 への申し送りとして残していた
+  「アーカイブ済みメモの reviews を JOIN で除外するか、アーカイブ時に削除/無効化
+  するか」というエッジケースは、この Issue の受け入れ条件（「メモを削除すると
+  予定も消える」）に応えるため**削除する側をここで採用して解消した**。#21 は
+  改めてこの判断を検討する必要はない
+  - **完了済み（`completedAt` が設定済み）の行は削除しない**。`docs/schema.md` は
+    完了済み `reviews` を履歴として残す方針を既に明記しており、#18 の再計算
+    レシピ（「完了済みステップ数を起点に新しい `intervals` から残りステップを
+    再生成する」）も完了済み行が残っていることを前提にしている。アーカイブ時に
+    完了済み行まで削除すると #18 のレシピが壊れる
+- **`updateMemo` で `intervalPresetId` を変更しても reviews は再生成しない**。
+  再計算のレシピ（未完了行を削除して残りステップを新しい `intervals` から
+  作り直す）は `docs/schema.md` が明示的に #18 に割り当てているため、#16 の
+  スコープには含めない
+- **`getAccessiblePreset`**（旧 `assertPresetAccessible`）は intervals も返すように
+  変更した。`createMemo` がアクセス可否チェックと reviews 生成に使う `intervals`
+  取得を1回のクエリにまとめるためで、`updateMemo`（アクセス可否チェックのみ必要）は
+  戻り値を無視して呼ぶだけにした
+- **`createMemo` の戻り値は、INSERT に渡した値を手元で再構築するのではなく、
+  `db.batch()` の `memos` への INSERT に `.returning()` を付け、その結果を
+  `toMemoResponse()` に通して作る**（レビューで指摘され修正）。当初は `insertMemo`
+  に渡した値をそのままリテラルとして返しており、`toMemoResponse`・INSERT の
+  `.values()`・戻り値リテラルの3箇所にメモの形が重複していた。`archiveMemo` は
+  もともと `.returning()` の結果を使っており、`createMemo` だけこのパターンから
+  外れていた非対称も合わせて解消した
+- **レビューで指摘され追加した検証**:
+  - `createMemo` の冪等性チェック（`findOwnMemoById` による早期return）は、
+    同じ id で直列に2回呼ぶテストでは `db.batch()` の一意制約違反
+    （`isUniqueConstraintViolation`）を経由しない（1回目の結果が2回目の
+    `findOwnMemoById` で見つかるため）。`Promise.all` で本当に競合させるテストを
+    追加し、`memos.id` の一意制約違反を経由しても reviews が重複も欠損もしないこと
+    を確認した
+  - `updateMemo` で `intervalPresetId` を変更しても既存の `reviews` 行が
+    変化しないことを確認するテストを追加した（「reviews は再生成しない」という
+    上記の決定に対する回帰テスト）
+
 ## 開発の進め方
 
 - リポジトリ: public

@@ -1,7 +1,7 @@
 import { isHttpError } from '@sveltejs/kit';
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { createDb, eq, intervalPresets, memos, user, type Db } from '@ebb/db';
+import { and, createDb, eq, intervalPresets, memos, reviews, user, type Db } from '@ebb/db';
 import {
 	archiveMemo,
 	ConflictError,
@@ -219,6 +219,149 @@ describe('createMemo', () => {
 			intervalPresetId: ownerPresetId
 		});
 		expect(a.id).not.toBe(b.id);
+	});
+});
+
+describe('createMemo reviews generation', () => {
+	it('batch-generates one review per preset step with scheduledAt from nextReviewAt', async () => {
+		// ownerPresetId の intervals は [1, 24]（beforeEach）。
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+
+		const rows = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+
+		expect(rows).toHaveLength(2);
+		expect(rows[0]?.step).toBe(0);
+		expect(rows[0]?.scheduledAt.getTime()).toBe(memo.createdAt.getTime() + 1 * 60 * 60 * 1000);
+		expect(rows[1]?.step).toBe(1);
+		expect(rows[1]?.scheduledAt.getTime()).toBe(memo.createdAt.getTime() + 24 * 60 * 60 * 1000);
+		expect(rows.every((row) => row.completedAt === null && row.notifiedAt === null)).toBe(true);
+	});
+
+	// 空の intervals を許容すると、reviews が1件も無いまま「静かに全ステップ完了状態」に
+	// 見えるメモが生まれてしまう（docs/design-decisions.md の #15 節が明記する申し送り、
+	// レビューで指摘）。intervals 自体の妥当性検証は #18 の責務だが、メモ作成時点では
+	// #16 として拒否する。
+	it('rejects a preset with an empty intervals array, creating neither the memo nor any reviews', async () => {
+		const [emptyPreset] = await db
+			.insert(intervalPresets)
+			.values({ userId: ownerId, name: 'empty', intervals: [] })
+			.returning();
+		if (!emptyPreset) throw new Error('fixture setup failed');
+
+		await expect(
+			createMemo(db, ownerId, {
+				title: 'title',
+				content: 'content',
+				intervalPresetId: emptyPreset.id
+			})
+		).rejects.toThrow(ValidationError);
+
+		// 拒否は id を発行する前に起きるため、そもそも memo id が存在しない。
+		// メモ自体が作られていないこと（reviews の対象になり得る memo が無いこと）を確認する。
+		const { total } = await listMemos(db, ownerId);
+		expect(total).toBe(0);
+	});
+
+	it('does not duplicate reviews when the same client-generated id is submitted twice', async () => {
+		const id = crypto.randomUUID();
+		const input = { id, title: 'title', content: 'content', intervalPresetId: ownerPresetId };
+		await createMemo(db, ownerId, input);
+		await createMemo(db, ownerId, input);
+
+		const rows = await db.select().from(reviews).where(eq(reviews.memoId, id)).all();
+		expect(rows).toHaveLength(2);
+	});
+
+	// 上のテストは2回とも await で直列に実行されるため、2回目は findOwnMemoById が
+	// 1回目の結果を見つけて早期returnし、db.batch の一意制約違反（isUniqueConstraintViolation）
+	// を経由しない。ここでは Promise.all で本当に競合させ、片方が memos.id の一意制約違反で
+	// db.batch ごとロールバックされ、reviews が重複も欠損もしないことを確認する。
+	it('does not duplicate or lose reviews when the same id races through createMemo concurrently', async () => {
+		const id = crypto.randomUUID();
+		const input = { id, title: 'title', content: 'content', intervalPresetId: ownerPresetId };
+		const [a, b] = await Promise.all([
+			createMemo(db, ownerId, input),
+			createMemo(db, ownerId, input)
+		]);
+		expect(a).toEqual(b);
+
+		const rows = await db.select().from(reviews).where(eq(reviews.memoId, id)).all();
+		expect(rows).toHaveLength(2);
+	});
+
+	// #16 のデプロイ前（reviews 生成ロジックが存在しなかった時点）に作られたメモが、
+	// 同じクライアント生成 id で再送された場合を再現する（Codex adversarial レビューで
+	// 指摘）。createMemo を経由せず直接 INSERT することで、reviews を持たない
+	// 「旧バージョンが作った」メモを模している。
+	it('backfills missing reviews when an idempotent retry finds an existing memo with none', async () => {
+		const id = crypto.randomUUID();
+		const createdAt = new Date();
+		await db.insert(memos).values({
+			id,
+			userId: ownerId,
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId, // intervals: [1, 24]
+			createdAt,
+			updatedAt: createdAt
+		});
+		const preExisting = await db.select().from(reviews).where(eq(reviews.memoId, id)).all();
+		expect(preExisting).toHaveLength(0);
+
+		const memo = await createMemo(db, ownerId, {
+			id,
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+
+		const rows = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, id))
+			.orderBy(reviews.step)
+			.all();
+		expect(rows).toHaveLength(2);
+		expect(rows[0]?.scheduledAt.getTime()).toBe(memo.createdAt.getTime() + 1 * 60 * 60 * 1000);
+		expect(rows[1]?.scheduledAt.getTime()).toBe(memo.createdAt.getTime() + 24 * 60 * 60 * 1000);
+	});
+
+	it('does not touch reviews on an idempotent retry when they already exist', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		const before = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+
+		await createMemo(db, ownerId, {
+			id: memo.id,
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+
+		const after = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(after).toEqual(before);
 	});
 });
 
@@ -501,6 +644,38 @@ describe('updateMemo', () => {
 		).rejects.toThrow(ValidationError);
 	});
 
+	// reviews の再計算（未完了行を削除して新しい intervals から作り直す）は #18 の責務であり、
+	// #16 のスコープには含めない（docs/design-decisions.md 参照）。intervalPresetId を
+	// 変更しても、作成時に生成された reviews がそのまま残ることを確認する。
+	it('does not touch existing reviews when intervalPresetId changes', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId // intervals: [1, 24]
+		});
+		const before = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+
+		const updated = await updateMemo(db, ownerId, memo.id, memo.updatedAt, {
+			intervalPresetId: systemPresetId // intervals: [1, 6, 24]
+		});
+		// intervalPresetId が実際に変更されたことを確認した上で、それでも reviews が
+		// 変化しないことを検証する（更新自体が無視された結果ではないことの担保）。
+		expect(updated.intervalPresetId).toBe(systemPresetId);
+
+		const after = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(after).toEqual(before);
+	});
+
 	it('throws NotFoundError when updating another user memo', async () => {
 		const memo = await createMemo(db, otherUserId, {
 			title: 'title',
@@ -579,6 +754,51 @@ describe('archiveMemo', () => {
 		});
 		await archiveMemo(db, ownerId, memo.id);
 		await expect(archiveMemo(db, ownerId, memo.id)).rejects.toThrow(NotFoundError);
+	});
+
+	it('deletes pending reviews for the archived memo only, leaving other memos untouched', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		// アーカイブ対象以外のメモの未完了 reviews が巻き添えで消えないことを確認する
+		// ための、別 memo の pending reviews。
+		const other = await createMemo(db, ownerId, {
+			title: 'other',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+
+		await archiveMemo(db, ownerId, memo.id);
+
+		const rows = await db.select().from(reviews).where(eq(reviews.memoId, memo.id)).all();
+		expect(rows).toHaveLength(0);
+
+		const otherRows = await db.select().from(reviews).where(eq(reviews.memoId, other.id)).all();
+		expect(otherRows).toHaveLength(2);
+	});
+
+	it('keeps completed reviews for the archived memo', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		const [pending] = await db
+			.select()
+			.from(reviews)
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 0)))
+			.all();
+		if (!pending) throw new Error('fixture setup failed');
+		await db.update(reviews).set({ completedAt: new Date() }).where(eq(reviews.id, pending.id));
+
+		await archiveMemo(db, ownerId, memo.id);
+
+		const rows = await db.select().from(reviews).where(eq(reviews.memoId, memo.id)).all();
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.step).toBe(0);
+		expect(rows[0]?.completedAt).not.toBeNull();
 	});
 });
 
