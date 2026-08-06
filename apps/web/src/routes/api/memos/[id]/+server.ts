@@ -1,6 +1,7 @@
 import { error, json } from '@sveltejs/kit';
 import { requireAuthedDb, requireJsonContentType } from '$lib/server/api';
-import { archiveMemo, getMemo, handleMemoError, updateMemo } from '$lib/server/memos';
+import { handleDomainError } from '$lib/server/errors';
+import { archiveMemo, getMemo, updateMemo } from '$lib/server/memos';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async ({ locals, platform, params }) => {
@@ -9,7 +10,7 @@ export const GET: RequestHandler = async ({ locals, platform, params }) => {
 		const memo = await getMemo(db, user.id, params.id);
 		return json(memo);
 	} catch (err) {
-		handleMemoError(err);
+		handleDomainError(err);
 	}
 };
 
@@ -50,7 +51,7 @@ export const PATCH: RequestHandler = async ({ locals, platform, params, request 
 		const memo = await updateMemo(db, user.id, params.id, expectedUpdatedAt, input);
 		return json(memo);
 	} catch (err) {
-		handleMemoError(err);
+		handleDomainError(err);
 	}
 };
 
@@ -60,6 +61,6 @@ export const DELETE: RequestHandler = async ({ locals, platform, params }) => {
 		await archiveMemo(db, user.id, params.id);
 		return new Response(null, { status: 204 });
 	} catch (err) {
-		handleMemoError(err);
+		handleDomainError(err);
 	}
 };

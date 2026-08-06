@@ -1,6 +1,7 @@
 import { error, json } from '@sveltejs/kit';
 import { requireAuthedDb, requireJsonContentType } from '$lib/server/api';
-import { createMemo, handleMemoError, listMemos } from '$lib/server/memos';
+import { handleDomainError } from '$lib/server/errors';
+import { createMemo, listMemos } from '$lib/server/memos';
 import { parsePaginationParam } from '$lib/server/pagination';
 import type { RequestHandler } from './$types';
 
@@ -50,6 +51,6 @@ export const POST: RequestHandler = async ({ locals, platform, request }) => {
 		const memo = await createMemo(db, user.id, body);
 		return json(memo, { status: 201 });
 	} catch (err) {
-		handleMemoError(err);
+		handleDomainError(err);
 	}
 };

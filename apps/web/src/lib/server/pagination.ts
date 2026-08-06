@@ -8,3 +8,21 @@ export function parsePaginationParam(value: string | null): number | undefined |
 	const parsed = Number(value);
 	return Number.isSafeInteger(parsed) ? parsed : 'invalid';
 }
+
+export interface PaginationOptions {
+	limit?: number;
+	offset?: number;
+}
+
+// listMemos（#13）と listDueReviews（#17）で共通の limit/offset クランプ処理。
+export function clamp(value: number, min: number, max: number): number {
+	if (!Number.isFinite(value)) return min;
+	return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+// offset は下限（0）だけをクランプする（limit と違い上限は無い）。clamp() と同じく
+// 非有限値（NaN・Infinity）は 0 にフォールバックする。
+export function normalizeOffset(value: number | undefined): number {
+	if (value === undefined || !Number.isFinite(value)) return 0;
+	return Math.max(0, Math.trunc(value));
+}

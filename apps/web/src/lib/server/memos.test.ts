@@ -2,19 +2,17 @@ import { isHttpError } from '@sveltejs/kit';
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { and, createDb, eq, intervalPresets, memos, reviews, user, type Db } from '@ebb/db';
+import { ConflictError, handleDomainError, NotFoundError, ValidationError } from './errors';
 import {
 	archiveMemo,
-	ConflictError,
 	CONTENT_MAX_LENGTH,
 	createMemo,
 	getMemo,
-	handleMemoError,
 	listMemos,
-	NotFoundError,
 	TITLE_MAX_LENGTH,
-	updateMemo,
-	ValidationError
+	updateMemo
 } from './memos';
+import { createTestUser } from './test-helpers';
 
 function statusOf(fn: () => unknown): number {
 	try {
@@ -32,12 +30,6 @@ let otherUserId: string;
 let ownerPresetId: string;
 let systemPresetId: string;
 let otherUserPresetId: string;
-
-async function createTestUser(db: Db) {
-	const id = crypto.randomUUID();
-	await db.insert(user).values({ id, name: 'Test User', email: `${id}@example.com` });
-	return id;
-}
 
 beforeEach(async () => {
 	db = createDb(env.DB);
@@ -802,10 +794,10 @@ describe('archiveMemo', () => {
 	});
 });
 
-describe('handleMemoError', () => {
+describe('handleDomainError', () => {
 	it('maps ValidationError to 400 and passes its message through', () => {
 		try {
-			handleMemoError(new ValidationError('title is required'));
+			handleDomainError(new ValidationError('title is required'));
 			expect.unreachable();
 		} catch (err) {
 			expect(isHttpError(err) && err.status).toBe(400);
@@ -814,19 +806,19 @@ describe('handleMemoError', () => {
 	});
 
 	it('maps NotFoundError to a 404 with a fixed message (no detail leaked)', () => {
-		expect(statusOf(() => handleMemoError(new NotFoundError('memo abc123 not found')))).toBe(404);
+		expect(statusOf(() => handleDomainError(new NotFoundError('memo abc123 not found')))).toBe(404);
 	});
 
 	it('maps ConflictError to 409', () => {
 		expect(
 			statusOf(() =>
-				handleMemoError(new ConflictError('memo has been modified since it was last read'))
+				handleDomainError(new ConflictError('memo has been modified since it was last read'))
 			)
 		).toBe(409);
 	});
 
 	it('rethrows anything else unchanged', () => {
 		const original = new Error('unexpected');
-		expect(() => handleMemoError(original)).toThrow(original);
+		expect(() => handleDomainError(original)).toThrow(original);
 	});
 });
