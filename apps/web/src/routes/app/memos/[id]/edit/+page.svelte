@@ -34,6 +34,9 @@
 
 	{#if form?.message}
 		<p class="error">{form.message}</p>
+		{#if form.conflict}
+			<a href={resolve('/app/memos/[id]/edit', { id: data.memo.id })}>最新の内容を確認する</a>
+		{/if}
 	{/if}
 
 	<div class="actions">

@@ -56,7 +56,8 @@ export const actions: Actions = {
 				title: typeof title === 'string' ? title : '',
 				content: typeof rawContent === 'string' ? rawContent : '',
 				expectedUpdatedAt:
-					typeof expectedUpdatedAtRaw === 'string' ? expectedUpdatedAtRaw : undefined
+					typeof expectedUpdatedAtRaw === 'string' ? expectedUpdatedAtRaw : undefined,
+				conflict: false
 			});
 		}
 		// ブラウザは <textarea> の送信時に改行を CRLF へ正規化するため、DB・
@@ -70,7 +71,8 @@ export const actions: Actions = {
 				message: INVALID_FORM_SUBMISSION_MESSAGE,
 				title,
 				content,
-				expectedUpdatedAt: expectedUpdatedAtRaw
+				expectedUpdatedAt: expectedUpdatedAtRaw,
+				conflict: false
 			});
 		}
 
@@ -86,7 +88,8 @@ export const actions: Actions = {
 					message: translateMemoValidationMessage(err.message),
 					title,
 					content,
-					expectedUpdatedAt: expectedUpdatedAtRaw
+					expectedUpdatedAt: expectedUpdatedAtRaw,
+					conflict: false
 				});
 			}
 			if (err instanceof ConflictError) {
@@ -103,11 +106,20 @@ export const actions: Actions = {
 				// ページで同じパターンに揃えて `expectedUpdatedAt` にも
 				// `form?.expectedUpdatedAt` を使わないフォールバックを足すと、まさに
 				// この分岐が防いでいる無警告な上書きが再発するので、揃えないこと。
+				//
+				// このフォームは use:enhance を使っていないため、409 のレスポンスは
+				// POST に対する通常の SSR ページ表示になる。ブラウザの「再読み込み」は
+				// このページへの再送信になり、ブラウザの再送信確認ダイアログを経て
+				// 承認すると同じ古い expectedUpdatedAt がそのまま再送され、また 409 に
+				// なるだけでループから抜けられない。そこで conflict フラグを立て、
+				// テンプレート側で同じ編集ページへの GET リンク（<a> タグでの通常の
+				// ナビゲーション）を案内し、そちらから抜けられるようにする。
 				return fail(409, {
-					message: '他の変更と競合しました。ページを再読み込みしてやり直してください。',
+					message: '他の変更と競合しました。下のリンクから最新の内容を確認してください。',
 					title,
 					content,
-					expectedUpdatedAt: expectedUpdatedAtRaw
+					expectedUpdatedAt: expectedUpdatedAtRaw,
+					conflict: true
 				});
 			}
 			handleMemoError(err);
