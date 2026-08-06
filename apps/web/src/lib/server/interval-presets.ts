@@ -183,14 +183,23 @@ async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[
 // 逆に、実行前に安全側（悲観的）に見積もる必要があるため、この上限値を使う。
 const MAX_STATEMENTS_PER_MEMO = 2;
 
+// プレビュー・確定共通のバッチ上限超過エラー。判定方法（見積もり方 vs 実測値）は
+// 呼び出し元ごとに異なるが、報告の仕方（メッセージ文言・例外の種類）は1箇所に
+// まとめ、片方だけ文言を直し忘れる事故を避ける（設計レビューで指摘）。
+function assertWithinBatchStatementLimit(statementCount: number): void {
+	if (statementCount > MAX_BATCH_STATEMENTS) {
+		throw new ValidationError('このプリセットを使っているメモが多すぎるため、一度に更新できません');
+	}
+}
+
 // 対象メモ数から、update 実行時に db.batch() へ積む文数（プリセット UPDATE 1件 +
-// 各メモ最大 MAX_STATEMENTS_PER_MEMO 件）の悲観的上限を超えるかを判定する。
-// 実際の文数は常にこの悲観的上限以下になるため、これを満たさない場合は
-// updateCustomPresetIntervals が必ず MAX_BATCH_STATEMENTS で拒否する（＝プレビューが
-// 「N件の予定が更新されます」と成功を示したのに、確定操作だけが後から拒否される
-// 非対称を防ぐ。正確性レビューで指摘）。
-function exceedsBatchStatementLimit(memoCount: number): boolean {
-	return 1 + memoCount * MAX_STATEMENTS_PER_MEMO > MAX_BATCH_STATEMENTS;
+// 各メモ最大 MAX_STATEMENTS_PER_MEMO 件）の悲観的上限を見積もる。実際の文数は
+// 常にこの悲観的見積もり以下になるため、これが上限を超えなければ
+// updateCustomPresetIntervals は必ず成功する（＝プレビューが「N件の予定が
+// 更新されます」と成功を示したのに、確定操作だけが後から拒否される非対称を防ぐ。
+// 正確性レビューで指摘）。
+function estimateWorstCaseBatchStatementCount(memoCount: number): number {
+	return 1 + memoCount * MAX_STATEMENTS_PER_MEMO;
 }
 
 // 対象メモ群の未完了 reviews 件数。プレビュー（countだけ必要）と実行結果の返り値
@@ -227,9 +236,7 @@ export async function previewPresetIntervalsUpdate(
 	parseIntervalsOrValidationError(rawIntervals);
 
 	const memoIds = await collectAffectedMemoIds(db, presetId);
-	if (exceedsBatchStatementLimit(memoIds.length)) {
-		throw new ValidationError('このプリセットを使っているメモが多すぎるため、一度に更新できません');
-	}
+	assertWithinBatchStatementLimit(estimateWorstCaseBatchStatementCount(memoIds.length));
 	return { previewCount: await countIncompleteReviewsForMemos(db, memoIds) };
 }
 
@@ -259,9 +266,7 @@ export async function updateCustomPresetIntervals(
 		...plans.flatMap((plan) => plan.statements)
 	];
 
-	if (statements.length > MAX_BATCH_STATEMENTS) {
-		throw new ValidationError('このプリセットを使っているメモが多すぎるため、一度に更新できません');
-	}
+	assertWithinBatchStatementLimit(statements.length);
 
 	try {
 		await db.batch(statements);
