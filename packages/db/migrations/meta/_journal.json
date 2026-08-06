@@ -1,76 +1,76 @@
 {
-  "version": "7",
-  "dialect": "sqlite",
-  "entries": [
-    {
-      "idx": 0,
-      "version": "6",
-      "when": 1785768570200,
-      "tag": "0000_living_stellaris",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "6",
-      "when": 1785863531202,
-      "tag": "0001_unknown_vance_astro",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "6",
-      "when": 1785892374412,
-      "tag": "0002_elite_gwen_stacy",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "6",
-      "when": 1785907242122,
-      "tag": "0003_purple_hemingway",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "6",
-      "when": 1785907745309,
-      "tag": "0004_memos_interval_preset_owner_trigger",
-      "breakpoints": true
-    },
-    {
-      "idx": 5,
-      "version": "6",
-      "when": 1785907954849,
-      "tag": "0005_dear_reptil",
-      "breakpoints": true
-    },
-    {
-      "idx": 6,
-      "version": "6",
-      "when": 1785925009444,
-      "tag": "0006_seed_system_interval_preset",
-      "breakpoints": true
-    },
-    {
-      "idx": 7,
-      "version": "6",
-      "when": 1785978012540,
-      "tag": "0007_seed_remaining_system_interval_presets",
-      "breakpoints": true
-    },
-    {
-      "idx": 8,
-      "version": "6",
-      "when": 1786028724546,
-      "tag": "0008_living_bastion",
-      "breakpoints": true
-    },
-    {
-      "idx": 9,
-      "version": "6",
-      "when": 1786028759456,
-      "tag": "0009_user_settings_default_preset_owner_trigger",
-      "breakpoints": true
-    }
-  ]
+	"version": "7",
+	"dialect": "sqlite",
+	"entries": [
+		{
+			"idx": 0,
+			"version": "6",
+			"when": 1785768570200,
+			"tag": "0000_living_stellaris",
+			"breakpoints": true
+		},
+		{
+			"idx": 1,
+			"version": "6",
+			"when": 1785863531202,
+			"tag": "0001_unknown_vance_astro",
+			"breakpoints": true
+		},
+		{
+			"idx": 2,
+			"version": "6",
+			"when": 1785892374412,
+			"tag": "0002_elite_gwen_stacy",
+			"breakpoints": true
+		},
+		{
+			"idx": 3,
+			"version": "6",
+			"when": 1785907242122,
+			"tag": "0003_purple_hemingway",
+			"breakpoints": true
+		},
+		{
+			"idx": 4,
+			"version": "6",
+			"when": 1785907745309,
+			"tag": "0004_memos_interval_preset_owner_trigger",
+			"breakpoints": true
+		},
+		{
+			"idx": 5,
+			"version": "6",
+			"when": 1785907954849,
+			"tag": "0005_dear_reptil",
+			"breakpoints": true
+		},
+		{
+			"idx": 6,
+			"version": "6",
+			"when": 1785925009444,
+			"tag": "0006_seed_system_interval_preset",
+			"breakpoints": true
+		},
+		{
+			"idx": 7,
+			"version": "6",
+			"when": 1785978012540,
+			"tag": "0007_seed_remaining_system_interval_presets",
+			"breakpoints": true
+		},
+		{
+			"idx": 8,
+			"version": "6",
+			"when": 1786028724546,
+			"tag": "0008_living_bastion",
+			"breakpoints": true
+		},
+		{
+			"idx": 9,
+			"version": "6",
+			"when": 1786028759456,
+			"tag": "0009_user_settings_default_preset_owner_trigger",
+			"breakpoints": true
+		}
+	]
 }
