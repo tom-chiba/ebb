@@ -127,10 +127,9 @@ export const userSettings = sqliteTable('user_settings', {
 	userId: text('user_id')
 		.primaryKey()
 		.references(() => user.id, { onDelete: 'cascade' }),
-	defaultIntervalPresetId: text('default_interval_preset_id').references(
-		() => intervalPresets.id,
-		{ onDelete: 'set null' }
-	)
+	defaultIntervalPresetId: text('default_interval_preset_id').references(() => intervalPresets.id, {
+		onDelete: 'set null'
+	})
 });
 
 export const intervalPresetsRelations = relations(intervalPresets, ({ one, many }) => ({
