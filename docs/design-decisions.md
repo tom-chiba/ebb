@@ -1525,6 +1525,22 @@ unknown>)` という非ジェネリックな型のため、失敗時の返り値
     WHERE 句に組み込む形での完全な排除は見送った）。現状のどの読み取り経路も
     `isNull(memos.archivedAt)` でフィルタしているため、この残存レースが仮に起きても
     アーカイブ済みメモの孤立した reviews 行が外部から見える・操作できることはない。
+    このガードには、`planReviewRecalculation` を横取りして「対象メモの列挙後・
+    再確認前」にアーカイブを割り込ませる回帰テストを追加した（`db.batch` を横取りする
+    既存の競合テストとは異なるタイミングを再現する必要があったため、手法を変えた）。
+  - **`activePlans` を memoId と plan の並行配列＋index対応付けで組み立てていた**
+    （設計レビューで指摘）。`memoIds.map((memoId, index) => ({ memoId, plan:
+    plans[index] }))` という実装は、「memoIds と plans が同じ順序・同じ長さ」という
+    `Promise.all` の性質に暗黙に依存しており、`noUncheckedIndexedAccess` を満たすための
+    型ガードもその依存を表現できていなかった。`Promise.all(memoIds.map(async memoId
+    => ({ memoId, plan: await planReviewRecalculation(...) })))` として最初から
+    ペアで組み立てるよう変更し、並行配列と手書きの型ガードを排除した。
+  - **チャンク分割ロジックの重複**（設計レビューで指摘）。`countIncompleteReviewsForMemos`
+    と `updateCustomPresetIntervals` 内のアーカイブ再確認が、それぞれ独立に
+    `chunk()` を呼んで結果を結合していた。`queryInChunks(ids, query)` として
+    「チャンク分割 → 並列クエリ → 結合」を1箇所にまとめ、`D1_MAX_BIND_PARAMS` が
+    「1つの `inArray` に渡せる件数」ではなく「1クエリの bind パラメータ総数」の
+    上限であることのコメントも、将来クエリに条件を追加する際の注意点として明示した。
 
 ## 開発の進め方
 

@@ -16,6 +16,7 @@ import {
 } from './interval-presets';
 import { archiveMemo, createMemo } from './memos';
 import { completeReview } from './reviews';
+import * as reviewsModule from './reviews';
 import { createTestUser } from './test-helpers';
 
 let db: Db;
@@ -485,6 +486,66 @@ describe('updateCustomPresetIntervals', () => {
 			.where(eq(intervalPresets.id, ownerPresetId))
 			.all();
 		expect(preset?.intervals).toEqual([1, 24, 72]);
+	});
+
+	// collectAffectedMemoIds が対象メモを列挙した後、db.batch() 確定前にもう一度
+	// アーカイブ状態を確認する stillActiveMemoIds ガード（正確性レビューで指摘）の
+	// 回帰テスト。db.batch を横取りする既存の競合テストとは異なるタイミング
+	// （「対象メモの列挙後・再確認前」）を再現する必要があるため、代わりに
+	// planReviewRecalculation（対象メモごとに1回ずつ呼ばれる）を横取りし、
+	// その内部で該当メモを archiveMemo することで、再確認より前にアーカイブが
+	// 割り込む状況を決定的に再現する。
+	it('excludes a memo archived after it was selected but before the batch commits', async () => {
+		const staysActive = await createMemo(db, ownerId, {
+			title: 'stays-active',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const getsArchivedMidFlight = await createMemo(db, ownerId, {
+			title: 'archived-mid-flight',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+
+		const originalPlan = reviewsModule.planReviewRecalculation;
+		const planSpy = vi
+			.spyOn(reviewsModule, 'planReviewRecalculation')
+			.mockImplementation(async (db2, memoId, intervals) => {
+				if (memoId === getsArchivedMidFlight.id) {
+					await archiveMemo(db2, ownerId, memoId);
+				}
+				return originalPlan(db2, memoId, intervals);
+			});
+
+		try {
+			const { updatedReviewsCount } = await updateCustomPresetIntervals(
+				db,
+				ownerId,
+				ownerPresetId,
+				'2h, 5h'
+			);
+			// staysActive の元3ステップ分のみ。途中でアーカイブされたメモの分は含まない。
+			expect(updatedReviewsCount).toBe(3);
+		} finally {
+			planSpy.mockRestore();
+		}
+
+		const activeRows = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, staysActive.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(activeRows).toHaveLength(2);
+
+		// archiveMemo が削除した未完了行のまま。stillActiveMemoIds ガードが機能して
+		// いなければ、ここに新しい未完了行が2件 INSERT されてしまう。
+		const archivedRows = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, getsArchivedMidFlight.id))
+			.all();
+		expect(archivedRows).toHaveLength(0);
 	});
 });
 
