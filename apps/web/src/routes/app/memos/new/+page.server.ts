@@ -5,7 +5,7 @@ import {
 	translateMemoValidationMessage
 } from '$lib/server/form-messages';
 import { ValidationError } from '$lib/server/errors';
-import { DEFAULT_INTERVAL_PRESET_ID } from '$lib/server/interval-presets';
+import { getDefaultPresetId } from '$lib/server/interval-presets';
 import { CONTENT_MAX_LENGTH, createMemo, TITLE_MAX_LENGTH } from '$lib/server/memos';
 import { normalizeLineEndings } from '$lib/server/text';
 import type { Actions, PageServerLoad } from './$types';
@@ -57,11 +57,12 @@ export const actions: Actions = {
 		const content = normalizeLineEndings(rawContent);
 
 		try {
+			const intervalPresetId = await getDefaultPresetId(db, user.id);
 			const memo = await createMemo(db, user.id, {
 				id,
 				title,
 				content,
-				intervalPresetId: DEFAULT_INTERVAL_PRESET_ID
+				intervalPresetId
 			});
 			// createMemo は同じ id の再送を「内容を比較せず」既存 memo をそのまま返す
 			// （#13 の冪等性キー仕様。$lib/server/memos.ts・/api/memos の契約自体は

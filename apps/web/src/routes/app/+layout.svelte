@@ -22,6 +22,7 @@
 		<a href={resolve('/app')}>ホーム</a>
 		<a href={resolve('/app/reviews')}>今日の復習</a>
 		<a href={resolve('/app/memos')}>メモ</a>
+		<a href={resolve('/app/settings')}>設定</a>
 	</nav>
 	<span>{data.user.name}</span>
 	<button onclick={signOut}>ログアウト</button>
