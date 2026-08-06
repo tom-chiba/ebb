@@ -297,6 +297,72 @@ describe('createMemo reviews generation', () => {
 		const rows = await db.select().from(reviews).where(eq(reviews.memoId, id)).all();
 		expect(rows).toHaveLength(2);
 	});
+
+	// #16 のデプロイ前（reviews 生成ロジックが存在しなかった時点）に作られたメモが、
+	// 同じクライアント生成 id で再送された場合を再現する（Codex adversarial レビューで
+	// 指摘）。createMemo を経由せず直接 INSERT することで、reviews を持たない
+	// 「旧バージョンが作った」メモを模している。
+	it('backfills missing reviews when an idempotent retry finds an existing memo with none', async () => {
+		const id = crypto.randomUUID();
+		const createdAt = new Date();
+		await db.insert(memos).values({
+			id,
+			userId: ownerId,
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId, // intervals: [1, 24]
+			createdAt,
+			updatedAt: createdAt
+		});
+		const preExisting = await db.select().from(reviews).where(eq(reviews.memoId, id)).all();
+		expect(preExisting).toHaveLength(0);
+
+		const memo = await createMemo(db, ownerId, {
+			id,
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+
+		const rows = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, id))
+			.orderBy(reviews.step)
+			.all();
+		expect(rows).toHaveLength(2);
+		expect(rows[0]?.scheduledAt.getTime()).toBe(memo.createdAt.getTime() + 1 * 60 * 60 * 1000);
+		expect(rows[1]?.scheduledAt.getTime()).toBe(memo.createdAt.getTime() + 24 * 60 * 60 * 1000);
+	});
+
+	it('does not touch reviews on an idempotent retry when they already exist', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		const before = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+
+		await createMemo(db, ownerId, {
+			id: memo.id,
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+
+		const after = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(after).toEqual(before);
+	});
 });
 
 describe('listMemos / getMemo', () => {

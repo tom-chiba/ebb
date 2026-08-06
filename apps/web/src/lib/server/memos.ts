@@ -171,6 +171,40 @@ function buildReviewRows(memoId: string, baseTime: Date, intervals: readonly num
 	});
 }
 
+// createMemo の冪等性チェック（findOwnMemoById）が見つけた既存メモに reviews が
+// 1件も無い場合、その場で生成する。この状況は本来起こらないはずだが、#16 の
+// デプロイ前（reviews 生成ロジックが存在しなかった時点）に作られたメモが、同じ
+// クライアント生成 id で再送された場合に発生し得る（Codex adversarial レビューで
+// 指摘）。既存メモ・既存プリセットの組み合わせのみを対象とし、新規メモの生成経路
+// （createMemo 本体、intervals 空チェック含む）とは独立に、既に存在してしまった
+// reviews 欠落を治癒するためだけの処理。
+async function ensureReviewsExist(db: Db, memo: typeof memos.$inferSelect) {
+	const existingReviews = await db
+		.select({ id: reviews.id })
+		.from(reviews)
+		.where(eq(reviews.memoId, memo.id))
+		.limit(1)
+		.all();
+	if (existingReviews.length > 0) return;
+
+	const presetRows = await db
+		.select({ intervals: intervalPresets.intervals })
+		.from(intervalPresets)
+		.where(eq(intervalPresets.id, memo.intervalPresetId))
+		.limit(1)
+		.all();
+	const intervals = presetRows[0]?.intervals ?? [];
+	if (intervals.length === 0) return;
+
+	try {
+		await db.insert(reviews).values(buildReviewRows(memo.id, memo.createdAt, intervals));
+	} catch (err) {
+		// 同時に複数のリトライが治癒を試みた場合、片方は reviews_memoId_step_unique に
+		// 弾かれる。望む終状態（reviews が存在する）はもう一方の成功で既に満たされている。
+		if (!isUniqueConstraintViolation(err, 'reviews.memo_id')) throw err;
+	}
+}
+
 export async function createMemo(db: Db, userId: string, input: CreateMemoInput) {
 	assertTitle(input.title);
 	assertContent(input.content);
@@ -186,7 +220,10 @@ export async function createMemo(db: Db, userId: string, input: CreateMemoInput)
 
 	if (input.id !== undefined) {
 		const existing = await findOwnMemoById(db, userId, input.id);
-		if (existing) return toMemoResponse(existing);
+		if (existing) {
+			await ensureReviewsExist(db, existing);
+			return toMemoResponse(existing);
+		}
 	}
 
 	// id と createdAt/updatedAt をここで確定させ、memos への INSERT と reviews の
@@ -218,7 +255,10 @@ export async function createMemo(db: Db, userId: string, input: CreateMemoInput)
 	} catch (err) {
 		if (input.id !== undefined && isUniqueConstraintViolation(err, 'memos.id')) {
 			const existing = await findOwnMemoById(db, userId, input.id);
-			if (existing) return toMemoResponse(existing);
+			if (existing) {
+				await ensureReviewsExist(db, existing);
+				return toMemoResponse(existing);
+			}
 			throw new ValidationError('id is already in use');
 		}
 		throw err;
