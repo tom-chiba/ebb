@@ -174,7 +174,7 @@ async function getOwnedCustomPreset(db: Db, userId: string, presetId: string) {
 // 残らない」不変条件（docs/schema.md）を再計算対象に含めることで静かに破ってしまうため。
 // この SELECT から db.batch() 確定までの間に別リクエストが同じメモを archiveMemo
 // した場合の残存レースは、updateCustomPresetIntervals 側の再確認（
-// dropRecentlyArchivedMemoIds）で狭めているが完全には防げない（正確性レビューで
+// stillActiveMemoIds）で狭めているが完全には防げない（正確性レビューで
 // 指摘、docs/design-decisions.md の #18 節に記録）。
 async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[]> {
 	const rows = await db
@@ -344,12 +344,15 @@ export async function updateCustomPresetIntervals(
 
 	// db.batch は静的に非空とわかるタプル型を要求する（#17 の completeReview と同じ理由）。
 	// updatePresetStatement は常に配列先頭にあるため実行時には常に1件以上になる。
+	// 1メモあたり最大 MAX_STATEMENTS_PER_MEMO 文、かつ冒頭の
+	// assertWithinBatchStatementLimit(estimateWorstCaseBatchStatementCount(...)) が
+	// 既に memoIds.length を上限内に収めているため、activeStatements（memoIds の
+	// 部分集合である activePlans 由来）の文数がこれを超えることはあり得ない。
+	// 実測値による重複チェックは書かない（起こり得ないシナリオへの防御的検証）。
 	const statements: [typeof updatePresetStatement, ...BatchItem<'sqlite'>[]] = [
 		updatePresetStatement,
 		...activeStatements
 	];
-
-	assertWithinBatchStatementLimit(statements.length);
 
 	try {
 		await db.batch(statements);
