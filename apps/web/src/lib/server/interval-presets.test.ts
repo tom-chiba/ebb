@@ -378,13 +378,16 @@ describe('updateCustomPresetIntervals', () => {
 		expect(preset?.intervals).toEqual([2]);
 	});
 
-	it(`succeeds when the resulting batch is exactly at MAX_BATCH_STATEMENTS (${MAX_BATCH_STATEMENTS})`, async () => {
-		// 1（プリセット UPDATE）+ 249メモ × 2文（DELETE + INSERT、completedCount=0 <
-		// 新 intervals の長さ1）+ 1メモ × 1文（DELETE のみ、事前に step0 を完了させて
-		// completedCount=1 が新 intervals の長さ1以上になり INSERT が不要になる）
-		// = 500文ちょうど、で成功することを確認する（超過時に拒否する既存テストと対の境界値）。
-		const plainMemoCount = Math.floor((MAX_BATCH_STATEMENTS - 1) / 2);
-		for (let i = 0; i < plainMemoCount; i++) {
+	it('succeeds just under the pessimistic worst-case batch statement limit', async () => {
+		// updateCustomPresetIntervals も（プレビューとの非対称防止のため）
+		// estimateWorstCaseBatchStatementCount による悲観的見積もりで早期リジェクトする
+		// ようになった（設計レビューで指摘。以前は実測の statements.length のみで
+		// 判定しており、大量メモに対する確定操作が高コストな処理を全て実行してから
+		// 拒否していた）。この見積もりは1メモあたり最大2文という前提のため、
+		// 実際の文数によらず memoCount 単体で「1 + memoCount*2 <= 500」となる
+		// 249メモまでは必ず成功する。
+		const memoCount = Math.floor((MAX_BATCH_STATEMENTS - 1) / 2);
+		for (let i = 0; i < memoCount; i++) {
 			await createMemo(db, ownerId, {
 				title: `memo-${i}`,
 				content: 'c',
@@ -392,40 +395,19 @@ describe('updateCustomPresetIntervals', () => {
 			});
 		}
 
-		const specialMemo = await createMemo(db, ownerId, {
-			title: 'special',
-			content: 'c',
-			intervalPresetId: ownerPresetId
-		});
-		await db
-			.update(reviews)
-			.set({ scheduledAt: new Date(Date.now() - 1000) })
-			.where(eq(reviews.memoId, specialMemo.id));
-		const [due] = await db
-			.select({ id: reviews.id })
-			.from(reviews)
-			.where(eq(reviews.memoId, specialMemo.id))
-			.orderBy(reviews.step)
-			.limit(1)
-			.all();
-		if (!due) throw new Error('fixture setup failed');
-		await completeReview(db, ownerId, due.id);
-
 		const { updatedReviewsCount } = await updateCustomPresetIntervals(
 			db,
 			ownerId,
 			ownerPresetId,
-			'1h'
+			'1h, 2h'
 		);
-		// plainMemoCount 件 × 元3ステップ + special の残り2ステップ（step1・step2）。
-		expect(updatedReviewsCount).toBe(plainMemoCount * 3 + 2);
+		expect(updatedReviewsCount).toBe(memoCount * 3);
 	});
 
-	it(`rejects the update when the resulting batch would exceed MAX_BATCH_STATEMENTS (${MAX_BATCH_STATEMENTS})`, async () => {
-		// 1メモあたりの文数は「DELETE 1件 + INSERT 1件（複数行分をまとめた1文）」の
-		// 2文（completedCount=0 かつ新 intervals に1件以上残る場合、
-		// $lib/server/reviews.ts の planReviewRecalculation を参照）。
-		// 1（プリセット UPDATE） + memoCount * 2 が上限を超えるように十分な数のメモを作る。
+	it('rejects the update before doing any per-memo work when the pessimistic estimate alone exceeds the limit', async () => {
+		// previewPresetIntervalsUpdate と同じ悲観的見積もりを実行系の入口でも使う
+		// ようになったため、対象メモ数だけで即座にリジェクトされ、実際の統計文数
+		// （completedCount 次第でもっと少ない可能性がある）には依存しない。
 		const memoCount = Math.ceil((MAX_BATCH_STATEMENTS - 1) / 2) + 1;
 		for (let i = 0; i < memoCount; i++) {
 			await createMemo(db, ownerId, {
@@ -435,11 +417,9 @@ describe('updateCustomPresetIntervals', () => {
 			});
 		}
 
-		await expect(updateCustomPresetIntervals(db, ownerId, ownerPresetId, '1h, 2h')).rejects.toThrow(
+		await expect(updateCustomPresetIntervals(db, ownerId, ownerPresetId, '1h')).rejects.toThrow(
 			ValidationError
 		);
-
-		// プリセット自体も更新されていない（拒否時点で何も実行されない）ことを確認する。
 		const [preset] = await db
 			.select()
 			.from(intervalPresets)
@@ -447,6 +427,7 @@ describe('updateCustomPresetIntervals', () => {
 			.all();
 		expect(preset?.intervals).toEqual([1, 24, 72]);
 	});
+
 
 	// planReviewRecalculation の SELECT（完了済みステップ数・未完了行の読み取り）と
 	// この db.batch() 実行の間に、別リクエストの completeReview が同じメモの対象

@@ -1551,6 +1551,20 @@ unknown>)` という非ジェネリックな型のため、失敗時の返り値
     存在に関する1ビットの情報（そのシステムプリセットを誰かが使っているか）が
     漏れていた。使用中判定の SELECT に `eq(memos.userId, userId)` を追加して
     修正した。
+  - **`updateCustomPresetIntervals`（確定操作）が、実測の `statements.length` による
+    バッチ上限チェックしか持たず、それより前に対象メモ全件分の `planReviewRecalculation`
+    （1メモあたりSELECT3回）とアーカイブ再確認クエリを実行してしまっていた**
+    （設計レビューで指摘）。`previewPresetIntervalsUpdate` は
+    `estimateWorstCaseBatchStatementCount` による悲観的見積もりで実行前に早期拒否
+    するのに対し、確定操作側はこの見積もりを使っておらず、UIの確認フローを迂回して
+    `confirmed=true` を直接POSTした場合、`MAX_BATCH_STATEMENTS` を設けた本来の目的
+    （Free プランの CPU 10ms/リクエスト制約に対する安全弁）を実行系では
+    部分的にしか達成できていなかった。`collectAffectedMemoIds` の直後に同じ
+    悲観的見積もりチェックを追加し、実測値による最終チェックはそのまま残した
+    （プレビューとの非対称性を防ぐ既存の仕組みのため）。これに伴い、実測値ちょうど
+    500文を境界とするテストは、悲観的見積もり側で先に拒否されるようになったため、
+    見積もり自体の境界（249メモまでは必ず成功、250メモ以上は即座に拒否）を検証する
+    テストに置き換えた。
 
 ## 開発の進め方
 

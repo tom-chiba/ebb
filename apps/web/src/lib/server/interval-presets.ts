@@ -297,6 +297,13 @@ export async function updateCustomPresetIntervals(
 	const intervals = parseIntervalsOrValidationError(rawIntervals);
 
 	const memoIds = await collectAffectedMemoIds(db, presetId);
+	// 実測の statements.length による最終チェック（後述）の前に、プレビューと同じ
+	// 悲観的見積もりで早期に拒否する。これが無いと、UIの確認フローを迂回して
+	// confirmed=true を直接POSTした場合に、大量メモ分の planReviewRecalculation
+	// （1メモあたりSELECT3回）とアーカイブ再確認クエリを全て実行してから最後に
+	// 拒否することになり、MAX_BATCH_STATEMENTS を設けた本来の目的（CPU時間の安全弁）
+	// を実行系では部分的にしか達成できていなかった（設計レビューで指摘）。
+	assertWithinBatchStatementLimit(estimateWorstCaseBatchStatementCount(memoIds.length));
 	// memoId と plan を最初からペアで持ち回ることで、後段のフィルタが2つの並行配列を
 	// index で対応付ける必要をなくす（設計レビューで指摘。index対応付けだと
 	// 「memoIds と plans が同じ順序・同じ長さ」という別の不変条件に暗黙に依存してしまう）。
