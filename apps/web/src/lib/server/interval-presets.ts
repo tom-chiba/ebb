@@ -18,7 +18,7 @@ import {
 	NotFoundError,
 	ValidationError
 } from './errors';
-import { planReviewRecalculation, type ReviewRecalculationPlan } from './reviews';
+import { planReviewRecalculation } from './reviews';
 
 // #15/#16 が着地する前の暫定値として #14 で導入された、システム標準プリセットの
 // 固定 slug id。#18 でユーザーが一度も既定プリセットを選んでいない場合の
@@ -186,15 +186,13 @@ async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[
 }
 
 // planReviewRecalculation が1メモあたりに積む文数の上限（DELETE 1 + INSERT 1）。
-// 実際の文数はこれより少ないことがある（完了済み行のみで DELETE 不要、新
-// intervals が0件で INSERT 不要、等）ため、実行系（updateCustomPresetIntervals）
-// はここではなく実際に組み立てた statements.length で判定する。プレビューは
-// 逆に、実行前に安全側（悲観的）に見積もる必要があるため、この上限値を使う。
+// 実際の文数はこれより少ないことがある（新 intervals の残りステップが0件で
+// INSERT 不要、等）が、プレビューと確定操作を同じ条件で早期拒否するため、両方とも
+// 実際の文数ではなく、この上限値を使った悲観的見積もりで判定する。
 const MAX_STATEMENTS_PER_MEMO = 2;
 
-// プレビュー・確定共通のバッチ上限超過エラー。判定方法（見積もり方 vs 実測値）は
-// 呼び出し元ごとに異なるが、報告の仕方（メッセージ文言・例外の種類）は1箇所に
-// まとめ、片方だけ文言を直し忘れる事故を避ける（設計レビューで指摘）。
+// プレビュー・確定共通のバッチ上限超過エラー。報告の仕方（メッセージ文言・
+// 例外の種類）は1箇所にまとめ、片方だけ文言を直し忘れる事故を避ける。
 function assertWithinBatchStatementLimit(statementCount: number): void {
 	if (statementCount > MAX_BATCH_STATEMENTS) {
 		throw new ValidationError('このプリセットを使っているメモが多すぎるため、一度に更新できません');
@@ -297,8 +295,8 @@ export async function updateCustomPresetIntervals(
 	const intervals = parseIntervalsOrValidationError(rawIntervals);
 
 	const memoIds = await collectAffectedMemoIds(db, presetId);
-	// 実測の statements.length による最終チェック（後述）の前に、プレビューと同じ
-	// 悲観的見積もりで早期に拒否する。これが無いと、UIの確認フローを迂回して
+	// プレビューと同じ悲観的見積もりで、メモごとの再計算プランを作る前に拒否する。
+	// これが無いと、UIの確認フローを迂回して
 	// confirmed=true を直接POSTした場合に、大量メモ分の planReviewRecalculation
 	// （1メモあたりSELECT3回）とアーカイブ再確認クエリを全て実行してから最後に
 	// 拒否することになり、MAX_BATCH_STATEMENTS を設けた本来の目的（CPU時間の安全弁）
@@ -324,13 +322,15 @@ export async function updateCustomPresetIntervals(
 	// が持つ同種の SELECT-then-write ハザードと同じ性質の残存レースであり、完全な排除
 	// ではないことは docs/design-decisions.md の #18 節に記録済み。正確性レビューで指摘）。
 	const stillActiveMemoIds = new Set(
-		(await queryInChunks(memoIds, (ids) =>
-			db
-				.select({ id: memos.id })
-				.from(memos)
-				.where(and(inArray(memos.id, ids), isNull(memos.archivedAt)))
-				.all()
-		)).map((row) => row.id)
+		(
+			await queryInChunks(memoIds, (ids) =>
+				db
+					.select({ id: memos.id })
+					.from(memos)
+					.where(and(inArray(memos.id, ids), isNull(memos.archivedAt)))
+					.all()
+			)
+		).map((row) => row.id)
 	);
 	const activePlans = memoPlans
 		.filter(({ memoId }) => stillActiveMemoIds.has(memoId))

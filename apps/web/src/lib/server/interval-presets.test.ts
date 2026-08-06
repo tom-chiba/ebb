@@ -428,7 +428,6 @@ describe('updateCustomPresetIntervals', () => {
 		expect(preset?.intervals).toEqual([1, 24, 72]);
 	});
 
-
 	// planReviewRecalculation の SELECT（完了済みステップ数・未完了行の読み取り）と
 	// この db.batch() 実行の間に、別リクエストの completeReview が同じメモの対象
 	// ステップを完了させる真の競合を再現する（#17 の completeReview 自身が同種の

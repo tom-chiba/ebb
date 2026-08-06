@@ -1491,10 +1491,9 @@ unknown>)` という非ジェネリックな型のため、失敗時の返り値
     悲観的に見積もる `estimateWorstCaseBatchStatementCount` をプレビュー側にも追加し、
     確定が拒否しうるケースを常にプレビュー時点で検知するようにした（悲観的見積もり
     のため、実際には上限内に収まるはずのケースをプレビュー側が過剰に拒否することは
-    あり得るが、安全側であるため許容する）。上限超過時の判定方法（見積もり値 vs
-    実測の `statements.length`）はプレビューと確定で異なるが、それをどう報告するか
-    （メッセージ文言・例外の種類）は `assertWithinBatchStatementLimit` に共通化し、
-    2箇所で同じ文言を重複させない（設計レビューで指摘）。
+    あり得るが、安全側であるため許容する）。確定操作にも後から同じ悲観的見積もりを
+    追加し、上限超過時の報告（メッセージ文言・例外の種類）は
+    `assertWithinBatchStatementLimit` に共通化して、2箇所で同じ文言を重複させない。
   - なお、**間隔を大きく縮小した際、プレビューの「N件」が示す件数はあくまで
     「削除・作り直しの対象になる既存の未完了行数」であり、新しい intervals の長さは
     見ていない**（テスト網羅性レビューで指摘、一貫した定義として結論・マージ非ブロック）。
@@ -1530,10 +1529,10 @@ unknown>)` という非ジェネリックな型のため、失敗時の返り値
     既存の競合テストとは異なるタイミングを再現する必要があったため、手法を変えた）。
   - **`activePlans` を memoId と plan の並行配列＋index対応付けで組み立てていた**
     （設計レビューで指摘）。`memoIds.map((memoId, index) => ({ memoId, plan:
-    plans[index] }))` という実装は、「memoIds と plans が同じ順序・同じ長さ」という
+plans[index] }))` という実装は、「memoIds と plans が同じ順序・同じ長さ」という
     `Promise.all` の性質に暗黙に依存しており、`noUncheckedIndexedAccess` を満たすための
     型ガードもその依存を表現できていなかった。`Promise.all(memoIds.map(async memoId
-    => ({ memoId, plan: await planReviewRecalculation(...) })))` として最初から
+=> ({ memoId, plan: await planReviewRecalculation(...) })))` として最初から
     ペアで組み立てるよう変更し、並行配列と手書きの型ガードを排除した。
   - **チャンク分割ロジックの重複**（設計レビューで指摘）。`countIncompleteReviewsForMemos`
     と `updateCustomPresetIntervals` 内のアーカイブ再確認が、それぞれ独立に
@@ -1561,7 +1560,7 @@ unknown>)` という非ジェネリックな型のため、失敗時の返り値
     （Free プランの CPU 10ms/リクエスト制約に対する安全弁）を実行系では
     部分的にしか達成できていなかった。`collectAffectedMemoIds` の直後に同じ
     悲観的見積もりチェックを追加した。この早期チェックが `1 + memoIds.length * 2 <=
-    500` を保証する以上、`activeStatements`（`memoIds` の部分集合である
+500` を保証する以上、`activeStatements`（`memoIds` の部分集合である
     `activePlans` 由来、1メモ最大 `MAX_STATEMENTS_PER_MEMO` 文）の実測値が
     `MAX_BATCH_STATEMENTS` を超えることは論理的にあり得ないため、それまであった
     実測値 `statements.length` による重複チェックは削除した（起こり得ないシナリオへの
