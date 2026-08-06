@@ -1115,11 +1115,12 @@ PR #46 作成後、Codex の通常レビューと adversarial レビュー（`/c
   この行を参照しているため、id・値を変えると既存データと食い違う）
 - **`packages/core`/`packages/db` 間、あるいは `apps/web` を経由したプリセット値の
   drift を検知する自動テストは追加しなかった**。`packages/core` は無依存の方針
-  （モノレポの土台 #1 の節）のため `packages/db` から `packages/core` を import
-  できず、逆方向（`packages/db` が `packages/core` の値を drift 検知に使う）は
-  依存の向き（`apps/* → packages/*` のみ）に反する。`apps/web` 経由で検証する
-  ことは可能だが、#15 のスコープを `packages/core`（と、schema.md が明示的に
-  委ねた seed migration）に絞るため見送った。migration のコメントで
+  （モノレポの土台 #1 の節）のため `packages/core` から `packages/db` を import して
+  drift 検知することはできない。逆方向（`packages/db` が `packages/core` を import
+  して drift 検知に使う）も、パッケージ間の依存の向きは `apps/* → packages/*` のみ
+  （#5/#20 節）という既存方針に反するため採らない。`apps/web` 経由で検証すること
+  自体は依存方向としては可能だが、#15 のスコープを `packages/core`（と、schema.md が
+  明示的に委ねた seed migration）に絞るため見送った。migration のコメントで
   `packages/core` を値の出所として明記するに留めている（既存の `0006` と同じ方式）
 
 ## 開発の進め方

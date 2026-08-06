@@ -16,6 +16,15 @@ describe('SYSTEM_INTERVAL_PRESETS', () => {
 		const standard = SYSTEM_INTERVAL_PRESETS.find((preset) => preset.id === 'system-standard');
 		expect(standard?.intervals).toEqual([1, 24, 72, 168, 336, 720]);
 	});
+
+	it('短期集中・長期プリセットの間隔が Issue 本文の仕様どおり時間換算されている', () => {
+		const intervalsOf = (id: string) =>
+			SYSTEM_INTERVAL_PRESETS.find((preset) => preset.id === id)?.intervals;
+		// 短期集中: [1h, 6h, 1d, 3d]
+		expect(intervalsOf('system-short')).toEqual([1, 6, 24, 72]);
+		// 長期: [1d, 1w, 1m, 3m]（30日=720h, 90日=2160h 換算）
+		expect(intervalsOf('system-long')).toEqual([24, 168, 720, 2160]);
+	});
 });
 
 describe('nextReviewAt', () => {
@@ -70,7 +79,8 @@ describe('nextReviewAt', () => {
 		});
 
 		afterAll(() => {
-			process.env.TZ = originalTz;
+			if (originalTz === undefined) delete process.env.TZ;
+			else process.env.TZ = originalTz;
 		});
 
 		it('米国の夏時間開始（2026-03-08）を跨いでも実際の経過時間どおりに計算される', () => {
@@ -84,10 +94,15 @@ describe('nextReviewAt', () => {
 });
 
 describe('fixedIntervalStrategy', () => {
-	it('SchedulingStrategy として nextReviewAt と同じ結果を返す', () => {
+	it('SchedulingStrategy として次の復習時刻を計算する', () => {
 		const baseTime = new Date('2026-01-01T00:00:00.000Z');
 		expect(fixedIntervalStrategy.nextReviewAt(baseTime, [1, 24], 0)).toEqual(
-			nextReviewAt(baseTime, [1, 24], 0)
+			new Date('2026-01-01T01:00:00.000Z')
 		);
+	});
+
+	it('範囲外の step では undefined を返す', () => {
+		const baseTime = new Date('2026-01-01T00:00:00.000Z');
+		expect(fixedIntervalStrategy.nextReviewAt(baseTime, [1, 24], 2)).toBeUndefined();
 	});
 });
