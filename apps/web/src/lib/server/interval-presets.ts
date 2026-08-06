@@ -89,10 +89,15 @@ export async function listPresetsForUser(db: Db, userId: string): Promise<Preset
 		.all();
 
 	// 対象プリセットごとに使用中の memo が存在するかを1クエリでまとめて調べる
-	// （プリセットごとに問い合わせない）。
+	// （プリセットごとに問い合わせない）。userId で絞らないと、システム標準プリセット
+	// （全ユーザー共有）の inUse が「自分が使っているか」ではなく「他ユーザーも含め
+	// 誰かが使っているか」になってしまい、他ユーザーの存在に関する情報が
+	// （UI上は未使用でも、ページの data には含まれる形で）漏れる
+	// （正確性レビューで指摘）。
 	const usageRows = await db
 		.select({ intervalPresetId: memos.intervalPresetId })
 		.from(memos)
+		.where(eq(memos.userId, userId))
 		.groupBy(memos.intervalPresetId)
 		.all();
 	const usedPresetIds = new Set(usageRows.map((row) => row.intervalPresetId));

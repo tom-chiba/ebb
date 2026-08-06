@@ -81,6 +81,20 @@ describe('listPresetsForUser', () => {
 		// アーカイブ済みでも FK は残っているため使用中のまま。
 		expect(afterArchive.find((p) => p.id === ownerPresetId)?.inUse).toBe(true);
 	});
+
+	it('does not leak another users usage of a shared system preset via inUse', async () => {
+		// システム標準プリセットは全ユーザー共有のため、inUse を userId で絞らずに
+		// 計算すると「自分が使っているか」ではなく「他ユーザーも含め誰かが使っているか」
+		// になってしまう（正確性レビューで指摘）。
+		await createMemo(db, otherUserId, {
+			title: 'other users memo',
+			content: 'c',
+			intervalPresetId: systemPresetId
+		});
+
+		const presets = await listPresetsForUser(db, ownerId);
+		expect(presets.find((p) => p.id === systemPresetId)?.inUse).toBe(false);
+	});
 });
 
 describe('createCustomPreset', () => {
