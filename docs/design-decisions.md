@@ -1346,6 +1346,228 @@ PR #46 作成後、Codex の通常レビューと adversarial レビュー（`/c
   import してはいなかった（スコープ外の変更レビューで、この点の記述が不正確だったと
   指摘され訂正した）。
 
+## 間隔設定の変更 UI と既存 reviews の再計算 (#18)
+
+- **設定画面（`/app/settings`）のスコープはプリセット管理のみに絞った**（ユーザー承認済み）。
+  プリセットの一覧・作成（自由入力のパース）・`intervals` の編集・削除、新規メモの
+  既定プリセット選択を行う。既存の個別メモに対するプリセット切替 UI
+  （`updateMemo` の `intervalPresetId` を変更する UI）は今回のスコープに含めない。
+  `updateMemo` 自体は #13 時点から `intervalPresetId` を受け付けるが、呼び出し元の
+  UI が存在しないため実質未使用のまま残る。この経路（`/api/memos/[id]` の PATCH）から
+  `intervalPresetId` を変更した場合、reviews は再計算されない（#16 の時点からの既知の
+  制約がそのまま残る）。恒久的な解消は将来 Issue に委ねる。
+
+- **プリセットの `intervals` は作成後も編集可能にし、編集時にそのプリセットを使っている
+  全ての非アーカイブメモへ再計算を適用する**（`docs/schema.md` の reviews 節が委ねていた
+  二択のうち、「作成後は編集不可にし削除・新規作成のみ許可する」ではなくこちらを
+  採用。ユーザー承認済み）。
+
+- **再計算のレシピ**（`$lib/server/reviews.ts` の `planReviewRecalculation`）:
+  対象メモの未完了 `reviews` を、**期限到来済み（due）のものも含めて全て削除**し、
+  完了済みステップ数を起点に新しい `intervals` から残りステップを再生成する。
+  完了済み（`completedAt IS NOT NULL`）の行には一切触れない。
+  - **due 行も特別扱いせず作り直す**（ユーザー承認済み）。Issue 本文の「注意」は
+    「期限が来ている分まで動かすと混乱する」として due 行を保持する案を示唆していたが、
+    `docs/schema.md` のレシピ（未完了行を全 DELETE）をそのまま採用する方を選んだ。
+    「今日の復習」に出ていた項目の予定が変わる可能性があることは、設定画面の
+    「N 件の予定が更新されます」プレビューで事前に明示する。
+  - **baseTime は「最新の完了済みステップの `completedAt`（無ければ `memos.createdAt`）」**
+    とした（advisor の指摘で、docs のどこにも明記されていないことが判明した未決定事項）。
+    #17 の `completeReview` が残りステップを再アンカリングする際の基準
+    （完了時刻を起点にする）と揃えており、計算モデルの一貫性を保つ。
+  - **新しい `intervals` の要素数が既存の完了済みステップ数以下の場合、残りステップは
+    生成せず、そのメモは全ステップ完了扱いになる**（エラーにはしない。ユーザー承認済み。
+    `docs/schema.md` が #18 に委ねていたエッジケースへの回答）。
+  - 「常に最小の未完了 step から完了させる」不変条件（#17 の `assertIsCurrentStep` が
+    保証）に依存しており、完了済み行数は「最大の完了済み step + 1」と一致する
+    （欠番が発生しない）ため、完了済み行を1件1件数えるクエリを別に発行する必要はない。
+
+- **アーカイブ済みメモは再計算対象・件数プレビューの両方から除外する**
+  （advisor の指摘）。`archiveMemo`（#16）が未完了 reviews を削除して成立させている
+  「アーカイブ済みメモに未完了 reviews が残らない」という `docs/schema.md` の不変条件を、
+  素朴な再計算が静かに復活させてしまうため。`$lib/server/interval-presets.ts` の
+  `collectAffectedMemoIds` で `memos.archivedAt IS NULL` を必ず条件に含める。
+
+- **「N 件の予定が更新されます」のプレビューと実際の更新は同じ定義を共有する**
+  （`countReviewsAffectedByPresetChange` と `updateCustomPresetIntervals` が実行時に
+  返す件数）。「非アーカイブメモの未完了 reviews 件数」という同一の定義を使い、
+  #17 で指摘されたバナー件数と一覧のズレと同型の不整合が起きないようにしている。
+  確定時（`confirmed=true` での再送信）に返す件数も、送信された hidden field の数値を
+  信用せず、実行直前に読み直した実数の合計を使う（advisor の指摘。別タブでの操作等による
+  ズレを防ぐ）。
+
+- **1回の `db.batch()` に積む文の数に上限（`MAX_BATCH_STATEMENTS = 500`）を設けた**
+  （advisor の指摘）。プリセット編集は「プリセット UPDATE + 影響メモ数 ×
+  (DELETE 1 + INSERT 最大 `MAX_INTERVAL_COUNT` 件)」を1つのバッチにまとめるため、
+  影響メモ数に応じて文の数が増える。「Free プランは CPU 10ms/リクエスト」という既知の
+  制約（`docs/design-decisions.md` の要注意点2）に対し、無制限に積む設計を避けるための
+  安全弁。本アプリの想定ユーザー規模ではまず到達しない、十分に大きい値として選んだ
+  任意の上限。超過時は `ValidationError` で拒否する。
+
+- **`user_settings` テーブルを新設し、新規メモ作成時の既定プリセットをユーザーごとに
+  持たせた**。Better Auth 生成物（`auth-schema.ts`、手動編集しない）に `additionalFields`
+  を足す案も検討したが、生成・実行時設定の二重管理（`rateLimit.storage` と同じ運用上の
+  負担）が増え、業務データを `schema.ts` 側に集約する既存の境界とも合わないため見送った。
+  `default_interval_preset_id` は `memos.interval_preset_id` と同じ「他ユーザーの
+  custom プリセットを指せてしまう」問題を持つため、`0004` と同型のトリガー（`0009`）で
+  テナント分離を DB 層に強制する。一方 `onDelete` は `memos.interval_preset_id`
+  （`no action`）とは異なり `set null` にし、既定プリセットとして参照されているだけの
+  カスタムプリセットの削除まではブロックしない（削除可否の判定は `memos` の使用有無だけを
+  見る。ユーザー承認済み、詳細は `docs/schema.md` の `user_settings` 節）。
+  `apps/web/src/routes/app/memos/new/+page.server.ts` は、固定値
+  `DEFAULT_INTERVAL_PRESET_ID` の送信から `getDefaultPresetId(db, user.id)`
+  （未設定ならシステム標準にフォールバック）に切り替えた。
+
+- **プリセットのバリデーション（最小1時間・整数・厳密昇順・要素数上限）と、
+  自由入力のパース・表示用フォーマットは `packages/core` に置いた**
+  （値の出所を1箇所に保つ既存方針、`packages/core` は無依存なので単体テストが軽い）。
+  対応する単位は Issue 本文の例（`1h, 12h, 2d, 10d`）に合わせて `h`/`d` のみとし、
+  カレンダー単位（`w`/`m` 等）は導入しなかった。#15 が `intervals` を
+  「カレンダー概念を持たない時間単位の配列」と確定させているため、曖昧な
+  "1ヶ月" 相当の単位を増やすと #15 の決定と矛盾する。要素数上限
+  （`MAX_INTERVAL_COUNT = 20`）は Issue 本文が具体的な数を指定していないため、
+  既存のシステムプリセット最長（6ステップ）に十分な余裕を持たせた任意の値。
+  「厳密昇順」は同値も拒否する（重複禁止）。表示用フォーマット
+  （`formatIntervals`）はパースの逆変換で、24時間で割り切れる値は `d` 表記に
+  正規化する。編集フォームに保存済み値を表示し直す際、そのまま再送しても同じ値が
+  復元できることをテストで確認している（`parse(format(x)) === x` の往復）。
+
+- **`getAccessiblePreset`（#13 で `memos.ts` に定義）を `interval-presets.ts` へ移設した**。
+  新規メモの既定プリセット設定（`setDefaultPresetForUser`）でも同じ「自分の custom
+  プリセット、またはシステム標準プリセット」というアクセス可否チェックが必要になり、
+  `interval_presets` に関するチェックロジックの置き場所を1箇所に保つため。`memos.ts`
+  は `interval-presets.ts` から import するだけになった（動作の変更はない）。
+
+- **レビューで検出・修正した不具合**:
+  - **プレビュー（`confirmed=false`）経路が認可・検証を素通りしていた**（正確性レビューで
+    指摘）。当初 `countReviewsAffectedByPresetChange(db, presetId)` は所有権チェック
+    （`getOwnedCustomPreset`）も `intervals` の構文検証も一切通らず、他ユーザーの
+    custom プリセットやシステムプリセットの id をフォームアクションへ直接 POST すると、
+    自分のものではないメモの未完了 reviews 件数が取得できてしまっていた。確定
+    （`confirmed=true`）経路だけが `updateCustomPresetIntervals` 内部で検証を通っており、
+    同じ入力に対して `confirmed` の値だけで検証の有無が変わっていたのが根本原因。
+    `previewPresetIntervalsUpdate` として関数自体を作り直し、`getOwnedCustomPreset` と
+    `parseIntervalsOrValidationError` を確定経路と全く同じ順序で呼ぶようにした。
+  - **`planReviewRecalculation` の SELECT と `db.batch()` 実行の間の競合**（正確性レビューで
+    指摘）。対象メモの完了済みステップ数を事前に読んでから `db.batch()` を実行する間に、
+    別リクエストの `completeReview` が同じメモの対象ステップを完了させると、古い
+    完了済みステップ数を前提にした INSERT が既に完了済みの step 番号と衝突し
+    `reviews_memoId_step_unique` に違反する（#17 の `completeReview` 自身が
+    `wonThisCompletion` ガードで対処している、同じ SELECT-then-write ハザード）。
+    D1 の batch は単一の暗黙トランザクションのため、この違反はプリセット自体の
+    UPDATE も含めてバッチ全体をロールバックさせるが、修正前はこれが未捕捉のまま
+    生の DB エラー（500）としてクライアントに漏れていた。この違反を検知し
+    `ConflictError`（409、リトライを促す）に変換するようにした。`isUniqueConstraintViolation`
+    は memos.ts（#16）にあった同名のプライベート関数と全く同じロジックだったため、
+    `errors.ts` に共有関数として切り出した。
+  - **`parseIntervals` に1間隔あたりの上限が無かった**（正確性レビューで指摘）。
+    上限が無いと、`baseTime.getTime() + hours * 3600000` が JS の `Date` の表現可能範囲
+    （epoch から約 ±8.64e15ms）を超えて `Invalid Date` になり、それが NOT NULL の
+    `reviews.scheduledAt` へそのまま INSERT されてしまう（`Invalid Date` は `Date`
+    インスタンスなので truthy であり、`nextReviewAt` の呼び出し側にある
+    `if (scheduledAt)` ガードでは弾けない）。`MAX_INTERVAL_HOURS`（10年、Date の
+    オーバーフローには全く近づかない任意の上限）を追加した。
+  - **設定画面のフォームアクションの型設計が判別可能 union を実質的に破壊していた**
+    （設計レビューで指摘）。`presetActionFail(err, action: string, extra: Record<string,
+unknown>)` という非ジェネリックな型のため、失敗時の返り値は `action` がリテラル型に
+    絞られず、`extra` で積んだフィールド（`name`/`intervals` 等）も型上は存在しなくなり、
+    `+page.svelte` 側の `'name' in form` という判別が `unknown` にしか narrowing できず
+    実質的に型安全性が失われていた。`presetActionFail` をジェネリック化
+    （`<A extends string, E extends Record<string, unknown>>`）してリテラル型と
+    フィールドの型を保持するようにした。
+  - **`PRESET_NAME_MAX_LENGTH` がクライアントに渡らず、`+page.svelte` の
+    `maxlength="100"` がマジックナンバーとして重複定義されていた**（設計レビューで指摘）。
+    `MAX_INTERVAL_COUNT` と同じく `load` 経由でクライアントへ渡すようにした。
+  - **`interval-presets.ts` からの `MAX_INTERVAL_COUNT` の再エクスポートが未使用だった**
+    （設計レビューで指摘）。`+page.server.ts` は `@ebb/core` から直接 import しており、
+    この再エクスポートを経由するコードは存在しなかったため削除した。
+  - **プレビューが `MAX_BATCH_STATEMENTS` の上限チェックを一切通らず、確定操作だけが
+    後から拒否されうる非対称があった**（advisor 指摘）。`previewPresetIntervalsUpdate`
+    は対象メモ数に上限を設けていなかったため、確定（`updateCustomPresetIntervals`）が
+    `MAX_BATCH_STATEMENTS` 超過でリジェクトするほど対象メモが多い場合でも、
+    プレビューは「N件の予定が更新されます」と成功を返してしまい、ユーザーが
+    「確定して更新する」を押した瞬間に初めてエラーになる UX が生じ得た。1メモあたり
+    最大2文（DELETE + INSERT）という `planReviewRecalculation` の実行系の上限から
+    悲観的に見積もる `estimateWorstCaseBatchStatementCount` をプレビュー側にも追加し、
+    確定が拒否しうるケースを常にプレビュー時点で検知するようにした（悲観的見積もり
+    のため、実際には上限内に収まるはずのケースをプレビュー側が過剰に拒否することは
+    あり得るが、安全側であるため許容する）。確定操作にも後から同じ悲観的見積もりを
+    追加し、上限超過時の報告（メッセージ文言・例外の種類）は
+    `assertWithinBatchStatementLimit` に共通化して、2箇所で同じ文言を重複させない。
+  - なお、**間隔を大きく縮小した際、プレビューの「N件」が示す件数はあくまで
+    「削除・作り直しの対象になる既存の未完了行数」であり、新しい intervals の長さは
+    見ていない**（テスト網羅性レビューで指摘、一貫した定義として結論・マージ非ブロック）。
+    そのため縮小の結果メモが全ステップ完了扱いになる場合でも、プレビューはその旨を
+    伝えず件数のみを示す。ユーザーへの影響明示としては不完全だが、既知の制約として
+    残し、必要になれば別 Issue で対応する。
+  - **D1 は1クエリあたりの bind パラメータ数に上限（実測でちょうど100件、101件から
+    `too many SQL variables` エラー）があり、`countIncompleteReviewsForMemos` が
+    memoId をチャンク分割せずに `inArray` へまとめて渡していたため、
+    `MAX_BATCH_STATEMENTS`（500）が許容する規模（悲観的見積もりで最大249メモ）の
+    範囲内でも、対象メモが101件を超えるプリセットのプレビューで生の D1 エラーになる
+    ことを実測で確認した**（正確性レビューで指摘、advisor 指摘のプレビュー側上限
+    ガード追加作業中に発見）。`chunk()` ヘルパーで memoId を100件単位に分割し、
+    複数クエリの結果を合算するようにした。同じ問題を持つ、アーカイブ状態の
+    再確認クエリ（下記）にも同様の対処をした。
+  - **プリセット再計算（`updateCustomPresetIntervals`）と `archiveMemo` の間の
+    競合状態**（正確性レビューで指摘）。`collectAffectedMemoIds` の SELECT から
+    `db.batch()` 確定までの間に、対象メモのいずれかが別リクエストの `archiveMemo` に
+    よりアーカイブされると、`archiveMemo` が同期的に削除した未完了 reviews を
+    `planReviewRecalculation` の INSERT が知らずに作り直してしまい、「アーカイブ済み
+    メモに未完了 reviews が残らない」不変条件を静かに破る（#17 の `completeReview` と
+    同種の SELECT-then-write ハザードだが、DB 制約に触れないためエラーとして検知
+    できない点が異なる）。`db.batch()` 実行の直前にもう一度だけ対象メモのアーカイブ
+    状態を確認し、その時点までにアーカイブされた memoId を再計算対象・
+    `updatedReviewsCount` の両方から除外することで競合の窓を大幅に狭めた。
+    `completeReview` の `wonThisCompletion` と異なり、この確認と `db.batch()` 実行の
+    間には依然として僅かな窓が残る（DB 制約による検知ができないため、SQL の
+    WHERE 句に組み込む形での完全な排除は見送った）。現状のどの読み取り経路も
+    `isNull(memos.archivedAt)` でフィルタしているため、この残存レースが仮に起きても
+    アーカイブ済みメモの孤立した reviews 行が外部から見える・操作できることはない。
+    このガードには、`planReviewRecalculation` を横取りして「対象メモの列挙後・
+    再確認前」にアーカイブを割り込ませる回帰テストを追加した（`db.batch` を横取りする
+    既存の競合テストとは異なるタイミングを再現する必要があったため、手法を変えた）。
+  - **`activePlans` を memoId と plan の並行配列＋index対応付けで組み立てていた**
+    （設計レビューで指摘）。`memoIds.map((memoId, index) => ({ memoId, plan:
+plans[index] }))` という実装は、「memoIds と plans が同じ順序・同じ長さ」という
+    `Promise.all` の性質に暗黙に依存しており、`noUncheckedIndexedAccess` を満たすための
+    型ガードもその依存を表現できていなかった。`Promise.all(memoIds.map(async memoId
+=> ({ memoId, plan: await planReviewRecalculation(...) })))` として最初から
+    ペアで組み立てるよう変更し、並行配列と手書きの型ガードを排除した。
+  - **チャンク分割ロジックの重複**（設計レビューで指摘）。`countIncompleteReviewsForMemos`
+    と `updateCustomPresetIntervals` 内のアーカイブ再確認が、それぞれ独立に
+    `chunk()` を呼んで結果を結合していた。`queryInChunks(ids, query)` として
+    「チャンク分割 → 並列クエリ → 結合」を1箇所にまとめ、`D1_MAX_BIND_PARAMS` が
+    「1つの `inArray` に渡せる件数」ではなく「1クエリの bind パラメータ総数」の
+    上限であることのコメントも、将来クエリに条件を追加する際の注意点として明示した。
+  - **`listPresetsForUser` の `inUse` が userId で絞らずに全ユーザーの memo を
+    集計しており、システム標準プリセット（全ユーザー共有）については「自分が
+    使っているか」ではなく「他ユーザーも含め誰かが使っているか」を返してしまって
+    いた**（正確性レビューで指摘）。カスタムプリセットは所有者以外がそもそも
+    一覧に現れないため実害は無いが、システム標準プリセットについては、UI 上は
+    `inUse` を表示していない（`+page.svelte` は非システムプリセットの行にしか
+    使っていない）ものの、ページの `data.presets` には含まれる形で他ユーザーの
+    存在に関する1ビットの情報（そのシステムプリセットを誰かが使っているか）が
+    漏れていた。使用中判定の SELECT に `eq(memos.userId, userId)` を追加して
+    修正した。
+  - **`updateCustomPresetIntervals`（確定操作）が、実測の `statements.length` による
+    バッチ上限チェックしか持たず、それより前に対象メモ全件分の `planReviewRecalculation`
+    （1メモあたりSELECT3回）とアーカイブ再確認クエリを実行してしまっていた**
+    （設計レビューで指摘）。`previewPresetIntervalsUpdate` は
+    `estimateWorstCaseBatchStatementCount` による悲観的見積もりで実行前に早期拒否
+    するのに対し、確定操作側はこの見積もりを使っておらず、UIの確認フローを迂回して
+    `confirmed=true` を直接POSTした場合、`MAX_BATCH_STATEMENTS` を設けた本来の目的
+    （Free プランの CPU 10ms/リクエスト制約に対する安全弁）を実行系では
+    部分的にしか達成できていなかった。`collectAffectedMemoIds` の直後に同じ
+    悲観的見積もりチェックを追加した。この早期チェックが `1 + memoIds.length * 2 <=
+500` を保証する以上、`activeStatements`（`memoIds` の部分集合である
+    `activePlans` 由来、1メモ最大 `MAX_STATEMENTS_PER_MEMO` 文）の実測値が
+    `MAX_BATCH_STATEMENTS` を超えることは論理的にあり得ないため、それまであった
+    実測値 `statements.length` による重複チェックは削除した（起こり得ないシナリオへの
+    防御的検証は書かない方針）。これに伴い、実測値ちょうど500文を境界とするテストは、
+    悲観的見積もり側で先に拒否されるようになったため、見積もり自体の境界
+    （249メモまでは必ず成功、250メモ以上は即座に拒否）を検証するテストに置き換えた。
+
 ## 開発の進め方
 
 - リポジトリ: public

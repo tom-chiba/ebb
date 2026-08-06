@@ -11,7 +11,9 @@ erDiagram
     user ||--o{ memos : "1"
     user |o--o{ interval_presets : "0または1（カスタムのみ、NULL ならシステム標準）"
     user ||--o{ push_subscriptions : "1"
+    user |o--|| user_settings : "0または1"
     interval_presets ||--o{ memos : "1"
+    interval_presets |o--o| user_settings : "0または1（既定プリセット、NULL可）"
     memos ||--o{ reviews : "1"
 
     interval_presets {
@@ -46,6 +48,10 @@ erDiagram
         text auth
         timestamp_ms created_at
         timestamp_ms last_used_at "NULL 可"
+    }
+    user_settings {
+        text user_id PK "FK"
+        text default_interval_preset_id FK "NULL 可"
     }
 ```
 
@@ -138,20 +144,25 @@ OF interval_preset_id, user_id` トリガー（`0004_memos_interval_preset_owner
 に限り、#18 側で「完了済み件数」ではなく「既存の完了済み step の集合から見た
 次の空き番号」を使うように再計算ロジックを設計し直すこと。
 
-**#18 が別途決めるべきもう一つの未解決のエッジケース**: 新プリセットの要素数が
-既存の完了済みステップ数以下になる場合（例: 完了済み3ステップの後に
-4ステップ→2ステップのプリセットへ変更）、「そのメモは全ステップ完了扱いにする」のか
-「エラーにする」のかをこのスキーマは決めていない。#18 の実装時に判断すること。
+（#17 は実際にこの不変条件を保証している。`assertIsCurrentStep` が完了・詳細取得の
+両方で「常に最小の未完了 step」を再検証するため、#18 の再計算レシピはそのまま
+「完了済みステップ数を起点に」で実装した。詳細は `docs/design-decisions.md` の
+#18 節を参照。）
 
-**#15/#18 への申し送り（根本原因の統合）**: 上記2つのエッジケースは、どちらも
-「`reviews.step` は `interval_presets.intervals` を **id 越しに参照する可変な配列**の
-インデックスであり、生成時点の値のスナップショットを持たない」という同一の設計上の
-性質に由来する。プリセットを**切り替える**場合（`memos.interval_preset_id` の変更、
-上記のレシピが対象）だけでなく、**同じカスタムプリセットの `intervals` 自体を
-in-place で編集する**場合（#18 のプリセット編集 UI）も同様の問題を引き起こす。
-そのプリセットを使っている全メモの既存 `step` が指す意味が黙って変わってしまうため、
-#18 は「プリセット作成後は `intervals` を編集不可にし、削除・新規作成のみ許可する」か、
-「`intervals` の編集時にも影響する全メモへ上記と同じ再計算を適用する」かを決めること。
+**#18 が別途決めていた2つのエッジケースは、いずれもユーザー承認済みの判断で解消済み**:
+
+- 新プリセットの要素数が既存の完了済みステップ数以下になる場合（例: 完了済み3ステップの
+  後に4ステップ→2ステップのプリセットへ変更）は、残りステップを生成せず**そのメモを
+  全ステップ完了扱いにする**（エラーにはしない）。
+- プリセット**編集後**（`intervals` の in-place 編集）は、そのプリセットを使っている
+  **全ての非アーカイブメモへ同じ再計算レシピを適用する**（「編集不可にし削除・新規作成のみ
+  許可する」案は採らなかった）。
+
+さらに、期限到来済み（`scheduled_at <= now`）の未完了行も特別扱いせず、他の未完了行と
+同様に削除して作り直す（イシュー本文の「注意」が示唆していた「due 行は動かさない」案は
+採らなかった。ユーザー承認済み）。baseTime は「最新の完了済みステップの `completed_at`
+（無ければ `memos.created_at`）」とし、#17 の `completeReview` の再アンカリングと同じ
+基準に揃えている。詳細・根拠は `docs/design-decisions.md` の #18 節を参照。
 
 `unique(memo_id, step)` を追加した。バッチ生成・再計算時に同じステップを重複 INSERT
 しないための制約（実機で `UNIQUE constraint failed` により重複拒否を確認済み）。
@@ -202,6 +213,24 @@ Push 仕様上 endpoint は購読を一意に識別する）。
 失敗するため、#19 は `endpoint` を鍵にした upsert（既存行があれば `user_id` を
 新しいユーザーに付け替える）で実装すること。単純な INSERT 失敗をそのままエラーに
 すると、デバイス共有・アカウント切り替えのケースで購読が壊れる。
+
+### `user_settings` (#18)
+
+新規メモ作成時に使う既定プリセットをユーザーごとに持たせるためのテーブル。
+`user_id` を主キー（1ユーザー1行）とし、`default_interval_preset_id` は
+NULL 許容（一度も設定していないユーザーは行自体を持たない。フォールバックは
+`apps/web/src/lib/server/interval-presets.ts` の `DEFAULT_INTERVAL_PRESET_ID`）。
+
+`default_interval_preset_id` は `memos.interval_preset_id` と全く同じ
+「他ユーザーの custom プリセットを指せてしまう」問題を持つため、
+`0004_memos_interval_preset_owner_trigger.sql` と同型のトリガー
+（`0009_user_settings_default_preset_owner_trigger.sql`）で DB 層にテナント分離を
+強制する。一方 `onDelete` は `memos.interval_preset_id`（`no action`、使用中プリセットの
+削除を防ぐ）とは異なり **`set null`** にした。既定プリセットとして参照されている
+だけのカスタムプリセットの削除まで（`memos` の使用有無とは無関係に）ブロックすると
+ユーザー体験上の驚きが大きいため、削除可否の判定は `memos.interval_preset_id` の
+使用有無だけを見る（設定が黙ってシステム標準へフォールバックする方が、削除操作が
+理由不明にブロックされるより分かりやすいと判断した。ユーザー承認済み）。
 
 ## 共通の設計判断
 

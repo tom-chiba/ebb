@@ -17,3 +17,16 @@ export function handleDomainError(err: unknown): never {
 	if (err instanceof ConflictError) error(409, err.message);
 	throw err;
 }
+
+// indexHint で該当テーブル/カラムのユニーク制約違反かを絞り込む。単に
+// "UNIQUE constraint failed" だけを見ると、同じ操作内で複数のユニーク制約
+// （例: memos.id と reviews_memoId_step_unique）が存在する場合に取り違える。
+// memos.ts（#16 の createMemo 冪等性チェック）と interval-presets.ts（#18 の
+// updateCustomPresetIntervals、db.batch() の SELECT-then-write 間の競合検出）の
+// 2箇所から使う共通ロジックのため、こちらに置く。
+export function isUniqueConstraintViolation(err: unknown, indexHint: string): boolean {
+	if (!(err instanceof Error)) return false;
+	const cause = err.cause instanceof Error ? err.cause.message : '';
+	const message = `${err.message} ${cause}`;
+	return /UNIQUE constraint failed/i.test(message) && message.includes(indexHint);
+}

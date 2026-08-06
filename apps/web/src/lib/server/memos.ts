@@ -1,17 +1,12 @@
-import {
-	and,
-	count,
-	desc,
-	eq,
-	isNull,
-	or,
-	intervalPresets,
-	memos,
-	reviews,
-	type Db
-} from '@ebb/db';
+import { and, count, desc, eq, isNull, intervalPresets, memos, reviews, type Db } from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
-import { ConflictError, NotFoundError, ValidationError } from './errors';
+import {
+	ConflictError,
+	isUniqueConstraintViolation,
+	NotFoundError,
+	ValidationError
+} from './errors';
+import { getAccessiblePreset } from './interval-presets';
 import { clamp, normalizeOffset, type PaginationOptions } from './pagination';
 
 export const TITLE_MAX_LENGTH = 200;
@@ -96,28 +91,6 @@ function assertContent(content: string) {
 	}
 }
 
-// intervals も返す。createMemo が reviews をバッチ生成する際に使う（#16）。
-// updateMemo（プリセット変更時のアクセス可否チェックのみ、reviews は再生成しない）は
-// 戻り値を無視して呼ぶ。
-async function getAccessiblePreset(db: Db, userId: string, intervalPresetId: string) {
-	const rows = await db
-		.select({ intervals: intervalPresets.intervals })
-		.from(intervalPresets)
-		.where(
-			and(
-				eq(intervalPresets.id, intervalPresetId),
-				or(isNull(intervalPresets.userId), eq(intervalPresets.userId, userId))
-			)
-		)
-		.limit(1)
-		.all();
-	const preset = rows[0];
-	if (!preset) {
-		throw new ValidationError('intervalPresetId does not reference an accessible preset');
-	}
-	return preset;
-}
-
 export interface CreateMemoInput {
 	// クライアントが生成した冪等性キー（memos.id と共用）。省略時はサーバー側で
 	// crypto.randomUUID() が採番される。同じ id で再送されたリクエストは新規作成せず
@@ -136,16 +109,6 @@ async function findOwnMemoById(db: Db, userId: string, id: string) {
 		.limit(1)
 		.all();
 	return rows[0];
-}
-
-// indexHint で該当テーブル/カラムのユニーク制約違反かを絞り込む。単に
-// "UNIQUE constraint failed" だけを見ると、同じ操作内で複数のユニーク制約
-// （memos.id と reviews_memoId_step_unique 等）が存在する場合に取り違える。
-function isUniqueConstraintViolation(err: unknown, indexHint: string): boolean {
-	if (!(err instanceof Error)) return false;
-	const cause = err.cause instanceof Error ? err.cause.message : '';
-	const message = `${err.message} ${cause}`;
-	return /UNIQUE constraint failed/i.test(message) && message.includes(indexHint);
 }
 
 // preset.intervals の全ステップ分の reviews 行を作る。baseTime は呼び出し側から

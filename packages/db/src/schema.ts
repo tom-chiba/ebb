@@ -115,6 +115,23 @@ export const pushSubscriptions = sqliteTable(
 	(table) => [index('push_subscriptions_userId_idx').on(table.userId)]
 );
 
+// 新規メモ作成時に使う既定プリセット（#18）。ユーザーが未設定なら
+// apps/web/src/lib/server/interval-presets.ts の DEFAULT_INTERVAL_PRESET_ID
+// にフォールバックするため、ここでは行の存在自体を必須にしない
+// （設定画面で一度も選択していないユーザーは行を持たない）。
+// defaultIntervalPresetId は onDelete: 'set null' にしている。参照先のカスタム
+// プリセットが削除された場合、ユーザーの既定設定を巻き込んでブロックせず、
+// 静かにシステム標準へフォールバックさせる（プリセット削除可否の判定は
+// memos の使用有無だけを見る。docs/design-decisions.md の #18 節を参照）。
+export const userSettings = sqliteTable('user_settings', {
+	userId: text('user_id')
+		.primaryKey()
+		.references(() => user.id, { onDelete: 'cascade' }),
+	defaultIntervalPresetId: text('default_interval_preset_id').references(() => intervalPresets.id, {
+		onDelete: 'set null'
+	})
+});
+
 export const intervalPresetsRelations = relations(intervalPresets, ({ one, many }) => ({
 	user: one(user, { fields: [intervalPresets.userId], references: [user.id] }),
 	memos: many(memos)
@@ -135,4 +152,12 @@ export const reviewsRelations = relations(reviews, ({ one }) => ({
 
 export const pushSubscriptionsRelations = relations(pushSubscriptions, ({ one }) => ({
 	user: one(user, { fields: [pushSubscriptions.userId], references: [user.id] })
+}));
+
+export const userSettingsRelations = relations(userSettings, ({ one }) => ({
+	user: one(user, { fields: [userSettings.userId], references: [user.id] }),
+	defaultIntervalPreset: one(intervalPresets, {
+		fields: [userSettings.defaultIntervalPresetId],
+		references: [intervalPresets.id]
+	})
 }));
