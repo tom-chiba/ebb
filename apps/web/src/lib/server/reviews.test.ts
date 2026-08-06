@@ -11,12 +11,18 @@ import {
 	memos,
 	reviews,
 	sql,
+	type BatchItem,
 	type Db
 } from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
 import { ConflictError, NotFoundError } from './errors';
 import { createMemo, updateMemo } from './memos';
-import { completeReview, getDueReviewDetail, listDueReviews } from './reviews';
+import {
+	completeReview,
+	getDueReviewDetail,
+	listDueReviews,
+	planReviewRecalculation
+} from './reviews';
 import { createTestUser } from './test-helpers';
 
 let db: Db;
@@ -853,5 +859,131 @@ describe('getDueReviewDetail', () => {
 			.where(eq(reviews.id, step1.id));
 
 		await expect(getDueReviewDetail(db, ownerId, step1.id)).rejects.toThrow(ConflictError);
+	});
+});
+
+// #18 の再計算レシピ（docs/schema.md の reviews 節、ユーザー承認済みの設計判断）。
+// planReviewRecalculation 自体は文を組み立てるだけで実行しないため、各テストは
+// db.batch() で実際に実行してから DB の状態を確認する（updateCustomPresetIntervals が
+// 呼ぶのと同じ使い方）。
+describe('planReviewRecalculation', () => {
+	it('leaves completed rows byte-for-byte unchanged', async () => {
+		const { memo, due } = await createDueReview(ownerId, ownerPresetId); // intervals: [1, 24, 72]
+		await completeReview(db, ownerId, due.id); // step0 完了
+
+		const before = await db
+			.select()
+			.from(reviews)
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 0)))
+			.limit(1)
+			.all();
+
+		const plan = await planReviewRecalculation(db, memo.id, [1, 6, 24]);
+		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+
+		const after = await db
+			.select()
+			.from(reviews)
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 0)))
+			.limit(1)
+			.all();
+		expect(after).toEqual(before);
+	});
+
+	it('uses memo.createdAt as baseTime when no step has been completed yet', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'memo',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+
+		const plan = await planReviewRecalculation(db, memo.id, [2, 5]);
+		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+
+		const rows = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(rows).toHaveLength(2);
+		expect(rows[0]?.scheduledAt.getTime()).toBe(memo.createdAt.getTime() + 2 * 60 * 60 * 1000);
+		expect(rows[1]?.scheduledAt.getTime()).toBe(memo.createdAt.getTime() + 5 * 60 * 60 * 1000);
+	});
+
+	it('uses the latest completed step completedAt as baseTime once a step is completed', async () => {
+		const { memo, due } = await createDueReview(ownerId, ownerPresetId);
+		const completed = await completeReview(db, ownerId, due.id);
+
+		const plan = await planReviewRecalculation(db, memo.id, [1, 6, 24]);
+		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+
+		const rows = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		// step0 は完了済みのまま。step1・step2 は completedAt を起点に再計算される。
+		expect(rows.map((r) => r.step)).toEqual([0, 1, 2]);
+		const step1 = rows.find((r) => r.step === 1);
+		const step2 = rows.find((r) => r.step === 2);
+		expect(step1?.scheduledAt.getTime()).toBe(completed.completedAt.getTime() + 6 * 60 * 60 * 1000);
+		expect(step2?.scheduledAt.getTime()).toBe(
+			completed.completedAt.getTime() + 24 * 60 * 60 * 1000
+		);
+	});
+
+	it('deletes and rebuilds due (already past) incomplete rows, not just future ones', async () => {
+		// ユーザー承認済みの設計判断（due 行も含めて全て作り直す）。
+		const { memo } = await createDueReview(ownerId, ownerPresetId);
+
+		const plan = await planReviewRecalculation(db, memo.id, [1, 6, 24]);
+		expect(plan.affectedCount).toBe(3); // 元の3ステップ全てが未完了・期限到来済み
+		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+
+		const rows = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(rows).toHaveLength(3);
+		// 新しい intervals から再生成されているため、もう期限切れではない。
+		expect(rows.every((r) => r.scheduledAt.getTime() > Date.now())).toBe(true);
+	});
+
+	it('treats the memo as fully completed when the new intervals length is at or below the completed step count', async () => {
+		const { memo, due } = await createDueReview(ownerId, ownerPresetId);
+		await completeReview(db, ownerId, due.id); // step0 完了、step1・step2 は未完了
+
+		// 新プリセットは1ステップのみ（既に完了済みの1ステップ以下）。
+		const plan = await planReviewRecalculation(db, memo.id, [1]);
+		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+
+		const rows = await db.select().from(reviews).where(eq(reviews.memoId, memo.id)).all();
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.step).toBe(0);
+		expect(rows[0]?.completedAt).not.toBeNull();
+	});
+
+	it('revives remaining steps if intervals are lengthened again after a shrink-to-zero', async () => {
+		const { memo, due } = await createDueReview(ownerId, ownerPresetId);
+		await completeReview(db, ownerId, due.id);
+
+		const shrink = await planReviewRecalculation(db, memo.id, [1]);
+		await db.batch(shrink.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+
+		const grow = await planReviewRecalculation(db, memo.id, [1, 6, 24]);
+		await db.batch(grow.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+
+		const rows = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(rows.map((r) => r.step)).toEqual([0, 1, 2]);
+		expect(rows.filter((r) => r.completedAt === null)).toHaveLength(2);
 	});
 });

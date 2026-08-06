@@ -1,17 +1,7 @@
-import {
-	and,
-	count,
-	desc,
-	eq,
-	isNull,
-	or,
-	intervalPresets,
-	memos,
-	reviews,
-	type Db
-} from '@ebb/db';
+import { and, count, desc, eq, isNull, intervalPresets, memos, reviews, type Db } from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
 import { ConflictError, NotFoundError, ValidationError } from './errors';
+import { getAccessiblePreset } from './interval-presets';
 import { clamp, normalizeOffset, type PaginationOptions } from './pagination';
 
 export const TITLE_MAX_LENGTH = 200;
@@ -94,28 +84,6 @@ function assertContent(content: string) {
 	if (content.length > CONTENT_MAX_LENGTH) {
 		throw new ValidationError(`content must be ${CONTENT_MAX_LENGTH} characters or fewer`);
 	}
-}
-
-// intervals も返す。createMemo が reviews をバッチ生成する際に使う（#16）。
-// updateMemo（プリセット変更時のアクセス可否チェックのみ、reviews は再生成しない）は
-// 戻り値を無視して呼ぶ。
-async function getAccessiblePreset(db: Db, userId: string, intervalPresetId: string) {
-	const rows = await db
-		.select({ intervals: intervalPresets.intervals })
-		.from(intervalPresets)
-		.where(
-			and(
-				eq(intervalPresets.id, intervalPresetId),
-				or(isNull(intervalPresets.userId), eq(intervalPresets.userId, userId))
-			)
-		)
-		.limit(1)
-		.all();
-	const preset = rows[0];
-	if (!preset) {
-		throw new ValidationError('intervalPresetId does not reference an accessible preset');
-	}
-	return preset;
 }
 
 export interface CreateMemoInput {

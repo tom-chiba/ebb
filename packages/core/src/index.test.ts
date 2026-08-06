@@ -1,5 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { fixedIntervalStrategy, nextReviewAt, SYSTEM_INTERVAL_PRESETS } from './index';
+import {
+	fixedIntervalStrategy,
+	formatIntervals,
+	MAX_INTERVAL_COUNT,
+	nextReviewAt,
+	parseIntervals,
+	SYSTEM_INTERVAL_PRESETS
+} from './index';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -90,6 +97,62 @@ describe('nextReviewAt', () => {
 			expect(result?.getTime()).toBe(baseTime.getTime() + 24 * HOUR_MS);
 			expect(result).toEqual(new Date('2026-03-09T06:00:00.000Z'));
 		});
+	});
+});
+
+describe('parseIntervals', () => {
+	it('issue本文の例（1h, 12h, 2d, 10d）を時間単位に変換する', () => {
+		expect(parseIntervals('1h, 12h, 2d, 10d')).toEqual([1, 12, 48, 240]);
+	});
+
+	it('空白の有無や末尾の空トークンを許容する', () => {
+		expect(parseIntervals(' 1h ,6h ,1d ')).toEqual([1, 6, 24]);
+	});
+
+	it('空文字列は拒否する', () => {
+		expect(() => parseIntervals('')).toThrow();
+		expect(() => parseIntervals('   ')).toThrow();
+	});
+
+	it('最小単位（1時間）未満は拒否する（0h等）', () => {
+		expect(() => parseIntervals('0h')).toThrow();
+	});
+
+	it('降順・同値は拒否する（厳密昇順のみ許容）', () => {
+		expect(() => parseIntervals('2h, 1h')).toThrow();
+		expect(() => parseIntervals('1h, 1h')).toThrow();
+		expect(() => parseIntervals('1d, 24h')).toThrow(); // 値としては同じ24h
+	});
+
+	it('未知の単位・不正なトークンは拒否する', () => {
+		expect(() => parseIntervals('1w')).toThrow();
+		expect(() => parseIntervals('1.5h')).toThrow();
+		expect(() => parseIntervals('abc')).toThrow();
+	});
+
+	it(`要素数が上限（${MAX_INTERVAL_COUNT}）を超えると拒否する`, () => {
+		const tooMany = Array.from({ length: MAX_INTERVAL_COUNT + 1 }, (_, i) => `${i + 1}h`).join(
+			', '
+		);
+		expect(() => parseIntervals(tooMany)).toThrow();
+	});
+
+	it(`要素数が上限（${MAX_INTERVAL_COUNT}）ちょうどなら許容する`, () => {
+		const exactly = Array.from({ length: MAX_INTERVAL_COUNT }, (_, i) => `${i + 1}h`).join(', ');
+		expect(parseIntervals(exactly)).toHaveLength(MAX_INTERVAL_COUNT);
+	});
+});
+
+describe('formatIntervals', () => {
+	it('24時間で割り切れる値は d 表記、それ以外は h 表記にする', () => {
+		expect(formatIntervals([1, 12, 48, 240])).toBe('1h, 12h, 2d, 10d');
+	});
+
+	it('parseIntervals との往復（parse(format(x)) === x）が成立する', () => {
+		const examples = [[1, 24, 72, 168, 336, 720], [1, 6, 24, 72], [1, 12, 48, 240], [5]];
+		for (const intervals of examples) {
+			expect(parseIntervals(formatIntervals(intervals))).toEqual(intervals);
+		}
 	});
 });
 

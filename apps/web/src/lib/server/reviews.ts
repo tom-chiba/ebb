@@ -2,10 +2,12 @@ import {
 	and,
 	asc,
 	count,
+	desc,
 	eq,
 	exists,
 	gt,
 	intervalPresets,
+	isNotNull,
 	isNull,
 	lte,
 	memos,
@@ -311,4 +313,73 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 		completedAt,
 		nextScheduledAt
 	};
+}
+
+export interface ReviewRecalculationPlan {
+	// このメモの現在の未完了 reviews 件数（= このプランの実行で削除・作り直される件数）。
+	// 「N 件の予定が更新されます」のプレビューと実際の更新が同じ定義を共有するための値。
+	affectedCount: number;
+	// 呼び出し側が他のメモ分の statements・プリセット自体の UPDATE と合わせて
+	// 1つの db.batch() にまとめて実行する（このプラン自体は実行しない）。
+	statements: BatchItem<'sqlite'>[];
+}
+
+// メモ1件分の未完了 reviews を、新しい intervals に基づいて作り直すための
+// DELETE/INSERT 文を組み立てる（実行はしない）。#18 の再計算レシピ
+// （docs/schema.md の reviews 節、ユーザー承認済みの設計判断）:
+// - 完了済み行（completedAt IS NOT NULL）には一切触れない。
+// - 未完了行は、期限到来済み（due）のものも含めて全て DELETE し、完了済み
+//   ステップ数を起点に新しい intervals の残りステップを再生成する。
+// - baseTime は最新の完了済みステップの completedAt（無ければ memos.createdAt）。
+//   #17 の completeReview が残りステップを再アンカリングする際の基準と揃える。
+// - 新しい intervals の要素数が既存の完了済みステップ数以下の場合、残りステップは
+//   生成しない（そのメモは全ステップ完了扱いになる）。
+// 「常に最小の未完了 step から完了させる」不変条件（#17 が保証）により、完了済み
+// 行数は「最大の完了済み step + 1」と一致する（欠番が発生しない）ため、
+// 完了済み行を1件1件数えるクエリを別に発行する必要はない。
+export async function planReviewRecalculation(
+	db: Db,
+	memoId: string,
+	intervals: readonly number[]
+): Promise<ReviewRecalculationPlan> {
+	const memoRows = await db
+		.select({ createdAt: memos.createdAt })
+		.from(memos)
+		.where(eq(memos.id, memoId))
+		.limit(1)
+		.all();
+	const memo = memoRows[0];
+	if (!memo) throw new NotFoundError('memo not found');
+
+	const latestCompletedRows = await db
+		.select({ step: reviews.step, completedAt: reviews.completedAt })
+		.from(reviews)
+		.where(and(eq(reviews.memoId, memoId), isNotNull(reviews.completedAt)))
+		.orderBy(desc(reviews.step))
+		.limit(1)
+		.all();
+	const latestCompleted = latestCompletedRows[0];
+	const completedCount = latestCompleted ? latestCompleted.step + 1 : 0;
+	const baseTime = (latestCompleted && latestCompleted.completedAt) || memo.createdAt;
+
+	const incompleteRows = await db
+		.select({ id: reviews.id })
+		.from(reviews)
+		.where(and(eq(reviews.memoId, memoId), isNull(reviews.completedAt)))
+		.all();
+
+	const deleteStatement = db
+		.delete(reviews)
+		.where(and(eq(reviews.memoId, memoId), isNull(reviews.completedAt)));
+
+	const newRows: (typeof reviews.$inferInsert)[] = [];
+	for (let step = completedCount; step < intervals.length; step++) {
+		const scheduledAt = nextReviewAt(baseTime, intervals, step);
+		if (scheduledAt) newRows.push({ memoId, step, scheduledAt });
+	}
+
+	const statements: BatchItem<'sqlite'>[] = [deleteStatement];
+	if (newRows.length > 0) statements.push(db.insert(reviews).values(newRows));
+
+	return { affectedCount: incompleteRows.length, statements };
 }
