@@ -1,20 +1,28 @@
 /// <reference lib="webworker" />
 
 // Web Push の受信・PWA インストール可能性のための実装（#8, #9）。
-// このファイルは SvelteKit 生成 tsconfig の exclude に入っているため、現時点では `pnpm check` の対象外
-// （専用 tsconfig の追加は #19 / #20 で行う方針。docs/design-decisions.md 参照）。
+// このファイルは SvelteKit 生成 tsconfig の exclude に入っているため、`../tsconfig.json`
+// 経由の svelte-check では検査されない。専用の tsconfig.service-worker.json を
+// `pnpm check` から別途叩いている（#19、docs/design-decisions.md 参照）。
 
-declare const self: ServiceWorkerGlobalScope;
+// このファイルは import/export を持たないグローバルスクリプト（本番ビルドで classic
+// 出力になるための意図的な制約。#9 参照）として扱われるため、`declare const self:
+// ServiceWorkerGlobalScope` で直接上書きすると lib.webworker.d.ts の ambient `self`
+// （WorkerGlobalScope 型）と同一スコープで衝突し `Cannot redeclare block-scoped
+// variable 'self'` になる（tsconfig.service-worker.json 追加時に実測確認済み）。
+// 別名の定数へ型アサーションすることで、self の再宣言を避けつつ
+// ServiceWorkerGlobalScope 固有のメンバーを型安全に使う。
+const sw = self as unknown as ServiceWorkerGlobalScope;
 
-self.addEventListener('install', () => {
-	self.skipWaiting();
+sw.addEventListener('install', () => {
+	sw.skipWaiting();
 });
 
-self.addEventListener('activate', (event) => {
-	event.waitUntil(self.clients.claim());
+sw.addEventListener('activate', (event) => {
+	event.waitUntil(sw.clients.claim());
 });
 
-self.addEventListener('push', (event) => {
+sw.addEventListener('push', (event) => {
 	event.waitUntil(
 		(async () => {
 			let data: { title?: string; body?: string } | undefined;
@@ -23,23 +31,23 @@ self.addEventListener('push', (event) => {
 			} catch {
 				data = undefined;
 			}
-			await self.registration.showNotification(data?.title ?? 'Ebb', {
+			await sw.registration.showNotification(data?.title ?? 'Ebb', {
 				body: data?.body
 			});
 		})()
 	);
 });
 
-self.addEventListener('notificationclick', (event) => {
+sw.addEventListener('notificationclick', (event) => {
 	event.notification.close();
 	event.waitUntil(
 		(async () => {
-			const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+			const clients = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
 			const existing = clients.find((client) => 'focus' in client);
 			if (existing) {
 				await existing.focus();
 			} else {
-				await self.clients.openWindow('/');
+				await sw.clients.openWindow('/');
 			}
 		})()
 	);
