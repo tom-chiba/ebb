@@ -66,13 +66,19 @@ erDiagram
 
 **システム標準プリセットの実データ投入（seed）はこの Issue のスコープ外にした。**
 `interval_presets` に `user_id: null` の行を用意するテーブル形状の定義までがこの
-Issue の責務で、実際の3プリセットの値と、それを固定 slug の `id`（例:
-`system-short` / `system-standard` / `system-long`）で INSERT する処理は #15 の
-「システム標準プリセットを定義」に委ねる。理由: #15 は `packages/core` に
-`nextReviewAt` 等の計算ロジックとあわせてプリセット値そのものを決める Issue であり、
-値の出所を1箇所（#15）に保つため。#15 で seed する際は固定 slug の `id` を使うこと
-（`crypto.randomUUID()` の既定値は上書きされる）。ランダム生成だと環境（local /
-production）ごとに `id` がずれ、アプリ側が「標準プリセット」を安定して参照できない。
+Issue の責務で、実際の3プリセットの値と、それを固定 slug の `id`（`system-short` /
+`system-standard` / `system-long`）で INSERT する処理は #15 の「システム標準
+プリセットを定義」に委ねた。理由: #15 は `packages/core` に `nextReviewAt` 等の
+計算ロジックとあわせてプリセット値そのものを決める Issue であり、値の出所を1箇所
+（#15 の `packages/core/src/index.ts` の `SYSTEM_INTERVAL_PRESETS`）に保つため。
+ランダム生成だと環境（local / production）ごとに `id` がずれ、アプリ側が
+「標準プリセット」を安定して参照できないため、固定 slug の `id` を使っている
+（`crypto.randomUUID()` の既定値は上書きされる）。
+
+**seed は #15 で完了した**（`packages/db/migrations/0007_seed_remaining_system_interval_presets.sql`）。
+「標準」（`system-standard`）は #14 が migration `0006` で暫定的に先行投入していたため
+そのまま維持し、残りの「短期集中」（`system-short`）「長期」（`system-long`）を
+#15 で追加投入した（詳細は `docs/design-decisions.md` の #15 節を参照）。
 
 ### `memos`
 

@@ -1071,6 +1071,58 @@ PR #46 作成後、Codex の通常レビューと adversarial レビュー（`/c
   留まりデータは失われない。大きな設計変更なしに直せる不具合ではないため、
   コードは変更せずここに記録するに留めた
 
+## 復習間隔プリセットと計算ロジック (#15)
+
+- **`nextReviewAt(baseTime, intervals, step)` は全ステップ完了後（`step` が範囲外）に
+  `undefined` を返す**（`noUncheckedIndexedAccess` により `intervals[step]` の型が
+  `number | undefined` になることが、この API の形を規定するという上記の申し送り
+  （TypeScript は 6.0 系に固定の節）に対する回答）。例外を投げる案と比較した結果、
+  `undefined` を採用した。**根拠は SM-2/FSRS 的な「一般的な設計」ではなく、
+  `reviews` が「メモ作成時に全ステップ分をまとめてバッチ生成する」方針
+  （`docs/schema.md` の reviews 節）で確定していること**: 最終間隔を無限に繰り返す
+  設計は、有限個の行を一括生成するこの方針と構造的に噛み合わない。「全ステップ完了
+  したメモは復習を終える（完了扱いにする）」という決定は、この API の戻り値の形で
+  表現される
+  - `undefined` は「全ステップ完了（正常系）」「`intervals` が空配列（設定不備）」
+    「`step` が負数・非整数（呼び出し側のバグ）」の3つの状態を区別せず返す。
+    `intervals` 自体の内容（最小単位・順序）のバリデーションは #18 の責務と既に
+    決まっているため、`packages/core` 側では区別・検証を行わない。**#16（メモ作成時の
+    reviews 生成）は、ループの前に `intervals.length` が 0 でないことを確認すること**。
+    確認しないと、空の（あるいは今後の実装ミスで空になった）プリセットを持つメモが
+    `reviews` を1件も持たないまま「静かに全ステップ完了状態」に見えてしまう
+- **`intervals` は時間単位の配列であり、「日」「月」といったカレンダー単位の概念を
+  持たない**。30日相当の間隔は `720`（時間）として表現され、`nextReviewAt` は
+  常に `baseTime.getTime() + hours * 3600000` の絶対時刻加算のみで計算する。これにより
+  タイムゾーン・夏時間・カレンダー月の境界（例: 1/31 の30日後）はすべて実装上
+  区別する必要がなくなる（テストで実測）。Issue 本文が挙げていた「1/31 の1ヶ月後」
+  という検証観点は、この設計の下では「カレンダー上の3月末」ではなく「1/31 + 720時間
+  （実測上 3/2）」に読み替えて検証した。「最小単位 1時間」という仕様（`docs/design-decisions.md`
+  の仕様節）を採用した時点で、この読み替えは必然の帰結である
+- **将来 SM-2 / FSRS を差し込むための `SchedulingStrategy` インターフェースは、
+  現在の `nextReviewAt` と同じシグネチャ（`(baseTime, intervals, step) => Date | undefined`）
+  のみを持つ最小のものにした**。SM-2/FSRS は自己評価等の追加入力・メモごとの状態を
+  必要とするため、このインターフェースのままでは実装を差し込めない可能性が高いが、
+  #29 の Issue 本文が「そうなっていなければ、まずリファクタリングする」と既に
+  明記して #29 側にその判断を委ねている。`ReviewContext` のような、今は使われない
+  抽象を先取りして持たせることはしなかった
+- **`packages/db/migrations/0007_seed_remaining_system_interval_presets.sql` で
+  「短期集中」（`system-short`）「長期」（`system-long`）の2プリセットを追加投入した**。
+  `docs/schema.md` の interval_presets 節が「実際の3プリセットの値と、固定 slug の
+  `id` での INSERT は #15 に委ねる」と明記していたための対応。「標準」
+  （`system-standard`）は #14 が migration `0006` で暫定的に先行投入済みであり、
+  値は `packages/core` の `SYSTEM_INTERVAL_PRESETS` と完全に一致するため、
+  再投入・変更は行わなかった（`DEFAULT_INTERVAL_PRESET_ID` や既存メモの FK が
+  この行を参照しているため、id・値を変えると既存データと食い違う）
+- **`packages/core`/`packages/db` 間、あるいは `apps/web` を経由したプリセット値の
+  drift を検知する自動テストは追加しなかった**。`packages/core` は無依存の方針
+  （モノレポの土台 #1 の節）のため `packages/core` から `packages/db` を import して
+  drift 検知することはできない。逆方向（`packages/db` が `packages/core` を import
+  して drift 検知に使う）も、パッケージ間の依存の向きは `apps/* → packages/*` のみ
+  （#5/#20 節）という既存方針に反するため採らない。`apps/web` 経由で検証すること
+  自体は依存方向としては可能だが、#15 のスコープを `packages/core`（と、schema.md が
+  明示的に委ねた seed migration）に絞るため見送った。migration のコメントで
+  `packages/core` を値の出所として明記するに留めている（既存の `0006` と同じ方式）
+
 ## 開発の進め方
 
 - リポジトリ: public

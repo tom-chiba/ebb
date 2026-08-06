@@ -50,6 +50,13 @@
 			"when": 1785925009444,
 			"tag": "0006_seed_system_interval_preset",
 			"breakpoints": true
+		},
+		{
+			"idx": 7,
+			"version": "6",
+			"when": 1785978012540,
+			"tag": "0007_seed_remaining_system_interval_presets",
+			"breakpoints": true
 		}
 	]
 }
