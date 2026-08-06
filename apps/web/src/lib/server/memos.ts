@@ -1,5 +1,17 @@
 import { error } from '@sveltejs/kit';
-import { and, count, desc, eq, isNull, or, intervalPresets, memos, type Db } from '@ebb/db';
+import {
+	and,
+	count,
+	desc,
+	eq,
+	isNull,
+	or,
+	intervalPresets,
+	memos,
+	reviews,
+	type Db
+} from '@ebb/db';
+import { nextReviewAt } from '@ebb/core';
 
 export const TITLE_MAX_LENGTH = 200;
 export const CONTENT_MAX_LENGTH = 50_000;
@@ -96,9 +108,12 @@ function assertContent(content: string) {
 	}
 }
 
-async function assertPresetAccessible(db: Db, userId: string, intervalPresetId: string) {
+// intervals も返す。createMemo が reviews をバッチ生成する際に使う（#16）。
+// updateMemo（プリセット変更時のアクセス可否チェックのみ、reviews は再生成しない）は
+// 戻り値を無視して呼ぶ。
+async function getAccessiblePreset(db: Db, userId: string, intervalPresetId: string) {
 	const rows = await db
-		.select({ id: intervalPresets.id })
+		.select({ intervals: intervalPresets.intervals })
 		.from(intervalPresets)
 		.where(
 			and(
@@ -108,9 +123,11 @@ async function assertPresetAccessible(db: Db, userId: string, intervalPresetId: 
 		)
 		.limit(1)
 		.all();
-	if (rows.length === 0) {
+	const preset = rows[0];
+	if (!preset) {
 		throw new ValidationError('intervalPresetId does not reference an accessible preset');
 	}
+	return preset;
 }
 
 export interface CreateMemoInput {
@@ -133,45 +150,81 @@ async function findOwnMemoById(db: Db, userId: string, id: string) {
 	return rows[0];
 }
 
-function isUniqueConstraintViolation(err: unknown): boolean {
+// indexHint で該当テーブル/カラムのユニーク制約違反かを絞り込む。単に
+// "UNIQUE constraint failed" だけを見ると、同じ操作内で複数のユニーク制約
+// （memos.id と reviews_memoId_step_unique 等）が存在する場合に取り違える。
+function isUniqueConstraintViolation(err: unknown, indexHint: string): boolean {
 	if (!(err instanceof Error)) return false;
 	const cause = err.cause instanceof Error ? err.cause.message : '';
-	return /UNIQUE constraint failed/i.test(`${err.message} ${cause}`);
+	const message = `${err.message} ${cause}`;
+	return /UNIQUE constraint failed/i.test(message) && message.includes(indexHint);
+}
+
+// preset.intervals の全ステップ分の reviews 行を作る。baseTime は呼び出し側から
+// 固定の Date を渡してもらい、複数ステップの計算起点を同一時刻に揃える。
+function buildReviewRows(memoId: string, baseTime: Date, intervals: readonly number[]) {
+	return intervals.map((_, step) => {
+		const scheduledAt = nextReviewAt(baseTime, intervals, step);
+		// intervals[0..length-1] の範囲内なので nextReviewAt が undefined を返すことはない
+		if (!scheduledAt) throw new Error(`nextReviewAt returned undefined for step ${step}`);
+		return { memoId, step, scheduledAt };
+	});
 }
 
 export async function createMemo(db: Db, userId: string, input: CreateMemoInput) {
 	assertTitle(input.title);
 	assertContent(input.content);
-	await assertPresetAccessible(db, userId, input.intervalPresetId);
+	const preset = await getAccessiblePreset(db, userId, input.intervalPresetId);
 
 	if (input.id !== undefined) {
 		const existing = await findOwnMemoById(db, userId, input.id);
 		if (existing) return toMemoResponse(existing);
 	}
 
+	// id と createdAt/updatedAt をここで確定させ、memos への INSERT と reviews の
+	// バッチ生成（#12 が #16 に指示した、メモ作成時に全ステップ分をまとめて生成する方針）
+	// の起点時刻を揃える。DB 側のデフォルト値（unixepoch）に任せると、reviews.scheduledAt
+	// の計算起点と memos.createdAt が別クロック起点になり、日時がわずかにずれてしまう。
+	const id = input.id ?? crypto.randomUUID();
+	const now = new Date();
+	const insertMemo = db
+		.insert(memos)
+		.values({
+			id,
+			userId,
+			title: input.title,
+			content: input.content,
+			intervalPresetId: input.intervalPresetId,
+			createdAt: now,
+			updatedAt: now
+		})
+		.returning();
+	const reviewRows = buildReviewRows(id, now, preset.intervals);
+
+	let insertedMemoRows: (typeof memos.$inferSelect)[];
 	try {
-		const rows = await db
-			.insert(memos)
-			.values({
-				...(input.id !== undefined ? { id: input.id } : {}),
-				userId,
-				title: input.title,
-				content: input.content,
-				intervalPresetId: input.intervalPresetId
-			})
-			.returning()
-			.all();
-		const memo = rows[0];
-		if (!memo) throw new Error('failed to create memo');
-		return toMemoResponse(memo);
+		// D1 の batch は単一の暗黙トランザクションとして実行され、どちらかが失敗すれば
+		// 両方ロールバックされる。intervals が空配列（#15 が明記した異常系）なら reviews は
+		// 0 件でよく、空配列を insert すると失敗するため memos の INSERT のみ行う。
+		if (reviewRows.length > 0) {
+			[insertedMemoRows] = await db.batch([insertMemo, db.insert(reviews).values(reviewRows)]);
+		} else {
+			insertedMemoRows = await insertMemo;
+		}
 	} catch (err) {
-		if (input.id !== undefined && isUniqueConstraintViolation(err)) {
+		if (input.id !== undefined && isUniqueConstraintViolation(err, 'memos.id')) {
 			const existing = await findOwnMemoById(db, userId, input.id);
 			if (existing) return toMemoResponse(existing);
 			throw new ValidationError('id is already in use');
 		}
 		throw err;
 	}
+
+	// archiveMemo と同じく、DB に実際に書き込まれた行から MemoResponse を組み立てる
+	// （INSERT に渡した値を手元で再構築しない）。
+	const memo = insertedMemoRows[0];
+	if (!memo) throw new Error('failed to create memo');
+	return toMemoResponse(memo);
 }
 
 export type UpdateMemoInput = Partial<Omit<CreateMemoInput, 'id'>>;
@@ -191,7 +244,7 @@ export async function updateMemo(
 	if (input.title !== undefined) assertTitle(input.title);
 	if (input.content !== undefined) assertContent(input.content);
 	if (input.intervalPresetId !== undefined) {
-		await assertPresetAccessible(db, userId, input.intervalPresetId);
+		await getAccessiblePreset(db, userId, input.intervalPresetId);
 	}
 
 	// 指定されたフィールドだけを SET することで、他フィールドを対象にした同時 PATCH の
@@ -235,13 +288,17 @@ export async function updateMemo(
 export async function archiveMemo(db: Db, userId: string, id: string) {
 	await getMemo(db, userId, id);
 
-	const rows = await db
-		.update(memos)
-		.set({ archivedAt: new Date() })
-		.where(ownMemo(userId, id))
-		.returning()
-		.all();
-	const archived = rows[0];
+	// アーカイブと同時に未完了（completedAt IS NULL）の reviews を削除する。
+	// docs/schema.md が #21 への申し送りとして残していた「archived_at は reviews に
+	// 伝播しない」というエッジケースは、削除する側を採用してここで解消する
+	// （#16 の受け入れ条件「メモを削除すると予定も消える」に対応するため）。
+	// 完了済み（completedAt が設定済み）の行は履歴として残す方針（#18 の再計算レシピが
+	// 完了済みステップ数を起点にするための前提でもある）なので削除しない。
+	const [archivedRows] = await db.batch([
+		db.update(memos).set({ archivedAt: new Date() }).where(ownMemo(userId, id)).returning(),
+		db.delete(reviews).where(and(eq(reviews.memoId, id), isNull(reviews.completedAt)))
+	]);
+	const archived = archivedRows[0];
 	if (!archived) throw new NotFoundError('memo not found');
 	return archived;
 }
