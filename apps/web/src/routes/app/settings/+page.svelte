@@ -1,10 +1,139 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { applyAction, deserialize } from '$app/forms';
+	import { urlBase64ToUint8Array } from '$lib/push-subscribe';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
+
+	type PermissionState = NotificationPermission | 'unsupported';
+
+	let permissionState: PermissionState = $state('default');
+	let subscribed = $state(false);
+	let pushBusy = $state(false);
+	let pushStatusMessage = $state('');
+
+	async function refreshSubscriptionState() {
+		if (typeof Notification === 'undefined') {
+			permissionState = 'unsupported';
+			return;
+		}
+		permissionState = Notification.permission;
+		if (permissionState !== 'granted') {
+			subscribed = false;
+			return;
+		}
+		const registration = await navigator.serviceWorker.ready;
+		subscribed = (await registration.pushManager.getSubscription()) !== null;
+	}
+
+	onMount(() => {
+		refreshSubscriptionState();
+	});
+
+	// 許可ダイアログはユーザーがこのボタンを押したときにだけ出す
+	// （ページ表示直後に出すと拒否されやすいため。issue #19 の注意事項）。
+	async function enableNotifications() {
+		pushBusy = true;
+		pushStatusMessage = '';
+		try {
+			const permission = await Notification.requestPermission();
+			permissionState = permission;
+			if (permission !== 'granted') {
+				pushStatusMessage = '通知が許可されませんでした。';
+				return;
+			}
+
+			// SvelteKit がページ読み込み時に自動で Service Worker を登録するため、
+			// ここでは登録済みのものを待つだけでよい（自前で register() は呼ばない。
+			// docs/design-decisions.md の #9 節を参照）。
+			const registration = await navigator.serviceWorker.ready;
+			const subscription = await registration.pushManager.subscribe({
+				userVisibleOnly: true,
+				applicationServerKey: urlBase64ToUint8Array(data.vapidPublicKey)
+			});
+			const json = subscription.toJSON();
+			if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
+				throw new Error('購読情報の取得に失敗しました');
+			}
+
+			const body = new FormData();
+			body.set('endpoint', json.endpoint);
+			body.set('p256dh', json.keys.p256dh);
+			body.set('auth', json.keys.auth);
+			const response = await fetch('?/subscribePush', { method: 'POST', body });
+			const result = deserialize(await response.text());
+			if (result.type === 'success') {
+				subscribed = true;
+				pushStatusMessage = '通知を有効にしました。';
+			} else {
+				pushStatusMessage = 'サーバーへの保存に失敗しました。もう一度お試しください。';
+			}
+			await applyAction(result);
+		} catch (err) {
+			pushStatusMessage = `失敗しました: ${err instanceof Error ? err.message : String(err)}`;
+		} finally {
+			pushBusy = false;
+		}
+	}
+
+	// サーバー側のレコード削除が先に成功した場合のみブラウザ側を unsubscribe する。
+	// 逆順だと、サーバー削除に失敗したときブラウザは既に購読解除済みで、
+	// このユーザーはもう通知を受け取れないのに DB 上は購読中に見える不整合が残る
+	// （advisor によるレビューで指摘。#20 未実装の現状、失効した購読の自動掃除手段が
+	// ないため、失敗時は購読を残してユーザーに再試行させる方向を優先した）。
+	async function disableNotifications() {
+		pushBusy = true;
+		pushStatusMessage = '';
+		try {
+			const registration = await navigator.serviceWorker.ready;
+			const subscription = await registration.pushManager.getSubscription();
+			if (!subscription) {
+				subscribed = false;
+				return;
+			}
+
+			const body = new FormData();
+			body.set('endpoint', subscription.endpoint);
+			const response = await fetch('?/unsubscribePush', { method: 'POST', body });
+			const result = deserialize(await response.text());
+			if (result.type === 'success') {
+				await subscription.unsubscribe();
+				subscribed = false;
+				pushStatusMessage = '通知を無効にしました。';
+			} else {
+				pushStatusMessage = 'サーバーからの削除に失敗しました。もう一度お試しください。';
+			}
+			await applyAction(result);
+		} catch (err) {
+			pushStatusMessage = `失敗しました: ${err instanceof Error ? err.message : String(err)}`;
+		} finally {
+			pushBusy = false;
+		}
+	}
 </script>
 
 <h1>設定</h1>
+
+<section>
+	<h2>通知</h2>
+	{#if permissionState === 'unsupported'}
+		<p>このブラウザは通知に対応していません。</p>
+	{:else if permissionState === 'denied'}
+		<p class="error">
+			通知がブロックされています。ブラウザのサイト設定（アドレスバー付近の鍵アイコンなど）から
+			このサイトの通知を許可に変更し、ページを再読み込みしてください。
+		</p>
+	{:else if subscribed}
+		<p>この端末で通知が有効です。</p>
+		<button onclick={disableNotifications} disabled={pushBusy}>通知を無効にする</button>
+	{:else}
+		<button onclick={enableNotifications} disabled={pushBusy}>通知を有効にする</button>
+	{/if}
+	{#if pushStatusMessage}
+		<p>{pushStatusMessage}</p>
+	{/if}
+</section>
 
 <section>
 	<h2>新規メモの既定プリセット</h2>

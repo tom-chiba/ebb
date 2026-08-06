@@ -1,4 +1,4 @@
-import { fail } from '@sveltejs/kit';
+import { error, fail } from '@sveltejs/kit';
 import { formatIntervals, MAX_INTERVAL_COUNT } from '@ebb/core';
 import { requireAuthedDb } from '$lib/server/api';
 import { ConflictError, NotFoundError, ValidationError } from '$lib/server/errors';
@@ -12,10 +12,14 @@ import {
 	setDefaultPresetForUser,
 	updateCustomPresetIntervals
 } from '$lib/server/interval-presets';
+import { deletePushSubscription, savePushSubscription } from '$lib/server/push-subscriptions';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async (event) => {
 	const { user, db } = requireAuthedDb(event);
+	if (!event.platform?.env.VAPID_PUBLIC_KEY) {
+		error(500, 'VAPID_PUBLIC_KEY が未設定');
+	}
 	const [presets, defaultPresetId] = await Promise.all([
 		listPresetsForUser(db, user.id),
 		getDefaultPresetId(db, user.id)
@@ -27,7 +31,8 @@ export const load: PageServerLoad = async (event) => {
 		})),
 		defaultPresetId,
 		maxIntervalCount: MAX_INTERVAL_COUNT,
-		presetNameMaxLength: PRESET_NAME_MAX_LENGTH
+		presetNameMaxLength: PRESET_NAME_MAX_LENGTH,
+		vapidPublicKey: event.platform.env.VAPID_PUBLIC_KEY
 	};
 };
 
@@ -141,5 +146,36 @@ export const actions: Actions = {
 			return presetActionFail(err, 'setDefault', { presetId });
 		}
 		return { action: 'setDefault', success: true };
+	},
+
+	subscribePush: async (event) => {
+		const { user, db } = requireAuthedDb(event);
+		const form = await event.request.formData();
+		const endpoint = form.get('endpoint');
+		const p256dh = form.get('p256dh');
+		const auth = form.get('auth');
+		if (typeof endpoint !== 'string' || typeof p256dh !== 'string' || typeof auth !== 'string') {
+			return fail(400, { action: 'subscribePush', message: '入力が不正です' });
+		}
+		try {
+			await savePushSubscription(db, user.id, endpoint, p256dh, auth);
+		} catch (err) {
+			return presetActionFail(err, 'subscribePush', {});
+		}
+		return { action: 'subscribePush', success: true };
+	},
+
+	unsubscribePush: async (event) => {
+		const { user, db } = requireAuthedDb(event);
+		const form = await event.request.formData();
+		const endpoint = form.get('endpoint');
+		if (typeof endpoint !== 'string') {
+			return fail(400, { action: 'unsubscribePush', message: '入力が不正です' });
+		}
+		const { deletedCount } = await deletePushSubscription(db, user.id, endpoint);
+		if (deletedCount === 0) {
+			return fail(404, { action: 'unsubscribePush', message: '購読が見つかりません' });
+		}
+		return { action: 'unsubscribePush', success: true };
 	}
 };
