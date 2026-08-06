@@ -324,11 +324,10 @@ describe('completeReview', () => {
 		expect(row?.completedAt).not.toBeNull();
 	});
 
-	// getDueReviewDetail/completeReview は「最小の未完了 step であること」だけを要求し、
-	// scheduledAt <= now（期限到来）は要求しない。一覧は常に期限到来分のみを見せるため
-	// 通常この経路は通らないが、意図した仕様であることをテストで固定する
-	// （テスト網羅性レビューで、この境界が未検証だと指摘された）。
-	it('allows completing the current step even before its scheduledAt has arrived', async () => {
+	// 一覧を経由しない URL 直打ちや POST でも、期限前のステップを完了して復習間隔を
+	// 迂回できないことを検証する。再アンカリング前に配信済みだった通知から同じ review id を
+	// 開くケースでも、このサーバー側の検証が必要になる。
+	it('rejects completing the current step before its scheduledAt has arrived', async () => {
 		const memo = await createMemo(db, ownerId, {
 			title: 'memo',
 			content: 'c',
@@ -341,11 +340,10 @@ describe('completeReview', () => {
 			.all();
 		if (!step0) throw new Error('fixture setup failed');
 
-		const result = await completeReview(db, ownerId, step0.id);
-		expect(result.memoTitle).toBe('memo');
+		await expect(completeReview(db, ownerId, step0.id)).rejects.toThrow(NotFoundError);
 
 		const [row] = await db.select().from(reviews).where(eq(reviews.id, step0.id)).all();
-		expect(row?.completedAt).not.toBeNull();
+		expect(row?.completedAt).toBeNull();
 	});
 
 	// 再アンカリング（gt(reviews.step, target.step)）が、対象ステップより前の
@@ -479,6 +477,10 @@ describe('completeReview', () => {
 			.all();
 		const step1 = rows.find((r) => r.step === 1);
 		if (!step1) throw new Error('fixture setup failed');
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(Date.now() - 1000) })
+			.where(eq(reviews.id, step1.id));
 
 		await expect(completeReview(db, ownerId, step1.id)).rejects.toThrow(ConflictError);
 	});
@@ -488,6 +490,33 @@ describe('completeReview', () => {
 		await db.update(memos).set({ archivedAt: new Date() }).where(eq(memos.id, memo.id));
 
 		await expect(completeReview(db, ownerId, due.id)).rejects.toThrow(NotFoundError);
+	});
+
+	// 事前 SELECT では期限到来済みでも、UPDATE までの間に #18 の再計算等で予定が未来へ
+	// 移動し得る。UPDATE 自体の due 条件が、古い画面からの完了を防ぐことを検証する。
+	it('rejects completion when the review is rescheduled into the future before the update', async () => {
+		const { due } = await createDueReview(ownerId, ownerPresetId);
+		const futureScheduledAt = new Date(Date.now() + 3600_000);
+		const originalBatch = db.batch.bind(db);
+		const batchSpy = vi
+			.spyOn(db, 'batch')
+			.mockImplementationOnce(async (queries: Parameters<typeof originalBatch>[0]) => {
+				await db
+					.update(reviews)
+					.set({ scheduledAt: futureScheduledAt })
+					.where(eq(reviews.id, due.id));
+				return originalBatch(queries);
+			});
+
+		try {
+			await expect(completeReview(db, ownerId, due.id)).rejects.toThrow(ConflictError);
+		} finally {
+			batchSpy.mockRestore();
+		}
+
+		const [row] = await db.select().from(reviews).where(eq(reviews.id, due.id)).all();
+		expect(row?.completedAt).toBeNull();
+		expect(row?.scheduledAt.getTime()).toBe(futureScheduledAt.getTime());
 	});
 
 	// completeReview の SELECT（存在・完了確認）と db.batch() の UPDATE の間に別リクエストが
@@ -761,8 +790,9 @@ describe('getDueReviewDetail', () => {
 		expect(detail.scheduledAt.getTime()).toBe(due.scheduledAt.getTime());
 	});
 
-	// completeReview 側の同種テストと対になる検証（テスト網羅性レビューで指摘）。
-	it('allows viewing the current step even before its scheduledAt has arrived', async () => {
+	// completeReview 側の同種テストと対になる検証。期限前の review は一覧に出ないだけでなく、
+	// id を直接指定しても復習画面を開けない。
+	it('rejects viewing the current step before its scheduledAt has arrived', async () => {
 		const memo = await createMemo(db, ownerId, {
 			title: 'memo',
 			content: '本文',
@@ -775,8 +805,7 @@ describe('getDueReviewDetail', () => {
 			.all();
 		if (!step0) throw new Error('fixture setup failed');
 
-		const detail = await getDueReviewDetail(db, ownerId, step0.id);
-		expect(detail.memoContent).toBe('本文');
+		await expect(getDueReviewDetail(db, ownerId, step0.id)).rejects.toThrow(NotFoundError);
 	});
 
 	it('throws NotFoundError for an already-completed review', async () => {
@@ -818,6 +847,10 @@ describe('getDueReviewDetail', () => {
 			.all();
 		const step1 = rows.find((r) => r.step === 1);
 		if (!step1) throw new Error('fixture setup failed');
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(Date.now() - 1000) })
+			.where(eq(reviews.id, step1.id));
 
 		await expect(getDueReviewDetail(db, ownerId, step1.id)).rejects.toThrow(ConflictError);
 	});

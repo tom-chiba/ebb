@@ -1212,17 +1212,20 @@ PR #46 作成後、Codex の通常レビューと adversarial レビュー（`/c
   現時点で `/api/reviews` を必要とする消費者が存在しない。「使われない抽象を先に
   作らない」という方針に基づく。
 
-- **常に最小の未完了 step からのみ完了・閲覧できる、という不変条件をこの Issue で
-  実装として確定させた**（`docs/schema.md` の reviews 節が決定を #17 に委ねていた点）。
+- **期限が来ており、かつ常に最小の未完了 step である review だけを完了・閲覧できる、
+  という不変条件をこの Issue で実装として確定させた**（`docs/schema.md` の reviews 節が
+  決定を #17 に委ねていた点）。
   `$lib/server/reviews.ts` の `listDueReviews` は、メモごとに「未完了行の中で
   最小の step」だけを `GROUP BY memo_id` のサブクエリで抽出し、その行に対しての
   み `scheduled_at <= now` の due 判定を適用する。due 判定をサブクエリの内側
   （`GROUP BY` に含める形）で行うと「期限が来ている行の中での最小 step」になり、
   期限前の若い step を飛ばして期限切れの後続 step を表示しうる（advisor によるレビューで
   指摘）ため、意図的に外側でフィルタする。`completeReview`/`getDueReviewDetail` も
-  同じ不変条件を `assertIsCurrentStep` で再検証する。一覧は常にこの条件を満たす行しか
-  見せないため通常経路では到達しないが、review id を直接指定した呼び出し（URL 直打ち等）
-  に対する防御として、完了操作・詳細取得の両方で個別に検証している。
+  `scheduledAt <= now` と `assertIsCurrentStep` の両方を再検証する。一覧は常にこの条件を
+  満たす行しか見せないため通常経路では到達しないが、review id を直接指定した呼び出し
+  （URL 直打ちや、再アンカリング前に配信済みだった古い通知等）に対する防御として、
+  完了操作・詳細取得の両方で個別に検証している。`completeReview` の UPDATE にも due 条件を
+  含め、事前 SELECT の後に予定が未来へ再計算された場合の競合を防ぐ。
 
 - **「復習した」で完了させると、完了時刻を起点に残り未完了ステップの `scheduledAt` を
   再計算する**（ユーザー承認済みの設計判断）。#16 はメモ作成時に全ステップの
@@ -1235,8 +1238,8 @@ PR #46 作成後、Codex の通常レビューと adversarial レビュー（`/c
   `nextReviewAt(completedAt, intervals, step)`（`intervals` はそのメモの現在の
   `intervalPresetId` が指すプリセットの値）で `scheduledAt` を再計算し、
   `notifiedAt` も `NULL` に戻す。`notifiedAt` をクリアしない場合、scheduler の
-  部分インデックス（`reviews_pending_scheduledAt_idx`、`WHERE completed_at IS NULL
-  AND notified_at IS NULL`）が既通知の行をスキャン対象から外してしまい、
+  部分インデックス（`reviews_pending_scheduledAt_idx`、条件は
+  `completed_at IS NULL AND notified_at IS NULL`）が既通知の行をスキャン対象から外してしまい、
   再アンカリングで新しくなった予定に対して通知が二度と飛ばなくなる
   （#19/#21 に影響する）。
   - 完了操作と残りステップの再アンカリングは同じ `db.batch()` で実行し、
@@ -1253,8 +1256,8 @@ PR #46 作成後、Codex の通常レビューと adversarial レビュー（`/c
     自分自身の `completedAt`（勝者より後の時刻）を起点に残りステップを
     再アンカリングしてしまい、実際に保存された `completedAt`（勝者の値）と
     再アンカリング元の時刻が食い違う。`packages/db` から drizzle-orm の
-    `exists` を re-export し、`exists(select 1 from reviews where id = 対象id
-    and completed_at = このcompletedAt)` を再アンカリング UPDATE の条件に
+    `exists` を re-export し、対象 ID とこの呼び出しの `completedAt` が一致する行の
+    `exists` を再アンカリング UPDATE の条件に
     加えることで、負けた側ではこのガードが false になり0件更新のまま終わる。
   - `db.batch()` は静的に1件以上とわかるタプル型 (`[U, ...U[]]`) を要求するが、
     再アンカリング対象の件数は実行時にしか決まらない（0件〜プリセットのステップ数-1件）。

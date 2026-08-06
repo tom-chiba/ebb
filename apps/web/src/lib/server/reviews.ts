@@ -136,6 +136,7 @@ export async function getDueReviewDetail(
 	userId: string,
 	id: string
 ): Promise<DueReviewDetail> {
+	const now = new Date();
 	const rows = await db
 		.select({
 			id: reviews.id,
@@ -148,7 +149,14 @@ export async function getDueReviewDetail(
 		})
 		.from(reviews)
 		.innerJoin(memos, eq(reviews.memoId, memos.id))
-		.where(and(eq(reviews.id, id), eq(memos.userId, userId), isNull(memos.archivedAt)))
+		.where(
+			and(
+				eq(reviews.id, id),
+				eq(memos.userId, userId),
+				isNull(memos.archivedAt),
+				lte(reviews.scheduledAt, now)
+			)
+		)
 		.limit(1)
 		.all();
 	const row = rows[0];
@@ -167,6 +175,7 @@ export async function getDueReviewDetail(
 }
 
 export async function completeReview(db: Db, userId: string, id: string): Promise<CompletedReview> {
+	const requestedAt = new Date();
 	// reviews 自体は userId を持たないため、所有権の確認は memos との JOIN で行う。
 	const rows = await db
 		.select({
@@ -179,7 +188,14 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 		})
 		.from(reviews)
 		.innerJoin(memos, eq(reviews.memoId, memos.id))
-		.where(and(eq(reviews.id, id), eq(memos.userId, userId), isNull(memos.archivedAt)))
+		.where(
+			and(
+				eq(reviews.id, id),
+				eq(memos.userId, userId),
+				isNull(memos.archivedAt),
+				lte(reviews.scheduledAt, requestedAt)
+			)
+		)
 		.limit(1)
 		.all();
 	const target = rows[0];
@@ -252,7 +268,11 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 	const completeCurrent = db
 		.update(reviews)
 		.set({ completedAt })
-		.where(and(eq(reviews.id, id), isNull(reviews.completedAt)))
+		// SELECT 後に #18 の再計算等で期限が未来へ移された場合も、古い画面や通知から
+		// 期限前に完了できないよう UPDATE 自体でも due 条件を再検証する。
+		.where(
+			and(eq(reviews.id, id), isNull(reviews.completedAt), lte(reviews.scheduledAt, completedAt))
+		)
 		.returning();
 
 	// db.batch は静的に1件以上とわかるタプル型（BatchItem<'sqlite'> の非空配列）を
