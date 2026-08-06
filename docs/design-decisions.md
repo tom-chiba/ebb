@@ -1134,9 +1134,15 @@ PR #46 作成後、Codex の通常レビューと adversarial レビュー（`/c
     任せると、`memos.createdAt` と `reviews.scheduledAt` の計算起点が別クロックに
     なり得るため、`nextReviewAt` の `baseTime` と `memos.createdAt` を同一の
     `Date` インスタンスに揃えた
-  - `intervals` が空配列（#15 が明記した異常系）の場合は `reviews` の INSERT 自体を
-    スキップする（空配列を `.values([])` すると失敗するため、かつ0件生成は
-    正当な結果として許容する。`intervals` 自体のバリデーションは #18 の責務のまま）
+  - **`intervals` が空配列の場合は `createMemo` が `ValidationError` を投げて拒否する**
+    （当初は `reviews` の INSERT をスキップし0件生成を正当な結果として許容していたが、
+    Codex の通常レビュー・adversarial レビュー双方から指摘され修正した）。#15 の
+    設計判断（本ドキュメントの「復習間隔プリセットと計算ロジック」節）が
+    「#16 はループの前に `intervals.length` が 0 でないことを確認すること。確認しないと、
+    空のプリセットを持つメモが reviews を1件も持たないまま『静かに全ステップ完了状態』に
+    見えてしまう」と明記しており、0件生成を許容する当初の実装はこの申し送りに反していた。
+    `intervals` 自体の内容（最小単位・順序等）のバリデーションは引き続き #18 の責務だが、
+    メモ作成時点で空配列を検出した場合の拒否は #16 の責務とした
 - **`isUniqueConstraintViolation` は違反したインデックス/カラム名（例:
   `memos.id`）を明示的に指定して判定するよう変更した**。バッチに `memos` と
   `reviews` 両方への INSERT が含まれるようになったため、単に

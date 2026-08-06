@@ -175,6 +175,14 @@ export async function createMemo(db: Db, userId: string, input: CreateMemoInput)
 	assertTitle(input.title);
 	assertContent(input.content);
 	const preset = await getAccessiblePreset(db, userId, input.intervalPresetId);
+	// intervals が空の場合、reviews を1件も生成できない。空配列の妥当性検証自体は
+	// #18（プリセット管理）の責務だが、既に存在してしまった空プリセットで
+	// メモを作成すると、reviews が無いまま「静かに全ステップ完了状態」に見える
+	// メモが生まれてしまうため、#16（メモ作成時の reviews 生成）としてここで拒否する
+	// （docs/design-decisions.md の #15 節が明記する申し送り）。
+	if (preset.intervals.length === 0) {
+		throw new ValidationError('intervalPresetId references a preset with no intervals');
+	}
 
 	if (input.id !== undefined) {
 		const existing = await findOwnMemoById(db, userId, input.id);
@@ -204,13 +212,9 @@ export async function createMemo(db: Db, userId: string, input: CreateMemoInput)
 	let insertedMemoRows: (typeof memos.$inferSelect)[];
 	try {
 		// D1 の batch は単一の暗黙トランザクションとして実行され、どちらかが失敗すれば
-		// 両方ロールバックされる。intervals が空配列（#15 が明記した異常系）なら reviews は
-		// 0 件でよく、空配列を insert すると失敗するため memos の INSERT のみ行う。
-		if (reviewRows.length > 0) {
-			[insertedMemoRows] = await db.batch([insertMemo, db.insert(reviews).values(reviewRows)]);
-		} else {
-			insertedMemoRows = await insertMemo;
-		}
+		// 両方ロールバックされる。intervals は上のチェックにより常に1件以上のため、
+		// reviewRows が空になることはない。
+		[insertedMemoRows] = await db.batch([insertMemo, db.insert(reviews).values(reviewRows)]);
 	} catch (err) {
 		if (input.id !== undefined && isUniqueConstraintViolation(err, 'memos.id')) {
 			const existing = await findOwnMemoById(db, userId, input.id);

@@ -246,21 +246,29 @@ describe('createMemo reviews generation', () => {
 		expect(rows.every((row) => row.completedAt === null && row.notifiedAt === null)).toBe(true);
 	});
 
-	it('generates zero reviews when the preset has an empty intervals array', async () => {
+	// 空の intervals を許容すると、reviews が1件も無いまま「静かに全ステップ完了状態」に
+	// 見えるメモが生まれてしまう（docs/design-decisions.md の #15 節が明記する申し送り、
+	// レビューで指摘）。intervals 自体の妥当性検証は #18 の責務だが、メモ作成時点では
+	// #16 として拒否する。
+	it('rejects a preset with an empty intervals array, creating neither the memo nor any reviews', async () => {
 		const [emptyPreset] = await db
 			.insert(intervalPresets)
 			.values({ userId: ownerId, name: 'empty', intervals: [] })
 			.returning();
 		if (!emptyPreset) throw new Error('fixture setup failed');
 
-		const memo = await createMemo(db, ownerId, {
-			title: 'title',
-			content: 'content',
-			intervalPresetId: emptyPreset.id
-		});
+		await expect(
+			createMemo(db, ownerId, {
+				title: 'title',
+				content: 'content',
+				intervalPresetId: emptyPreset.id
+			})
+		).rejects.toThrow(ValidationError);
 
-		const rows = await db.select().from(reviews).where(eq(reviews.memoId, memo.id)).all();
-		expect(rows).toHaveLength(0);
+		// 拒否は id を発行する前に起きるため、そもそも memo id が存在しない。
+		// メモ自体が作られていないこと（reviews の対象になり得る memo が無いこと）を確認する。
+		const { total } = await listMemos(db, ownerId);
+		expect(total).toBe(0);
 	});
 
 	it('does not duplicate reviews when the same client-generated id is submitted twice', async () => {
