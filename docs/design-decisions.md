@@ -1203,6 +1203,146 @@ PR #46 作成後、Codex の通常レビューと adversarial レビュー（`/c
     変化しないことを確認するテストを追加した（「reviews は再生成しない」という
     上記の決定に対する回帰テスト）
 
+## 復習一覧と「復習した」操作の UI (#17)
+
+- **公開 API（`/api/reviews`）は追加しなかった**。#14（メモの CRUD UI）が既に、
+  `/api/memos`（#13）を再利用せず `+page.server.ts` から `$lib/server/memos.ts` を
+  直接呼ぶ形にした前例があり、reviews にもこの UI 専用の呼び出し方を踏襲した。
+  scheduler（#21）も HTTP 経由ではなく `packages/db` 経由で直接 D1 を読む設計のため、
+  現時点で `/api/reviews` を必要とする消費者が存在しない。「使われない抽象を先に
+  作らない」という方針に基づく。
+
+- **常に最小の未完了 step からのみ完了・閲覧できる、という不変条件をこの Issue で
+  実装として確定させた**（`docs/schema.md` の reviews 節が決定を #17 に委ねていた点）。
+  `$lib/server/reviews.ts` の `listDueReviews` は、メモごとに「未完了行の中で
+  最小の step」だけを `GROUP BY memo_id` のサブクエリで抽出し、その行に対しての
+  み `scheduled_at <= now` の due 判定を適用する。due 判定をサブクエリの内側
+  （`GROUP BY` に含める形）で行うと「期限が来ている行の中での最小 step」になり、
+  期限前の若い step を飛ばして期限切れの後続 step を表示しうる（advisor によるレビューで
+  指摘）ため、意図的に外側でフィルタする。`completeReview`/`getDueReviewDetail` も
+  同じ不変条件を `assertIsCurrentStep` で再検証する。一覧は常にこの条件を満たす行しか
+  見せないため通常経路では到達しないが、review id を直接指定した呼び出し（URL 直打ち等）
+  に対する防御として、完了操作・詳細取得の両方で個別に検証している。
+
+- **「復習した」で完了させると、完了時刻を起点に残り未完了ステップの `scheduledAt` を
+  再計算する**（ユーザー承認済みの設計判断）。#16 はメモ作成時に全ステップの
+  `scheduledAt` を `memos.createdAt` 起点で一括計算する方針だったため、長期間アプリを
+  開かないと同じメモの複数ステップが同時に期限切れになり得る。この状態で
+  再計算をしないまま完了操作を許すと、放置していた期間をそのまま引き継いで
+  残り全ステップを間隔なしで一気に消化できてしまい、間隔反復として機能しなくなる
+  （advisor のレビューで指摘）。そこで `completeReview` は、対象ステップを完了させると
+  同時に、同じメモの残り未完了ステップ（`step > 完了させた step`）それぞれについて
+  `nextReviewAt(completedAt, intervals, step)`（`intervals` はそのメモの現在の
+  `intervalPresetId` が指すプリセットの値）で `scheduledAt` を再計算し、
+  `notifiedAt` も `NULL` に戻す。`notifiedAt` をクリアしない場合、scheduler の
+  部分インデックス（`reviews_pending_scheduledAt_idx`、`WHERE completed_at IS NULL
+  AND notified_at IS NULL`）が既通知の行をスキャン対象から外してしまい、
+  再アンカリングで新しくなった予定に対して通知が二度と飛ばなくなる
+  （#19/#21 に影響する）。
+  - 完了操作と残りステップの再アンカリングは同じ `db.batch()` で実行し、
+    途中で失敗した場合に「完了はしたが再アンカリングされていない」中途半端な
+    状態が残らないようにしている。
+  - **同じ review を2件同時に完了しようとした場合、負けた側のバッチでも残り
+    ステップの再アンカリング UPDATE だけは成功してしまう問題を、再アンカリング
+    UPDATE の `WHERE` に「この呼び出し自身の `completedAt` で対象 review が実際に
+    完了している」ことを保証する `exists` ガードを追加して修正した**（Codex による
+    最終レビューで指摘）。D1 の `batch()` は1つの暗黙トランザクションだが、
+    先頭 UPDATE（`completeCurrent`、`WHERE id = ? AND completed_at IS NULL`）が
+    競合により0件更新になってもエラーにはならないため、後続の再アンカリング
+    UPDATE は独立に実行されてしまう。ガードなしだと、負けた側の呼び出しが
+    自分自身の `completedAt`（勝者より後の時刻）を起点に残りステップを
+    再アンカリングしてしまい、実際に保存された `completedAt`（勝者の値）と
+    再アンカリング元の時刻が食い違う。`packages/db` から drizzle-orm の
+    `exists` を re-export し、`exists(select 1 from reviews where id = 対象id
+    and completed_at = このcompletedAt)` を再アンカリング UPDATE の条件に
+    加えることで、負けた側ではこのガードが false になり0件更新のまま終わる。
+  - `db.batch()` は静的に1件以上とわかるタプル型 (`[U, ...U[]]`) を要求するが、
+    再アンカリング対象の件数は実行時にしか決まらない（0件〜プリセットのステップ数-1件）。
+    完了させる1件は常に配列の先頭にあるため実行時には常に1件以上になるが、
+    可変長の spread を含む配列リテラルが非空タプルであることは TypeScript の型
+    システムでは静的に証明できない。`packages/db` から drizzle-orm の `BatchItem`
+    型を re-export し、`[typeof completeCurrent, ...BatchItem<'sqlite'>[]]` という
+    型注釈（`as unknown as [...]` のような二重アサーションではなく）で表明している
+    （`$lib/server/reviews.ts` の `completeReview`。当初は `as unknown as [...]` を
+    使っていたが、正確性レビューで「戻り値の形が異なるため静的に表現できない」という
+    コメントの理由づけ自体が不正確だと指摘され、より安全な形に修正した）。
+  - **`intervalPresetId` が reviews 生成後に `updateMemo`（#13）で変更され、
+    新しいプリセットの `intervals` が既存の未完了ステップ数より短くなっている場合、
+    再アンカリングできないステップの `scheduledAt` は元の値のまま残し、対象ステップの
+    完了自体は失敗させない**（正確性レビューで指摘され修正）。当初は
+    `nextReviewAt` が `undefined` を返すと即座に `Error` を投げていたため、この
+    状態のメモは以後どのステップも完了操作ができなくなる（何度リトライしても
+    同じ理由で失敗し続ける）不具合があった。この「プリセットの要素数が既存の
+    完了済み/未完了ステップ数と食い違う」エッジケース自体の解消は `docs/schema.md`
+    が #18 の責務としているが、#17 側のコードが新規に導入した「未処理のまま
+    完了操作自体をクラッシュさせ続ける」という無防備な失敗モードは、この Issue の
+    スコープとして塞いだ。
+    - **この修正自体が `nextScheduledAt` に別の不具合を持ち込んでいた**（正確性・
+      テスト網羅性の両レビューで指摘）。「全ステップ完了」（`null` を返すべき）と
+      「次のステップは存在するが再アンカリングできず古い `scheduledAt` のまま残って
+      いる」を、修正直後は同じ条件（`reanchorUpdates.find(...)` が見つからない）で
+      判定していたため区別できず、後者でも `null` を返して「このメモの復習はすべて
+      完了しました」という事実と異なるフラッシュメッセージを表示していた
+      （実際には一覧に戻ると同じメモが即座に復活する）。フィルタ前の `remaining`
+      から「次のステップの行自体が存在するか」を先に判定し、存在すれば
+      再アンカリング後の日時（無ければ据え置かれた既存の `scheduledAt`）を返す形に
+      修正した。playwright-cli でこのシナリオ（3ステップ作成→1ステップのプリセットに
+      切り替え→ step0 を完了）を実際に操作し、修正前後の挙動の違いを確認済み。
+
+- **一覧の「全 N 件」バナーと実際に表示される一覧は同じ定義の集合を数える**
+  （advisor によるレビューで指摘）。素朴に `reviews` の生の行数を数えると、
+  1つのメモで複数ステップが同時に期限切れの場合に過大な件数を表示してしまい
+  （一覧には最小の未完了 step の1行しか出せないため）、バナーと一覧の件数が
+  食い違う。`listDueReviews` の一覧クエリ・件数クエリは同じ JOIN・WHERE
+  条件（メモごとの最小未完了 step かつ due）を共有しており、常に一致する。
+
+- **一覧の並び順は `scheduledAt` 昇順（古い順）とし、`id` を tie-breaker に追加した**。
+  `listMemos`（#13）のレビューで指摘された「同時刻の行でページ間の順序が不安定になる」
+  問題と同型で、reviews はメモ作成時にバッチ生成されるため同時刻の行がむしろ
+  発生しやすい。
+
+- **「もっと見る」による段階的な読み込みを採用した**（Issue 本文の UX 論点への回答、
+  ユーザー承認済み）。件数だけをバナーで見せ、既定 10 件ずつ `offset` を進めて
+  読み込む方式にした。`/app/memos`（#14）の前へ／次へページネーションと同じ
+  `limit`/`offset` の仕組みをそのまま再利用している。
+
+- **完了後は `offset` を保持せず、素の一覧 URL（`/app/reviews`）へリダイレクトする**
+  （advisor によるレビューで指摘）。完了操作は対象の行を一覧から取り除くため、
+  `offset` を保持したまま同じページに留まると後続の行がひとつずつ前にずれ、
+  次のページに送られていた行が表示されないままスキップされてしまう。
+
+- **完了直後のフラッシュメッセージはセッション等を使わず、リダイレクト先の
+  クエリパラメータ（`completedTitle`/`nextScheduledAt`）に載せるだけにした**。
+  この情報は「直前の操作の結果」でしかなく、ページを再読み込みされたら消えて
+  構わないため、専用のフラッシュメッセージ基盤を導入する必要はないと判断した。
+
+- **「常に最小の未完了 step から完了させる」不変条件により、`reviews` に
+  `expectedUpdatedAt` のような楽観的並行性制御用のカラムは不要と判断した**。
+  `completeReview` の `UPDATE ... WHERE id = ? AND completed_at IS NULL` が
+  そのまま「未完了である」ことを条件にした排他制御として機能する（同じ review を
+  二重に完了させようとする競合は、後勝ちの一方が 0 行更新になり `ConflictError` に
+  なる）。`updateMemo`（#13）のように複数フィールドを任意の組み合わせで
+  更新できるわけではなく、完了操作は単一の状態遷移（未完了→完了）でしかないため、
+  この単純な排他制御で十分としている。
+
+- **`ValidationError`/`NotFoundError`/`ConflictError` と、それを HTTP ステータスへ
+  マッピングする関数を `$lib/server/memos.ts` から `$lib/server/errors.ts` に切り出した**
+  （設計レビューで指摘）。これらは memo 固有の情報を持たない汎用的なエラー分類で、
+  #13 の時点では消費者が memos.ts 自身しかいなかったためそこに置いていたが、
+  reviews（#17）という2つ目の消費者ができたことで「memos.ts に依存する」という
+  不自然な結合が生じた。マッピング関数は `handleMemoError` から `handleDomainError`
+  へ改名し、`memos.ts`/`reviews.ts` の双方と、両者を呼び出す全ての `+page.server.ts`/
+  `+server.ts`/テストファイルの import 元を新しいモジュールへ揃えた（後方互換の
+  re-export は残していない）。
+- **`clamp()`・`offset` の正規化（`normalizeOffset`）・limit/offset のオプション型
+  （`{ limit?, offset? }`）を `$lib/server/pagination.ts` に切り出した**
+  （設計レビューで指摘）。`listMemos`（#13）と `listDueReviews`（#17）が同一の実装を
+  それぞれ個別に持っていたため統合した。`pagination.ts` 自体は `parsePaginationParam`
+  の置き場所として既に存在していたが、`clamp`/`normalizeOffset` はこの統合まで
+  `memos.ts`/`reviews.ts` 側にそれぞれ個別定義されており、`pagination.ts` を
+  import してはいなかった（スコープ外の変更レビューで、この点の記述が不正確だったと
+  指摘され訂正した）。
+
 ## 開発の進め方
 
 - リポジトリ: public
