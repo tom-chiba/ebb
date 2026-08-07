@@ -12,7 +12,11 @@ import {
 	setDefaultPresetForUser,
 	updateCustomPresetIntervals
 } from '$lib/server/interval-presets';
-import { deletePushSubscription, savePushSubscription } from '$lib/server/push-subscriptions';
+import {
+	deletePushSubscription,
+	ownsPushSubscription,
+	savePushSubscription
+} from '$lib/server/push-subscriptions';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async (event) => {
@@ -180,6 +184,19 @@ export const actions: Actions = {
 			return formActionFail(err, 'subscribePush', {});
 		}
 		return { action: 'subscribePush', success: true };
+	},
+
+	checkPushSubscription: async (event) => {
+		const { user, db } = requireAuthedDb(event);
+		const form = await event.request.formData();
+		const endpoint = form.get('endpoint');
+		if (typeof endpoint !== 'string' || endpoint.length === 0) {
+			return fail(400, { action: 'checkPushSubscription', message: '入力が不正です' });
+		}
+		return {
+			action: 'checkPushSubscription',
+			subscribed: await ownsPushSubscription(db, user.id, endpoint)
+		};
 	},
 
 	// 冪等操作として扱う理由は $lib/server/push-subscriptions.ts の

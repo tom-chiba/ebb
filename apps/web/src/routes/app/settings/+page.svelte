@@ -6,9 +6,9 @@
 
 	let { data, form }: PageProps = $props();
 
-	type PermissionState = NotificationPermission | 'unsupported';
+	type PermissionState = NotificationPermission | 'unsupported' | 'checking';
 
-	let permissionState: PermissionState = $state('default');
+	let permissionState: PermissionState = $state('checking');
 	let subscribed = $state(false);
 	let pushBusy = $state(false);
 	let pushStatusMessage = $state('');
@@ -39,16 +39,24 @@
 		return result.type === 'success';
 	}
 
-	// ブラウザ側に購読が残っていても、共有端末で別ユーザーが同じ endpoint を
-	// 購読し直していた場合（savePushSubscription の onConflictDoUpdate で所有権が
-	// 付け替わる）、DB 上の行は既に自分のものではない。ここで毎回 upsert し直す
-	// ことで「ブラウザの購読」と「DB 上の所有者」を必ず一致させ、他ユーザーの
-	// 端末で誤って「有効」と表示され続けることを防ぐ（正確性レビューで指摘）。
-	// ネットワーク失敗時は「有効」と誤表示しない方向へ倒し、静かに未購読扱いにする
-	// （ユーザー操作ではない読み込み時の処理のためエラーメッセージは出さない）。
+	// ページ表示時は、ブラウザの endpoint が現在ユーザーのものとして保存済みかを
+	// 読み取るだけにする。共有端末で別アカウントへ切り替えた場合の所有権付け替えは、
+	// そのユーザーが「通知を有効にする」を明示的に押したときにだけ行う。
+	async function checkSubscriptionOwnership(endpoint: string): Promise<boolean> {
+		const body = new FormData();
+		body.set('endpoint', endpoint);
+		const response = await fetch('?/checkPushSubscription', { method: 'POST', body });
+		const result = deserialize(await response.text());
+		return (
+			result.type === 'success' &&
+			result.data !== undefined &&
+			'subscribed' in result.data &&
+			result.data.subscribed === true
+		);
+	}
+
+	// ネットワーク失敗時は「有効」と誤表示しない方向へ倒し、静かに未購読扱いにする。
 	async function refreshSubscriptionState() {
-		// vapidPublicKey が無い環境は通知を「利用できません」と表示するため
-		// （後述のマークアップ参照）、その裏で購読の所有権を書き換える通信をしない。
 		if (!data.vapidPublicKey) return;
 		if (typeof Notification === 'undefined') {
 			permissionState = 'unsupported';
@@ -66,7 +74,7 @@
 			return;
 		}
 		try {
-			subscribed = await submitSubscription(subscription);
+			subscribed = await checkSubscriptionOwnership(subscription.endpoint);
 		} catch {
 			subscribed = false;
 		}
@@ -75,6 +83,21 @@
 	onMount(() => {
 		refreshSubscriptionState();
 	});
+
+	function permissionStateLabel(state: PermissionState): string {
+		switch (state) {
+			case 'checking':
+				return '確認中';
+			case 'default':
+				return '未設定';
+			case 'granted':
+				return '許可済み';
+			case 'denied':
+				return '拒否';
+			case 'unsupported':
+				return '未対応';
+		}
+	}
 
 	// 許可ダイアログはユーザーがこのボタンを押したときにだけ出す
 	// （ページ表示直後に出すと拒否されやすいため。issue #19 の注意事項）。
@@ -154,18 +177,21 @@
 	<h2>通知</h2>
 	{#if !data.vapidPublicKey}
 		<p>現在この環境では通知を利用できません。</p>
-	{:else if permissionState === 'unsupported'}
-		<p>このブラウザは通知に対応していません。</p>
-	{:else if permissionState === 'denied'}
-		<p class="error">
-			通知がブロックされています。ブラウザのサイト設定（アドレスバー付近の鍵アイコンなど）から
-			このサイトの通知を許可に変更し、ページを再読み込みしてください。
-		</p>
-	{:else if subscribed}
-		<p>この端末で通知が有効です。</p>
-		<button onclick={disableNotifications} disabled={pushBusy}>通知を無効にする</button>
 	{:else}
-		<button onclick={enableNotifications} disabled={pushBusy}>通知を有効にする</button>
+		<p>通知の許可状態: {permissionStateLabel(permissionState)}</p>
+		{#if permissionState === 'unsupported'}
+			<p>このブラウザは通知に対応していません。</p>
+		{:else if permissionState === 'denied'}
+			<p class="error">
+				通知がブロックされています。ブラウザのサイト設定（アドレスバー付近の鍵アイコンなど）から
+				このサイトの通知を許可に変更し、ページを再読み込みしてください。
+			</p>
+		{:else if subscribed}
+			<p>この端末で通知が有効です。</p>
+			<button onclick={disableNotifications} disabled={pushBusy}>通知を無効にする</button>
+		{:else if permissionState !== 'checking'}
+			<button onclick={enableNotifications} disabled={pushBusy}>通知を有効にする</button>
+		{/if}
 	{/if}
 	{#if pushStatusMessage}
 		<p>{pushStatusMessage}</p>

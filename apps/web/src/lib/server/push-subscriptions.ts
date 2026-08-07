@@ -26,6 +26,22 @@ export async function savePushSubscription(
 		});
 }
 
+// ブラウザに残っている購読を、現在のユーザーが明示的に有効化したものとして
+// DB に保存済みか確認する。設定画面の表示だけで所有権を付け替えないための読み取り用。
+export async function ownsPushSubscription(
+	db: Db,
+	userId: string,
+	endpoint: string
+): Promise<boolean> {
+	if (endpoint.length === 0) return false;
+	const row = await db
+		.select({ id: pushSubscriptions.id })
+		.from(pushSubscriptions)
+		.where(and(eq(pushSubscriptions.endpoint, endpoint), eq(pushSubscriptions.userId, userId)))
+		.get();
+	return row !== undefined;
+}
+
 // このユーザー自身が所有する購読のみ削除する（他ユーザーの endpoint を指定しても
 // 何も起きない）。「この endpoint はもう購読されていない」という状態を実現する
 // 操作であり、対象行が最初から存在しない場合も目的の状態には既に達しているため

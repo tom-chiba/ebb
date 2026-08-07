@@ -2,7 +2,11 @@ import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createDb, eq, pushSubscriptions, type Db } from '@ebb/db';
 import { ValidationError } from './errors';
-import { deletePushSubscription, savePushSubscription } from './push-subscriptions';
+import {
+	deletePushSubscription,
+	ownsPushSubscription,
+	savePushSubscription
+} from './push-subscriptions';
 import { createTestUser } from './test-helpers';
 
 let db: Db;
@@ -122,5 +126,23 @@ describe('deletePushSubscription', () => {
 			.all();
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toMatchObject({ userId: otherUserId });
+	});
+});
+
+describe('ownsPushSubscription', () => {
+	it('returns true only when the endpoint belongs to the user', async () => {
+		await savePushSubscription(db, userId, 'https://push.example/a', 'p', 'a');
+
+		await expect(ownsPushSubscription(db, userId, 'https://push.example/a')).resolves.toBe(true);
+		await expect(ownsPushSubscription(db, otherUserId, 'https://push.example/a')).resolves.toBe(
+			false
+		);
+	});
+
+	it('returns false for a missing or empty endpoint', async () => {
+		await expect(ownsPushSubscription(db, userId, 'https://push.example/missing')).resolves.toBe(
+			false
+		);
+		await expect(ownsPushSubscription(db, userId, '')).resolves.toBe(false);
 	});
 });
