@@ -139,8 +139,10 @@ async function selectSubscriptionsByUserId(
 // 毎分重複送信し続けることになり、1件の欠落より遥かに害が大きい）。
 // 全滅かつ一部が一時的失敗（retryable）なら立てない。次の cron 実行が自然に再送する
 // （packages/push が単一購読前提で文書化した設計を、マルチ購読へ拡張したもの）。
-// 購読が0件の場合も立てる（送るあて先が無く、立てなければ二度と再送されないまま
-// 毎回この review を予算から消費し続ける）。
+// 購読が0件の場合も立てる（送るあて先が無いので送信予算 SEND_BUDGET は消費しないが、
+// 立てなければ毎回の SELECT で選ばれ続け、REVIEW_QUERY_LIMIT の枠を無駄に占有する。
+// 通知の許可を得ていない間に期限が来たメモは、その後許可しても通知されない
+// トレードオフを受け入れている）。
 function shouldMarkNotified(outcomes: PushSendResult['outcome'][]): boolean {
 	if (outcomes.length === 0) return true;
 	const anySent = outcomes.some((outcome) => outcome === 'sent');

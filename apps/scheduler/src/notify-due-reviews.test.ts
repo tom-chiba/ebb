@@ -307,6 +307,32 @@ describe('notifyDueReviews', () => {
 		expect((await reload(step1.id)).notifiedAt).toBeNull();
 	});
 
+	it('step 0 が完了済みなら、期限到来した step 1 が最小未完了 step として選ばれる', async () => {
+		// 実運用で最も普通に起こるケース（1回目の復習を終えた後、2回目が期限到来する）。
+		// minPendingStepSubquery が isNull(completedAt) で絞らずに min(step) を取ると、
+		// 完了済みの step 0 が含まれて minStep が常に 0 に固定され、step 1 が
+		// 二度と選ばれなくなる（受入条件・テスト網羅性レビューで指摘）。
+		const userId = await createTestUser(db);
+		const presetId = await createPreset(userId);
+		const [memo] = await db
+			.insert(memos)
+			.values({ userId, title: 'memo', content: 'c', intervalPresetId: presetId })
+			.returning();
+		if (!memo) throw new Error('fixture setup failed');
+		await addReview(memo.id, 0, {
+			scheduledAt: new Date(Date.now() - 5000),
+			completedAt: new Date(Date.now() - 3000)
+		});
+		const step1 = await addReview(memo.id, 1, { scheduledAt: new Date(Date.now() - 1000) });
+		await addSubscription(userId, 'https://push.example/a');
+
+		const summary = await notifyDueReviews(db, vapid);
+
+		expect(summary.reviewsSelected).toBe(1);
+		expect(sendPush).toHaveBeenCalledTimes(1);
+		expect((await reload(step1.id)).notifiedAt).not.toBeNull();
+	});
+
 	it('SELECT の上限（REVIEW_QUERY_LIMIT）を超える分は次回に回す', async () => {
 		const userId = await createTestUser(db);
 		// 購読を持たせず sendPush 呼び出しコストを避ける（この件数だと SEND_BUDGET の
