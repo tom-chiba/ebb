@@ -12,6 +12,11 @@ import {
 	setDefaultPresetForUser,
 	updateCustomPresetIntervals
 } from '$lib/server/interval-presets';
+import {
+	deletePushSubscription,
+	ownsPushSubscription,
+	savePushSubscription
+} from '$lib/server/push-subscriptions';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async (event) => {
@@ -27,32 +32,50 @@ export const load: PageServerLoad = async (event) => {
 		})),
 		defaultPresetId,
 		maxIntervalCount: MAX_INTERVAL_COUNT,
-		presetNameMaxLength: PRESET_NAME_MAX_LENGTH
+		presetNameMaxLength: PRESET_NAME_MAX_LENGTH,
+		// VAPID_PUBLIC_KEY 未設定を500にしてページ全体を落とすと、この設定画面に
+		// 同居しているプリセット管理（#18）まで通知機能の設定漏れに巻き込まれる。
+		// null を返し、通知セクション側だけを利用不可として表示する（設計レビューで指摘）。
+		vapidPublicKey: event.platform?.env.VAPID_PUBLIC_KEY ?? null
 	};
 };
 
 // ValidationError/NotFoundError/ConflictError をフォームアクションの fail() へ変換する。
 // handleDomainError（$lib/server/errors）は SvelteKit の error() で投げる前提
 // （load・+server.ts 向け）のため、フォームアクションではここで別途変換する。
+// プリセット系・push 系の両方から使う共通ヘルパーのため、NotFoundError のメッセージは
+// 呼び出し側が対象ドメインに応じて渡す（#19 でプリセット専用の固定文言だったものを
+// 汎用化した。設計レビューで指摘）。
 // action・extra をジェネリクスで受けることで、fail() の返り値がリテラル型
 // （action）と実際のプロパティ（extra の各キー）を保持する。string/Record<string,
 // unknown> に広げると、+page.svelte 側の `'name' in form` 等の判別が `unknown` に
 // しか narrowing できなくなり、型ガードが実質的に機能しなくなる（設計レビューで指摘）。
-function presetActionFail<A extends string, E extends Record<string, unknown>>(
+function formActionFail<A extends string, E extends Record<string, unknown>>(
 	err: unknown,
 	action: A,
-	extra: E
+	extra: E,
+	notFoundMessage = '見つかりません'
 ) {
 	if (err instanceof ValidationError) {
 		return fail(400, { action, message: err.message, ...extra });
 	}
 	if (err instanceof NotFoundError) {
-		return fail(404, { action, message: 'プリセットが見つかりません', ...extra });
+		return fail(404, { action, message: notFoundMessage, ...extra });
 	}
 	if (err instanceof ConflictError) {
 		return fail(409, { action, message: err.message, ...extra });
 	}
 	throw err;
+}
+
+// プリセット系アクション専用の薄いラッパー。NotFoundError のメッセージが
+// 全プリセットアクションで同じ固定文言のため、呼び出し箇所ごとの重複を避ける。
+function presetActionFail<A extends string, E extends Record<string, unknown>>(
+	err: unknown,
+	action: A,
+	extra: E
+) {
+	return formActionFail(err, action, extra, 'プリセットが見つかりません');
 }
 
 export const actions: Actions = {
@@ -141,5 +164,51 @@ export const actions: Actions = {
 			return presetActionFail(err, 'setDefault', { presetId });
 		}
 		return { action: 'setDefault', success: true };
+	},
+
+	subscribePush: async (event) => {
+		const { user, db } = requireAuthedDb(event);
+		const form = await event.request.formData();
+		const endpoint = form.get('endpoint');
+		const p256dh = form.get('p256dh');
+		const auth = form.get('auth');
+		if (typeof endpoint !== 'string' || typeof p256dh !== 'string' || typeof auth !== 'string') {
+			return fail(400, { action: 'subscribePush', message: '入力が不正です' });
+		}
+		try {
+			await savePushSubscription(db, user.id, endpoint, p256dh, auth);
+		} catch (err) {
+			// savePushSubscription は ValidationError しか投げないため、この
+			// NotFoundError 分岐には到達しない。到達しない以上メッセージの内容は
+			// 意味を持たないため、formActionFail の既定値をそのまま使う。
+			return formActionFail(err, 'subscribePush', {});
+		}
+		return { action: 'subscribePush', success: true };
+	},
+
+	checkPushSubscription: async (event) => {
+		const { user, db } = requireAuthedDb(event);
+		const form = await event.request.formData();
+		const endpoint = form.get('endpoint');
+		if (typeof endpoint !== 'string' || endpoint.length === 0) {
+			return fail(400, { action: 'checkPushSubscription', message: '入力が不正です' });
+		}
+		return {
+			action: 'checkPushSubscription',
+			subscribed: await ownsPushSubscription(db, user.id, endpoint)
+		};
+	},
+
+	// 冪等操作として扱う理由は $lib/server/push-subscriptions.ts の
+	// deletePushSubscription のコメントを参照。
+	unsubscribePush: async (event) => {
+		const { user, db } = requireAuthedDb(event);
+		const form = await event.request.formData();
+		const endpoint = form.get('endpoint');
+		if (typeof endpoint !== 'string') {
+			return fail(400, { action: 'unsubscribePush', message: '入力が不正です' });
+		}
+		await deletePushSubscription(db, user.id, endpoint);
+		return { action: 'unsubscribePush', success: true };
 	}
 };
