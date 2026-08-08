@@ -1663,6 +1663,85 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
   #20 のスコープでは行わない。実際にスケジューラから送信するのは #21 のため、
   計測はそちらに委ねる
 
+## scheduler での実送信 (#21)
+
+- **CPU 予算は「review の件数」ではなく「sendPush の呼び出し回数」で管理する**
+  （advisor によるレビューで指摘）。CPU を消費するのは crypto（ECDSA 署名 +
+  ECDH 鍵合意 + AES-GCM 暗号化）であり、その回数は review 件数ではなく
+  `review × その所有者の購読数`。#19 でユーザーは複数デバイスから購読できるため、
+  review 件数だけを LIMIT すると「1ユーザーが3台持っていれば1件の review で
+  3回の crypto 処理が走る」を無視してしまい、「大量に溜まった状態でも CPU 超過で
+  Worker が落ちない」という受け入れ条件を満たせない。`SEND_BUDGET`
+  （送信回数の予算）を主たる上限にし、review 単位で消費し、予算を超える
+  review に到達したら（部分送信はせず）その周期の処理を打ち切り、残りは
+  次回の cron に回す。SELECT 自体にも緩い上限（`REVIEW_QUERY_LIMIT`）を掛けるが、
+  これはクエリ・メモリを一定以上肥大化させないための副次的な上限に過ぎない
+- **具体的な `SEND_BUDGET` の値は未計測のまま保守的な仮値を置いている**。
+  #8/#20 は本番デプロイ後の実測（Workers Logs）をこの Issue に申し送っていたが、
+  このセッションでは本番デプロイを行っておらず実測できていない。本番デプロイ後に
+  実測し、必要なら値を調整すること
+  - Cloudflare 公式ドキュメント（developers.cloudflare.com/workers/platform/limits/）
+    で確認: **Free プランの Cron Trigger の CPU 時間制限も HTTP リクエストと同じ
+    10ms/呼び出し**（advisor の指摘で裏取りした。Cron Trigger 専用の別枠は無い）
+- **1ユーザーの購読数が `SEND_BUDGET` を超える場合、そのユーザーの review は
+  常に「予算不足」と判定され続け、事実上処理されない**（既知の限界）。
+  実運用で想定されるデバイス数を大きく超える値のため対応は行わない
+- **`notifiedAt` を立てる条件は「1件でも sent」または「retryable が1件も無い」**
+  （advisor によるレビューで指摘・修正）。当初案は「retryable が1件でもあれば
+  立てない」だったが、これだと一部の端末が sent・一部が retryable だった場合に
+  立てず、**成功済みの端末へ毎分重複送信し続ける**（一時的に落ちている push
+  サービスがあると、正常な端末への通知 storm になる）。受け入れ条件が明記するのは
+  「二度届かない」であり「全端末に必ず届く」ではないため、重複を許すより
+  「一部の端末への配信を今回だけ取りこぼす」方を安全側として選んだ：
+  - 全部 sent → 立てる
+  - 一部 sent + 一部 retryable → **立てる**（重複も storm も起こさない。
+    retryable だった端末はこの回を取りこぼす）
+  - sent ゼロ + retryable あり → 立てない（packages/push が単一購読前提で
+    文書化した「次の cron が自然に再送する」設計を、そのまま活かす）
+  - sent ゼロ + 全部 terminal（expired/invalid/rejected）→ 立てる
+    （再送しても無駄なため）
+  - 購読が0件 → 立てる（送り先が無く、立てなければ再送されないまま
+    毎回この review が予算を消費し続ける）
+- **通知の遷移先 URL は `/app/reviews/{reviewId}`**。packages/push の単体テストの
+  payload フィクスチャは `/app/memos/...` だったが、これは決定ではなくテスト用の
+  適当な値だった。`/app/reviews/[id]` は #17 で実装済みの「復習した」操作まで
+  実行できるページであり、かつ「期限切れ通知への防御」（#17 の
+  `getDueReviewDetail` が due 条件・現在の step を再検証する）が既に実装済みの
+  ため、古い通知から遷移しても安全に扱える
+- **cron の重複実行による二重送信（at-least-once）は意図的に受容し、ロック等の
+  対策は設けない**。`reviews.notifiedAt` の UPDATE に付けた `isNull` 条件は
+  同時実行同士が互いの更新を無意味に上書きしない（clobber 防止）ためだけの
+  ものであり、2つの実行が同じ行を同時に SELECT して二重送信すること自体は
+  防げない
+- **手元での動作確認には `--persist-to` でローカル永続化先を共有する必要がある**
+  （scheduler Worker の雛形（#5）の節で申し送っていた対応）。`apps/web` と
+  `apps/scheduler` は個別に `wrangler dev` すると別々の `.wrangler/state` を
+  持つため、`apps/web` で作った memo/review を `apps/scheduler` の cron から
+  読めない。同じ `--persist-to <dir>` を両方に渡すことで解消する
+  （このセッションではこの方法で実 D1 に対して SELECT・sendPush 呼び出し・
+  `notifiedAt` の UPDATE が実際に動くことを確認した）
+- **`apps/scheduler` に `@ebb/push` を追加した結果、`compatibility_flags` に
+  `nodejs_compat` が必要になった**（`@block65/webcrypto-web-push` が
+  `node:crypto` を参照するため。`apps/web` は既に持っていたが、`apps/scheduler`
+  は元々 D1 しか使わず不要だったため欠けていた）。`wrangler dev --test-scheduled`
+  での動作確認で初回に警告が出て気付いた。vitest-pool-workers 用の
+  `wrangler.test.jsonc` には最初から付けていたためテストでは検出できず、
+  本番相当の `wrangler.jsonc` を実際に起動して確認したことで見つかった
+- **`VAPID_PRIVATE_KEY` は Worker 単位の secret のため、`apps/web` に
+  設定済みでも `apps/scheduler` Worker には別途 `wrangler secret put
+VAPID_PRIVATE_KEY` が必要**（ユーザーが実行する必要がある。#19/#20 の
+  VAPID 関連の secret 投入と同様、このセッションでは未実行）
+- **実際の push 配信確認はこのセッションでは行っていない**（#8/#19/#20 と同じ
+  制約：開発用サンドボックスは outbound network を許可リスト方式で制限しており、
+  実際の push サービスへの `fetch` が届かない）。検証済みなのは、実 D1
+  （`--persist-to` で共有した本物の SQLite）に対して「期限到来・未完了・未通知の
+  review を正しく選び、購読を JOIN し、`sendPush` を呼び、結果に応じて
+  `notifiedAt` を更新する」というオーケストレーション全体が動くことと、
+  無効な購読（テスト用の適当な `p256dh`/`auth`）に対して `sendPush` が
+  正しく `invalid`/`retryable` を返して処理が継続することのみ。実際の
+  ブラウザへの通知表示は、ユーザー自身の環境で本番デプロイ後に確認する
+  必要がある
+
 ## 開発の進め方
 
 - リポジトリ: public
