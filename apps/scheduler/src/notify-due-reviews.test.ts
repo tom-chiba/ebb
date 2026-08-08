@@ -279,6 +279,77 @@ describe('notifyDueReviews', () => {
 		}
 	});
 
+	it('購読数が SEND_BUDGET とちょうど一致する場合は処理される（境界値）', async () => {
+		const userId = await createTestUser(db);
+		const { review } = await createDueMemoWithReview(userId);
+		await Promise.all(
+			Array.from({ length: SEND_BUDGET }, (_, i) =>
+				addSubscription(userId, `https://push.example/boundary-${i}`)
+			)
+		);
+
+		const summary = await notifyDueReviews(db, vapid);
+
+		expect(summary.sendsAttempted).toBe(SEND_BUDGET);
+		expect(summary.reviewsProcessed).toBe(1);
+		expect(summary.reviewsDeferred).toBe(0);
+		expect((await reload(review.id)).notifiedAt).not.toBeNull();
+	});
+
+	it('scheduledAt が同時刻なら id 昇順で安定した順序になる（tie-breaker）', async () => {
+		const sameTime = new Date(Date.now() - 1000);
+		const userX = await createTestUser(db);
+		const userY = await createTestUser(db);
+		const { review: reviewX } = await createDueMemoWithReview(userX, { scheduledAt: sameTime });
+		const { review: reviewY } = await createDueMemoWithReview(userY, { scheduledAt: sameTime });
+		// どちらも SEND_BUDGET ぶんの購読を持たせ、budget 上どちらか1件しか処理できない
+		// 状況を作る。tie-breaker が無いと順序が不定になり、どちらが処理されるか
+		// テストで固定できない。
+		await Promise.all(
+			Array.from({ length: SEND_BUDGET }, (_, i) =>
+				addSubscription(userX, `https://push.example/x-${i}`)
+			)
+		);
+		await Promise.all(
+			Array.from({ length: SEND_BUDGET }, (_, i) =>
+				addSubscription(userY, `https://push.example/y-${i}`)
+			)
+		);
+
+		await notifyDueReviews(db, vapid);
+
+		const [winner, loser] = reviewX.id < reviewY.id ? [reviewX, reviewY] : [reviewY, reviewX];
+		expect((await reload(winner.id)).notifiedAt).not.toBeNull();
+		expect((await reload(loser.id)).notifiedAt).toBeNull();
+	});
+
+	it('review 単位の予期しない例外（例: notifiedAt の UPDATE 失敗）があっても他の review の処理は継続する', async () => {
+		const userA = await createTestUser(db);
+		const userB = await createTestUser(db);
+		const { review: reviewA } = await createDueMemoWithReview(userA, {
+			scheduledAt: new Date(Date.now() - 2000)
+		});
+		const { review: reviewB } = await createDueMemoWithReview(userB, {
+			scheduledAt: new Date(Date.now() - 1000)
+		});
+		await addSubscription(userA, 'https://push.example/a');
+		await addSubscription(userB, 'https://push.example/b');
+		// sendPush 自体の例外は内側の try/catch（sendsFailed 加算）が拾うため、ここでは
+		// それとは別の経路（DB 更新失敗）を検証する。scheduledAt 昇順で reviewA が
+		// 先に処理されるため、1回目の db.update 呼び出しだけを失敗させる。
+		const updateSpy = vi.spyOn(db, 'update').mockImplementationOnce(() => {
+			throw new Error('db down');
+		});
+
+		const summary = await notifyDueReviews(db, vapid);
+
+		expect(summary.reviewsFailed).toBe(1);
+		expect(summary.reviewsProcessed).toBe(1);
+		expect((await reload(reviewA.id)).notifiedAt).toBeNull();
+		expect((await reload(reviewB.id)).notifiedAt).not.toBeNull();
+		updateSpy.mockRestore();
+	});
+
 	it('予算に収まらない review があっても、それより新しい他ユーザーの review の処理は妨げない', async () => {
 		// userA は SEND_BUDGET を超える購読数（常に予算不足と判定される）で最も古い。
 		// userB は1購読のみで、userA より新しい。break だと userA で処理が止まり

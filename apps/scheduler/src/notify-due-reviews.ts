@@ -37,7 +37,15 @@ export const SEND_BUDGET = 5;
 export type NotifyDueReviewsSummary = {
 	reviewsSelected: number;
 	reviewsProcessed: number;
+	// 送信予算（SEND_BUDGET）不足により今回処理しなかった件数。本番デプロイ後の
+	// Workers Logs での SEND_BUDGET 調整判断に使う値のため、reviewsFailed
+	// （予期しない例外）とは別カウンタにする。合流させると、ログの
+	// deferred=N だけでは「健全なスロットリング」か「DB 更新等の例外」かを
+	// 区別できず、調整判断を誤らせる（設計レビューで指摘・修正）。
 	reviewsDeferred: number;
+	// review 単位の予期しない例外（例: notifiedAt の UPDATE 失敗）により
+	// 今回処理し切れなかった件数。
+	reviewsFailed: number;
 	sendsAttempted: number;
 	sendsSucceeded: number;
 	sendsFailed: number;
@@ -171,6 +179,7 @@ export async function notifyDueReviews(
 		reviewsSelected: dueReviews.length,
 		reviewsProcessed: 0,
 		reviewsDeferred: 0,
+		reviewsFailed: 0,
 		sendsAttempted: 0,
 		sendsSucceeded: 0,
 		sendsFailed: 0
@@ -230,11 +239,11 @@ export async function notifyDueReviews(
 		} catch (err) {
 			// review 単位で失敗を握り、残りの review の処理を継続する
 			// （受け入れ条件: 1件の送信が失敗しても残りの送信は続行される）。
-			// notifiedAt は立たないため次回の cron 実行が再試行する（reviewsDeferred と
-			// 同じ「今回は処理し切れなかった」扱いにし、reviewsSelected ===
-			// reviewsProcessed + reviewsDeferred を常に保つ）。
+			// notifiedAt は立たないため次回の cron 実行が再試行する。reviewsDeferred
+			// （予算不足）とは別カウンタにして、reviewsSelected === reviewsProcessed +
+			// reviewsDeferred + reviewsFailed を常に保つ。
 			console.error(`[scheduler] review の通知処理に失敗 (review=${review.id}):`, err);
-			summary.reviewsDeferred += 1;
+			summary.reviewsFailed += 1;
 		}
 	}
 
