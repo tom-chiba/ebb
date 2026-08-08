@@ -1665,6 +1665,15 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
 
 ## scheduler での実送信 (#21)
 
+- **`reviewsDeferred`（送信予算不足でスキップ）と `reviewsFailed`（review 単位の
+  予期しない例外、例えば notifiedAt の UPDATE 失敗）は別カウンタにする**
+  （4回目の設計レビューで指摘・修正）。当初は両方を `reviewsDeferred` に
+  合流させていたが、`SEND_BUDGET` を本番デプロイ後に実測して調整する際、
+  ログの `deferred=N` だけでは「健全なスロットリングが機能している」のか
+  「DB 更新等が例外を投げている」のかを区別できず、調整判断を誤らせる
+  （前者なら `SEND_BUDGET` を上げる調整で済むが、後者は別途原因調査が必要）。
+  `reviewsSelected === reviewsProcessed + reviewsDeferred + reviewsFailed` を
+  常に保つ
 - **CPU 予算は「review の件数」ではなく「sendPush の呼び出し回数」で管理する**
   （advisor によるレビューで指摘）。CPU を消費するのは crypto（ECDSA 署名 +
   ECDH 鍵合意 + AES-GCM 暗号化）であり、その回数は review 件数ではなく
