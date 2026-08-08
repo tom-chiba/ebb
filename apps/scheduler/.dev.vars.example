@@ -1,0 +1,2 @@
+VAPID_PRIVATE_KEY=
+# apps/web/.dev.vars.example と同じ VAPID 鍵ペアの秘密鍵を使う（公開鍵は wrangler.jsonc の vars で共有済み）。

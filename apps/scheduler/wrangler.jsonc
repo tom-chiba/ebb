@@ -2,8 +2,13 @@
 	"name": "ebb-scheduler",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-08-04",
+	"compatibility_flags": ["nodejs_compat"],
 	"observability": {
 		"enabled": true
+	},
+	"vars": {
+		"VAPID_PUBLIC_KEY": "BFknaCFpg1G3yB8-5zuBGvgxe4C0yh_4qT1-JNV5sapFB8IOTuc6dacHDSRbZyOHAAGqEpKqMkx6AedzUeBvB4I",
+		"VAPID_SUBJECT": "mailto:tomoki-chiba@gaji.jp"
 	},
 	"triggers": {
 		"crons": ["* * * * *"]
