@@ -8,9 +8,15 @@
 		"./package.json": "./package.json"
 	},
 	"scripts": {
-		"check": "tsc --noEmit"
+		"check": "tsc --noEmit",
+		"test": "vitest run"
+	},
+	"dependencies": {
+		"@block65/webcrypto-web-push": "^1.0.2"
 	},
 	"devDependencies": {
-		"typescript": "catalog:"
+		"@cloudflare/workers-types": "^4.20260702.1",
+		"typescript": "catalog:",
+		"vitest": "^3.0.5"
 	}
 }

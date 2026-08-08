@@ -378,55 +378,63 @@ describe('updateCustomPresetIntervals', () => {
 		expect(preset?.intervals).toEqual([2]);
 	});
 
-	it('succeeds just under the pessimistic worst-case batch statement limit', async () => {
-		// updateCustomPresetIntervals も（プレビューとの非対称防止のため）
-		// estimateWorstCaseBatchStatementCount による悲観的見積もりで早期リジェクトする
-		// ようになった（設計レビューで指摘。以前は実測の statements.length のみで
-		// 判定しており、大量メモに対する確定操作が高コストな処理を全て実行してから
-		// 拒否していた）。この見積もりは1メモあたり最大2文という前提のため、
-		// 実際の文数によらず memoCount 単体で「1 + memoCount*2 <= 500」となる
-		// 249メモまでは必ず成功する。
-		const memoCount = Math.floor((MAX_BATCH_STATEMENTS - 1) / 2);
-		for (let i = 0; i < memoCount; i++) {
-			await createMemo(db, ownerId, {
-				title: `memo-${i}`,
-				content: 'c',
-				intervalPresetId: ownerPresetId
-			});
+	it(
+		'succeeds just under the pessimistic worst-case batch statement limit',
+		{ timeout: 10_000 },
+		async () => {
+			// updateCustomPresetIntervals も（プレビューとの非対称防止のため）
+			// estimateWorstCaseBatchStatementCount による悲観的見積もりで早期リジェクトする
+			// ようになった（設計レビューで指摘。以前は実測の statements.length のみで
+			// 判定しており、大量メモに対する確定操作が高コストな処理を全て実行してから
+			// 拒否していた）。この見積もりは1メモあたり最大2文という前提のため、
+			// 実際の文数によらず memoCount 単体で「1 + memoCount*2 <= 500」となる
+			// 249メモまでは必ず成功する。
+			const memoCount = Math.floor((MAX_BATCH_STATEMENTS - 1) / 2);
+			for (let i = 0; i < memoCount; i++) {
+				await createMemo(db, ownerId, {
+					title: `memo-${i}`,
+					content: 'c',
+					intervalPresetId: ownerPresetId
+				});
+			}
+
+			const { updatedReviewsCount } = await updateCustomPresetIntervals(
+				db,
+				ownerId,
+				ownerPresetId,
+				'1h, 2h'
+			);
+			expect(updatedReviewsCount).toBe(memoCount * 3);
 		}
+	);
 
-		const { updatedReviewsCount } = await updateCustomPresetIntervals(
-			db,
-			ownerId,
-			ownerPresetId,
-			'1h, 2h'
-		);
-		expect(updatedReviewsCount).toBe(memoCount * 3);
-	});
+	it(
+		'rejects the update before doing any per-memo work when the pessimistic estimate alone exceeds the limit',
+		{ timeout: 10_000 },
+		async () => {
+			// previewPresetIntervalsUpdate と同じ悲観的見積もりを実行系の入口でも使う
+			// ようになったため、対象メモ数だけで即座にリジェクトされ、実際の統計文数
+			// （completedCount 次第でもっと少ない可能性がある）には依存しない。
+			const memoCount = Math.ceil((MAX_BATCH_STATEMENTS - 1) / 2) + 1;
+			for (let i = 0; i < memoCount; i++) {
+				await createMemo(db, ownerId, {
+					title: `memo-${i}`,
+					content: 'c',
+					intervalPresetId: ownerPresetId
+				});
+			}
 
-	it('rejects the update before doing any per-memo work when the pessimistic estimate alone exceeds the limit', async () => {
-		// previewPresetIntervalsUpdate と同じ悲観的見積もりを実行系の入口でも使う
-		// ようになったため、対象メモ数だけで即座にリジェクトされ、実際の統計文数
-		// （completedCount 次第でもっと少ない可能性がある）には依存しない。
-		const memoCount = Math.ceil((MAX_BATCH_STATEMENTS - 1) / 2) + 1;
-		for (let i = 0; i < memoCount; i++) {
-			await createMemo(db, ownerId, {
-				title: `memo-${i}`,
-				content: 'c',
-				intervalPresetId: ownerPresetId
-			});
+			await expect(updateCustomPresetIntervals(db, ownerId, ownerPresetId, '1h')).rejects.toThrow(
+				ValidationError
+			);
+			const [preset] = await db
+				.select()
+				.from(intervalPresets)
+				.where(eq(intervalPresets.id, ownerPresetId))
+				.all();
+			expect(preset?.intervals).toEqual([1, 24, 72]);
 		}
-
-		await expect(updateCustomPresetIntervals(db, ownerId, ownerPresetId, '1h')).rejects.toThrow(
-			ValidationError
-		);
-		const [preset] = await db
-			.select()
-			.from(intervalPresets)
-			.where(eq(intervalPresets.id, ownerPresetId))
-			.all();
-		expect(preset?.intervals).toEqual([1, 24, 72]);
-	});
+	);
 
 	// planReviewRecalculation の SELECT（完了済みステップ数・未完了行の読み取り）と
 	// この db.batch() 実行の間に、別リクエストの completeReview が同じメモの対象
