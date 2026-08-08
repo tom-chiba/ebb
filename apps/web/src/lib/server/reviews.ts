@@ -51,6 +51,9 @@ export interface CompletedReview {
 // due 判定（scheduledAt <= now）はこのサブクエリの外で行う。中に入れると
 // 「期限が来ている行の中での最小 step」になり、期限前の若い step を飛ばして
 // 期限切れの後続 step を表示しうる（advisor 指摘）。
+// **apps/scheduler/src/notify-due-reviews.ts の minPendingStepSubquery は
+// この関数と同じロジックの複製**（#21。apps/scheduler は apps/web に依存できず
+// import で共有できないため）。この不変条件を変更するときは両方を確認すること。
 function minPendingStepSubquery(db: Db) {
 	return db
 		.select({

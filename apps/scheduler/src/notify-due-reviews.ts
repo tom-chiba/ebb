@@ -50,16 +50,17 @@ type DueReviewRow = {
 	userId: string;
 };
 
-type SubscriptionRow = PushSubscriptionRecord & { userId: string };
-
 // メモごとの「未完了の最小 step」を1行だけ持つサブクエリ。apps/web の
-// listDueReviews（apps/web/src/lib/server/reviews.ts）と同じ不変条件
-// （#17 が確定させた「常に最小の未完了 step からのみ通知・操作できる」）をここでも
-// 適用する。reviews はメモ作成時に全 step 分が一括生成されるため、ユーザーが長期間
-// 操作しないと同じメモの複数 step が同時に期限到来・未通知になり得る。この
-// サブクエリを経由しないと、非最小 step にも通知が送られ、その通知の遷移先
-// `/app/reviews/{id}` を開くと `getDueReviewDetail` の `assertIsCurrentStep` が
-// `ConflictError` になる（設計レビューで指摘）。
+// listDueReviews（apps/web/src/lib/server/reviews.ts の minPendingStepSubquery）と
+// 同じ不変条件（#17 が確定させた「常に最小の未完了 step からのみ通知・操作できる」）
+// をここでも適用する。**両者は同じロジックの複製であり、片方を直すときはもう片方も
+// 確認すること**（apps/web は apps/scheduler に依存できず、逆に apps/scheduler は
+// apps/web に依存できないため import で共有できない。設計レビューで指摘・確認済み）。
+// reviews はメモ作成時に全 step 分が一括生成されるため、ユーザーが長期間操作しないと
+// 同じメモの複数 step が同時に期限到来・未通知になり得る。このサブクエリを経由しないと、
+// 非最小 step にも通知が送られ、その通知の遷移先 `/app/reviews/{id}` を開くと
+// `getDueReviewDetail` の `assertIsCurrentStep` が `ConflictError` になる
+// （設計レビューで指摘）。
 function minPendingStepSubquery(db: Db) {
 	return db
 		.select({
@@ -111,8 +112,8 @@ async function selectDueReviews(db: Db, now: Date): Promise<DueReviewRow[]> {
 async function selectSubscriptionsByUserId(
 	db: Db,
 	userIds: string[]
-): Promise<Map<string, SubscriptionRow[]>> {
-	const byUserId = new Map<string, SubscriptionRow[]>();
+): Promise<Map<string, PushSubscriptionRecord[]>> {
+	const byUserId = new Map<string, PushSubscriptionRecord[]>();
 	if (userIds.length === 0) return byUserId;
 
 	const rows = await db
@@ -125,10 +126,12 @@ async function selectSubscriptionsByUserId(
 		.from(pushSubscriptions)
 		.where(inArray(pushSubscriptions.userId, userIds));
 
-	for (const row of rows) {
-		const list = byUserId.get(row.userId) ?? [];
-		list.push(row);
-		byUserId.set(row.userId, list);
+	// グルーピング後は userId は Map のキーにのみ必要で、値（sendPush に渡す
+	// PushSubscriptionRecord）には含めない。
+	for (const { userId, ...subscription } of rows) {
+		const list = byUserId.get(userId) ?? [];
+		list.push(subscription);
+		byUserId.set(userId, list);
 	}
 	return byUserId;
 }

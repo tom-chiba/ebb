@@ -133,6 +133,22 @@ describe('notifyDueReviews', () => {
 		expect((await reload(alreadyNotified.id)).notifiedAt).toEqual(alreadyNotified.notifiedAt);
 	});
 
+	it('アーカイブ済みメモの review は対象にしない', async () => {
+		// archiveMemo 経由なら未完了 reviews は削除されるため理屈上は発生しないが、
+		// apps/web/src/lib/server/reviews.test.ts の listDueReviews のテストと同じ
+		// パターンで、その不変条件に依存していないこと自体を直接確認する。
+		const userId = await createTestUser(db);
+		const { memo, review } = await createDueMemoWithReview(userId);
+		await db.update(memos).set({ archivedAt: new Date() }).where(eq(memos.id, memo.id));
+		await addSubscription(userId, 'https://push.example/a');
+
+		const summary = await notifyDueReviews(db, vapid);
+
+		expect(summary.reviewsSelected).toBe(0);
+		expect(sendPush).not.toHaveBeenCalled();
+		expect((await reload(review.id)).notifiedAt).toBeNull();
+	});
+
 	it('memoId・タイトル・復習ページへの URL を payload に渡す', async () => {
 		const userId = await createTestUser(db);
 		const { memo, review } = await createDueMemoWithReview(userId, { title: '復習タイトル' });
@@ -202,9 +218,11 @@ describe('notifyDueReviews', () => {
 		const { review } = await createDueMemoWithReview(userId);
 		await addSubscription(userId, 'https://push.example/a');
 
-		await notifyDueReviews(db, vapid);
+		const summary = await notifyDueReviews(db, vapid);
 
 		expect((await reload(review.id)).notifiedAt).not.toBeNull();
+		expect(summary.sendsFailed).toBe(1);
+		expect(summary.sendsSucceeded).toBe(0);
 	});
 
 	it('sendPush が例外を投げても他の送信・他の review の処理を止めない', async () => {
@@ -226,6 +244,8 @@ describe('notifyDueReviews', () => {
 
 		expect(sendPush).toHaveBeenCalledTimes(2);
 		expect(summary.reviewsProcessed).toBe(2);
+		expect(summary.sendsFailed).toBe(1);
+		expect(summary.sendsSucceeded).toBe(1);
 		expect((await reload(reviewA.id)).notifiedAt).toBeNull();
 		expect((await reload(reviewB.id)).notifiedAt).not.toBeNull();
 	});
