@@ -12,7 +12,7 @@ import {
 } from '@ebb/db';
 import type { PushSendResult, VapidConfig } from '@ebb/push';
 import { createTestUser } from '../test/test-helpers';
-import { notifyDueReviews } from './notify-due-reviews';
+import { notifyDueReviews, REVIEW_QUERY_LIMIT, SEND_BUDGET } from './notify-due-reviews';
 
 const { sendPush } = vi.hoisted(() => ({ sendPush: vi.fn() }));
 vi.mock('@ebb/push', () => ({ sendPush }));
@@ -75,6 +75,27 @@ async function createDueMemoWithReview(
 		.returning();
 	if (!review) throw new Error('fixture setup failed');
 	return { memo, review };
+}
+
+// 同じメモに複数の未完了 review（step）を直接作る。createDueMemoWithReview は
+// 常に step 0 を1件しか作らないため、最小未完了 step 以外が選ばれないことを
+// 確認するテスト用に使う。
+async function addReview(
+	memoId: string,
+	step: number,
+	overrides: { scheduledAt?: Date; completedAt?: Date } = {}
+) {
+	const [review] = await db
+		.insert(reviews)
+		.values({
+			memoId,
+			step,
+			scheduledAt: overrides.scheduledAt ?? new Date(Date.now() - 1000),
+			completedAt: overrides.completedAt
+		})
+		.returning();
+	if (!review) throw new Error('fixture setup failed');
+	return review;
 }
 
 async function addSubscription(userId: string, endpoint: string) {
@@ -210,12 +231,14 @@ describe('notifyDueReviews', () => {
 	});
 
 	it('送信予算を使い切ったら残りの review は次回に回す（部分送信しない）', async () => {
-		// SEND_BUDGET は 5。2件購読 x 3ユーザー = 6件は予算を超える。
-		const users = await Promise.all([createTestUser(db), createTestUser(db), createTestUser(db)]);
+		// 2件購読 x 3ユーザー = 6件は SEND_BUDGET を超える。
+		const perUserSubscriptions = 2;
+		const userCount = Math.ceil(SEND_BUDGET / perUserSubscriptions) + 1;
+		const users = await Promise.all(Array.from({ length: userCount }, () => createTestUser(db)));
 		const dueReviews = [];
 		for (const [i, userId] of users.entries()) {
 			const { review } = await createDueMemoWithReview(userId, {
-				scheduledAt: new Date(Date.now() - (3 - i) * 1000)
+				scheduledAt: new Date(Date.now() - (userCount - i) * 1000)
 			});
 			dueReviews.push(review);
 			await addSubscription(userId, `https://push.example/${userId}-1`);
@@ -224,11 +247,76 @@ describe('notifyDueReviews', () => {
 
 		const summary = await notifyDueReviews(db, vapid);
 
-		expect(summary.sendsAttempted).toBe(4);
-		expect(summary.reviewsProcessed).toBe(2);
+		const processedCount = Math.floor(SEND_BUDGET / perUserSubscriptions);
+		expect(summary.sendsAttempted).toBe(processedCount * perUserSubscriptions);
+		expect(summary.reviewsProcessed).toBe(processedCount);
+		expect(summary.reviewsDeferred).toBe(userCount - processedCount);
+		for (let i = 0; i < processedCount; i++) {
+			expect((await reload(dueReviews[i]!.id)).notifiedAt).not.toBeNull();
+		}
+		for (let i = processedCount; i < userCount; i++) {
+			expect((await reload(dueReviews[i]!.id)).notifiedAt).toBeNull();
+		}
+	});
+
+	it('予算に収まらない review があっても、それより新しい他ユーザーの review の処理は妨げない', async () => {
+		// userA は SEND_BUDGET を超える購読数（常に予算不足と判定される）で最も古い。
+		// userB は1購読のみで、userA より新しい。break だと userA で処理が止まり
+		// userB が永久に処理されなくなる（正確性レビューで指摘・修正）。
+		const userA = await createTestUser(db);
+		const userB = await createTestUser(db);
+		const { review: reviewA } = await createDueMemoWithReview(userA, {
+			scheduledAt: new Date(Date.now() - 2000)
+		});
+		const { review: reviewB } = await createDueMemoWithReview(userB, {
+			scheduledAt: new Date(Date.now() - 1000)
+		});
+		await Promise.all(
+			Array.from({ length: SEND_BUDGET + 1 }, (_, i) =>
+				addSubscription(userA, `https://push.example/over-budget-${i}`)
+			)
+		);
+		await addSubscription(userB, 'https://push.example/b');
+
+		const summary = await notifyDueReviews(db, vapid);
+
 		expect(summary.reviewsDeferred).toBe(1);
-		expect((await reload(dueReviews[0]!.id)).notifiedAt).not.toBeNull();
-		expect((await reload(dueReviews[1]!.id)).notifiedAt).not.toBeNull();
-		expect((await reload(dueReviews[2]!.id)).notifiedAt).toBeNull();
+		expect(summary.reviewsProcessed).toBe(1);
+		expect((await reload(reviewA.id)).notifiedAt).toBeNull();
+		expect((await reload(reviewB.id)).notifiedAt).not.toBeNull();
+	});
+
+	it('メモごとに最小の未完了 step の review だけを対象にする（#17 の不変条件）', async () => {
+		const userId = await createTestUser(db);
+		const presetId = await createPreset(userId);
+		const [memo] = await db
+			.insert(memos)
+			.values({ userId, title: 'memo', content: 'c', intervalPresetId: presetId })
+			.returning();
+		if (!memo) throw new Error('fixture setup failed');
+		// 長期間放置され、step 0（最小の未完了 step）と step 1 が両方期限到来・未通知。
+		const step0 = await addReview(memo.id, 0, { scheduledAt: new Date(Date.now() - 2000) });
+		const step1 = await addReview(memo.id, 1, { scheduledAt: new Date(Date.now() - 1000) });
+		await addSubscription(userId, 'https://push.example/a');
+
+		const summary = await notifyDueReviews(db, vapid);
+
+		expect(summary.reviewsSelected).toBe(1);
+		expect(sendPush).toHaveBeenCalledTimes(1);
+		expect((await reload(step0.id)).notifiedAt).not.toBeNull();
+		expect((await reload(step1.id)).notifiedAt).toBeNull();
+	});
+
+	it('SELECT の上限（REVIEW_QUERY_LIMIT）を超える分は次回に回す', async () => {
+		const userId = await createTestUser(db);
+		// 購読を持たせず sendPush 呼び出しコストを避ける（この件数だと SEND_BUDGET の
+		// 検証ではなく REVIEW_QUERY_LIMIT 自体の検証にしたいため）。
+		for (let i = 0; i < REVIEW_QUERY_LIMIT + 1; i++) {
+			await createDueMemoWithReview(userId, { scheduledAt: new Date(Date.now() - 1000 - i) });
+		}
+
+		const summary = await notifyDueReviews(db, vapid);
+
+		expect(summary.reviewsSelected).toBe(REVIEW_QUERY_LIMIT);
 	});
 });
