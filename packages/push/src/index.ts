@@ -29,7 +29,7 @@ export type VapidConfig = {
 // 全購読が誤って削除されかねないため、意図的に区別する。
 // 「それ以外」は buildPushPayload 自体が失敗したか（`invalid`。subscription
 // または VAPID 鍵のどちらの形式が不正なのかは区別しない）、push サービスが
-// 404/410/429/5xx 以外のステータスを返したか（`rejected`。その送信固有の
+// 404/408/410/429/5xx 以外のステータスを返したか（`rejected`。その送信固有の
 // 問題）で区別する。`invalid` は「1件の購読だけがおかしい」場合と「VAPID
 // 鍵の設定自体がおかしく全件が同じ理由で失敗する」場合の両方を含み得る
 // （issue #20 が求める分類は3種類 + 成功のため、ここでは追加の判別子は設けない。
@@ -155,7 +155,7 @@ export async function sendPush(
 	if (response.status === 404 || response.status === 410) {
 		return { outcome: 'expired' };
 	}
-	if (response.status === 429 || response.status >= 500) {
+	if (response.status === 408 || response.status === 429 || response.status >= 500) {
 		return { outcome: 'retryable' };
 	}
 	return { outcome: 'rejected', status: response.status };

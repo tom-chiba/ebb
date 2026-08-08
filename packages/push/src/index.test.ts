@@ -93,7 +93,7 @@ describe('sendPush', () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
-	it.each([429, 500, 503])(
+	it.each([408, 429, 500, 503])(
 		'%i を返したら retryable になる（自身はリトライしない）',
 		async (status) => {
 			const fetchMock = mockFetchResolvedWith(status);
