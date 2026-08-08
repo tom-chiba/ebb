@@ -1672,10 +1672,19 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
   review 件数だけを LIMIT すると「1ユーザーが3台持っていれば1件の review で
   3回の crypto 処理が走る」を無視してしまい、「大量に溜まった状態でも CPU 超過で
   Worker が落ちない」という受け入れ条件を満たせない。`SEND_BUDGET`
-  （送信回数の予算）を主たる上限にし、review 単位で消費し、予算を超える
-  review に到達したら（部分送信はせず）その周期の処理を打ち切り、残りは
-  次回の cron に回す。SELECT 自体にも緩い上限（`REVIEW_QUERY_LIMIT`）を掛けるが、
-  これはクエリ・メモリを一定以上肥大化させないための副次的な上限に過ぎない
+  （送信回数の予算）を主たる上限にし、review 単位で消費する。SELECT 自体にも
+  緩い上限（`REVIEW_QUERY_LIMIT`）を掛けるが、これはクエリ・メモリを一定以上
+  肥大化させないための副次的な上限に過ぎない
+- **予算を超える review に到達したら `continue`（その review だけスキップ）で、
+  `break`（それ以降の処理を丸ごと打ち切る）ではない**（正確性レビューで指摘・
+  修正）。当初は `break` にしていたが、`selectDueReviews` は scheduledAt 昇順の
+  ため、1ユーザーの購読数が `SEND_BUDGET` を超える review が一度先頭（最古）に
+  来ると、それ以降の**すべての** cron 実行が毎回そこで停止し、それより新しい
+  **他ユーザー**の通知まで永久に止まってしまう（該当 review はユーザーが
+  「復習した」操作をするまで `completedAt` が付かず、SELECT 対象から外れない
+  ため、放置される限り毎回先頭に居座り続ける）。`continue` であれば、そのユーザー
+  の review だけが毎回スキップされる（既知の限界。次の指摘のとおり対応は行わない）
+  に留まり、他ユーザーの通知は妨げない
 - **具体的な `SEND_BUDGET` の値は未計測のまま保守的な仮値を置いている**。
   #8/#20 は本番デプロイ後の実測（Workers Logs）をこの Issue に申し送っていたが、
   このセッションでは本番デプロイを行っておらず実測できていない。本番デプロイ後に
@@ -1686,6 +1695,24 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
 - **1ユーザーの購読数が `SEND_BUDGET` を超える場合、そのユーザーの review は
   常に「予算不足」と判定され続け、事実上処理されない**（既知の限界）。
   実運用で想定されるデバイス数を大きく超える値のため対応は行わない
+- **`selectDueReviews` はメモごとに「未完了の最小 step」のみを対象にする**
+  （設計レビューで指摘・修正）。`reviews` はメモ作成時に全 step 分の
+  `scheduledAt` が baseTime から一括生成される（`packages/core` の
+  `nextReviewAt`）ため、ユーザーが長期間操作しないと同じメモの複数 step が
+  同時に期限到来・未完了・未通知になり得る。この不変条件（「常に最小の未完了
+  step からのみ通知・操作できる」）は #17 が `apps/web/src/lib/server/reviews.ts`
+  の `listDueReviews`/`getDueReviewDetail` で既に確定させているが、当初の
+  `selectDueReviews` はこれを見ずに条件だけで SELECT していた。これを見逃すと
+  非最小 step にも通知が送られ、通知の遷移先 `/app/reviews/{id}` を開くと
+  `getDueReviewDetail` の `assertIsCurrentStep` が `ConflictError` を返す
+  （「通知は届くが開けない」）ことに加え、本来アクションできない step が
+  `SEND_BUDGET` を無駄に消費する。`apps/web` と同じ `min(step) GROUP BY memoId`
+  のサブクエリを scheduler 側にも用意した（`apps/web` の関数を import せず
+  同じパターンを複製した。scheduler は apps/web に依存できないため）。同じ理由で
+  `apps/web` の `listDueReviews` が既に持っていた `memos.archivedAt` の除外と
+  `id` の tie-breaker（`scheduledAt` はミリ秒精度で同時刻の行が起こり得るため、
+  どの review が今回の `SEND_BUDGET` を使うかを実行ごとに安定させる）も
+  合わせて揃えた
 - **`notifiedAt` を立てる条件は「1件でも sent」または「retryable が1件も無い」**
   （advisor によるレビューで指摘・修正）。当初案は「retryable が1件でもあれば
   立てない」だったが、これだと一部の端末が sent・一部が retryable だった場合に
