@@ -1,16 +1,19 @@
-import { count, createDb, memos } from '@ebb/db';
+import { createDb } from '@ebb/db';
+import { readVapidConfig } from '@ebb/push';
+import { notifyDueReviews } from './notify-due-reviews';
 
 export default {
 	async scheduled(event, env) {
 		console.log(`[scheduler] fired at ${new Date(event.scheduledTime).toISOString()}`);
 		const db = createDb(env.DB);
 		try {
-			const rows = await db.select({ value: count() }).from(memos);
-			console.log(`[scheduler] memos rows: ${rows[0]?.value ?? 0}`);
-		} catch {
-			console.error(
-				'[scheduler] Failed to query D1. Has the migration been applied? (pnpm db:migrate:local)'
+			const vapid = readVapidConfig(env);
+			const summary = await notifyDueReviews(db, vapid, new Date(event.scheduledTime));
+			console.log(
+				`[scheduler] reviews: selected=${summary.reviewsSelected} processed=${summary.reviewsProcessed} deferred=${summary.reviewsDeferred} / sends: attempted=${summary.sendsAttempted} succeeded=${summary.sendsSucceeded} failed=${summary.sendsFailed}`
 			);
+		} catch (err) {
+			console.error('[scheduler] notifyDueReviews に失敗した:', err);
 		}
 	}
 } satisfies ExportedHandler<Env>;
