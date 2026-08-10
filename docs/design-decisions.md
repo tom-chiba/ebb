@@ -1628,12 +1628,9 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
     不足が検出されない（2回目の設計レビューで指摘）。#21 で `apps/scheduler` の
     `wrangler.jsonc` に `VAPID_*` を追加し `wrangler types` を再生成すれば、
     その時点から「渡し忘れ」もコンパイルで検出できるようになる
-- **リトライ方針: `sendPush` はリトライしない（1回のみ試行）**。Queues 不採用で
-  cron ポーリングのみの構成（L73。要注意点2（L57-58）は Queues 採用寄りの
-  初期メモで、要注意点7（L73）の「Queues 不採用」がそれを上書きした後の
-  最終決定）のため、`retryable` を返された呼び出し側が `reviews.notifiedAt`
-  を更新しなければ、次回の cron 実行（毎分）が自然に再送する。関数内に
-  指数バックオフ等を持たせる必要はない
+- **リトライ方針: `sendPush` 自身はリトライしない（1回のみ試行）**。呼び出し側が
+  `retryable` をどう扱うかは配送保証に応じて決める。#21 の scheduler は「同じ復習に
+  二度届かない」を優先し、応答喪失後の再送による重複を避けるため at-most-once とする
 - VAPID 鍵は呼び出し側から引数で渡す（テスト容易性のため、関数内部で
   環境変数を直接読まない）。ただし「環境変数から読む」という受け入れ条件は
   `readVapidConfig(env)` を別途 export し、env var 名をこの1箇所に集約して満たす
@@ -1690,9 +1687,10 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
   来ると、それ以降の**すべての** cron 実行が毎回そこで停止し、それより新しい
   **他ユーザー**の通知まで永久に止まってしまう（該当 review はユーザーが
   「復習した」操作をするまで `completedAt` が付かず、SELECT 対象から外れない
-  ため、放置される限り毎回先頭に居座り続ける）。`continue` であれば、そのユーザー
-  の review だけが毎回スキップされる（既知の限界。次の指摘のとおり対応は行わない）
-  に留まり、他ユーザーの通知は妨げない
+  ため、放置される限り毎回先頭に居座り続ける）。さらに deferred 行の
+  `notificationAttemptedAt` を更新して次回の SELECT では後方へ回す。`continue` だけでは、
+  予算超過行が `REVIEW_QUERY_LIMIT` 件あると SELECT 枠の外の他ユーザーを依然として
+  永久に止めるため（5回目のレビューで指摘・修正）
 - **具体的な `SEND_BUDGET` は保守的な値 5 とする**。CPU 実測は Issue #21 の
   完了条件に含めないことをユーザー確認済み。運用ログで CPU 超過が観測された場合は
   値を下げる
@@ -1720,22 +1718,12 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
   `id` の tie-breaker（`scheduledAt` はミリ秒精度で同時刻の行が起こり得るため、
   どの review が今回の `SEND_BUDGET` を使うかを実行ごとに安定させる）も
   合わせて揃えた
-- **`notifiedAt` を立てる条件は「1件でも sent」または「retryable が1件も無い」**
-  （advisor によるレビューで指摘・修正）。当初案は「retryable が1件でもあれば
-  立てない」だったが、これだと一部の端末が sent・一部が retryable だった場合に
-  立てず、**成功済みの端末へ毎分重複送信し続ける**（一時的に落ちている push
-  サービスがあると、正常な端末への通知 storm になる）。受け入れ条件が明記するのは
-  「二度届かない」であり「全端末に必ず届く」ではないため、重複を許すより
-  「一部の端末への配信を今回だけ取りこぼす」方を安全側として選んだ：
-  - 全部 sent → 立てる
-  - 一部 sent + 一部 retryable → **立てる**（重複も storm も起こさない。
-    retryable だった端末はこの回を取りこぼす）
-  - sent ゼロ + retryable あり → 立てない（packages/push が単一購読前提で
-    文書化した「次の cron が自然に再送する」設計を、そのまま活かす）
-  - sent ゼロ + 全部 terminal（expired/invalid/rejected）→ 立てる
-    （再送しても無駄なため）
-  - 購読が0件 → 立てる（送り先が無く、立てなければ再送されないまま
-    毎回この review が予算を消費し続ける）
+- **`notifiedAt` は外部送信を一度でも試行する review の claim 時に立て、その後は
+  `retryable` を含む結果にかかわらず維持する（at-most-once）**（5回目のレビューで
+  修正）。Push サービスが受理した後に応答だけ失われたケースと、受理前に失敗した
+  ケースを呼び出し側では判別できない。retryable 時に claim を解除すると前者を次回
+  cron が再送し、Issue #21 の「同じ復習について通知が二度届かない」に違反し得るため、
+  再試行による到達率より重複防止を優先する。購読が0件の場合も claim を維持する
 - **通知の遷移先 URL は `/app/reviews/{reviewId}`**。packages/push の単体テストの
   payload フィクスチャは `/app/memos/...` だったが、これは決定ではなくテスト用の
   適当な値だった。`/app/reviews/[id]` は #17 で実装済みの「復習した」操作まで
@@ -1745,12 +1733,12 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
 - **外部送信の前に `notifiedAt` を条件付き UPDATE し、並行 cron 間の原子的な
   claim として使う**。同じ review を SELECT した複数実行のうち、
   `WHERE notified_at IS NULL` の UPDATE に勝った1実行だけが `sendPush` へ進む。
-  全送信が retryable なら claim を解除して次回に回す。送信後に印を付ける方式では、
-  UPDATE の条件だけでは外部送信の重複を防げないため、順序を逆にした
-- **retryable の最終試行日時を `notificationAttemptedAt` に記録し、未試行 review を
-  次回の cron で先に処理する**。古い retryable が毎回 `SEND_BUDGET` を使い切っても、
-  後続の未試行 review が永久に飢餓しないようにする。未完了・未通知行用の部分
-  インデックスも同じ並び順で追加する
+  claim では `completed_at IS NULL` と `scheduled_at <= now` も再検証し、SELECT 後に
+  完了・再計算された review へ古い通知を送らない（5回目のレビューで指摘・修正）。
+  送信後に印を付ける方式では、UPDATE の条件だけでは外部送信の重複を防げないため、
+  順序を逆にした
+- **`notificationAttemptedAt` は deferred review を SELECT の後方へローテーションする
+  ために記録する**。未完了・未通知行用の部分インデックスも同じ並び順で追加する
 - **手元での動作確認には `--persist-to` でローカル永続化先を共有する必要がある**
   （scheduler Worker の雛形（#5）の節で申し送っていた対応）。`apps/web` と
   `apps/scheduler` は個別に `wrangler dev` すると別々の `.wrangler/state` を

@@ -79,8 +79,8 @@ export const reviews = sqliteTable(
 		scheduledAt: timestampMs('scheduled_at').notNull(),
 		completedAt: timestampMs('completed_at'),
 		notifiedAt: timestampMs('notified_at'),
-		// retryable な送信を未試行の review より後に回し、古い失敗行が毎分の送信予算を
-		// 独占し続けないための最終試行日時。送信前の claim 時に更新する。
+		// 送信予算不足で延期した review を未試行より後に回し、SELECT 上限の範囲外にある
+		// review を永久に飢餓させないための最終試行日時。claim・延期時に更新する。
 		notificationAttemptedAt: timestampMs('notification_attempted_at')
 	},
 	(table) => [
@@ -95,7 +95,7 @@ export const reviews = sqliteTable(
 		index('reviews_pending_scheduledAt_idx')
 			.on(table.scheduledAt)
 			.where(sql`${table.completedAt} is null and ${table.notifiedAt} is null`),
-		// scheduler は未試行（NULL）を先に、再試行対象を後に並べる。scheduled_at を
+		// scheduler は未試行（NULL）を先に、延期済みを後に並べる。scheduled_at を
 		// 第2キーにして、各グループ内では古い review から処理する。
 		index('reviews_pending_notificationAttemptedAt_scheduledAt_idx')
 			.on(table.notificationAttemptedAt, table.scheduledAt, table.id)

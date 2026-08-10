@@ -12,7 +12,12 @@ import {
 } from '@ebb/db';
 import type { PushSendResult, VapidConfig } from '@ebb/push';
 import { createTestUser } from '../test/test-helpers';
-import { notifyDueReviews, REVIEW_QUERY_LIMIT, SEND_BUDGET } from './notify-due-reviews';
+import {
+	claimDueReview,
+	notifyDueReviews,
+	REVIEW_QUERY_LIMIT,
+	SEND_BUDGET
+} from './notify-due-reviews';
 
 const { sendPush } = vi.hoisted(() => ({ sendPush: vi.fn() }));
 vi.mock('@ebb/push', () => ({ sendPush }));
@@ -187,45 +192,35 @@ describe('notifyDueReviews', () => {
 		expect((await reload(review.id)).notifiedAt).not.toBeNull();
 	});
 
-	it('全滅かつ retryable のみなら notifiedAt を立てず、次回に再送させる', async () => {
+	it('retryable でも claim を維持し、次回に重複送信しない', async () => {
 		sendPush.mockResolvedValue({ outcome: 'retryable' } satisfies PushSendResult);
 		const userId = await createTestUser(db);
 		const { review } = await createDueMemoWithReview(userId);
 		await addSubscription(userId, 'https://push.example/a');
 
 		await notifyDueReviews(db, vapid);
+		await notifyDueReviews(db, vapid, new Date(Date.now() + 1000));
 
-		expect((await reload(review.id)).notifiedAt).toBeNull();
+		expect(sendPush).toHaveBeenCalledTimes(1);
+		expect((await reload(review.id)).notifiedAt).not.toBeNull();
 		expect((await reload(review.id)).notificationAttemptedAt).not.toBeNull();
 	});
 
-	it('retryable が予算を使い切っても、次回は未試行の review を先に処理する', async () => {
-		sendPush.mockResolvedValue({ outcome: 'retryable' } satisfies PushSendResult);
-		const oldUsers = await Promise.all(
-			Array.from({ length: SEND_BUDGET }, () => createTestUser(db))
-		);
-		for (const [i, userId] of oldUsers.entries()) {
-			await createDueMemoWithReview(userId, {
-				scheduledAt: new Date(Date.now() - 10_000 - i)
-			});
-			await addSubscription(userId, `https://push.example/retry-${i}`);
-		}
-		const newUser = await createTestUser(db);
-		const { review: neverAttempted } = await createDueMemoWithReview(newUser, {
-			scheduledAt: new Date(Date.now() - 1000)
-		});
-		await addSubscription(newUser, 'https://push.example/never-attempted');
+	it('claim 時点で完了済みまたは期限前になった review を取得しない', async () => {
+		const userId = await createTestUser(db);
+		const { review: completed } = await createDueMemoWithReview(userId);
+		const { review: rescheduled } = await createDueMemoWithReview(userId);
+		const now = new Date();
+		await db.update(reviews).set({ completedAt: now }).where(eq(reviews.id, completed.id));
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(now.getTime() + 60_000) })
+			.where(eq(reviews.id, rescheduled.id));
 
-		await notifyDueReviews(db, vapid, new Date());
-		sendPush.mockClear();
-		await notifyDueReviews(db, vapid, new Date(Date.now() + 1000));
-
-		expect(sendPush).toHaveBeenCalledWith(
-			expect.objectContaining({ endpoint: 'https://push.example/never-attempted' }),
-			expect.anything(),
-			vapid
-		);
-		expect((await reload(neverAttempted.id)).notificationAttemptedAt).not.toBeNull();
+		expect(await claimDueReview(db, completed.id, now)).toEqual([]);
+		expect(await claimDueReview(db, rescheduled.id, now)).toEqual([]);
+		expect((await reload(completed.id)).notifiedAt).toBeNull();
+		expect((await reload(rescheduled.id)).notifiedAt).toBeNull();
 	});
 
 	it('並行実行でも同じ review への sendPush は1回だけ呼ぶ', async () => {
@@ -296,7 +291,9 @@ describe('notifyDueReviews', () => {
 		expect(summary.reviewsProcessed).toBe(2);
 		expect(summary.sendsFailed).toBe(1);
 		expect(summary.sendsSucceeded).toBe(1);
-		expect((await reload(reviewA.id)).notifiedAt).toBeNull();
+		// 応答喪失後の再送で重複しないよう、予期しない例外でも一度送信を試行した
+		// review の claim は維持する。
+		expect((await reload(reviewA.id)).notifiedAt).not.toBeNull();
 		expect((await reload(reviewB.id)).notifiedAt).not.toBeNull();
 	});
 
@@ -425,6 +422,40 @@ describe('notifyDueReviews', () => {
 		expect(summary.reviewsProcessed).toBe(1);
 		expect((await reload(reviewA.id)).notifiedAt).toBeNull();
 		expect((await reload(reviewB.id)).notifiedAt).not.toBeNull();
+	});
+
+	it('予算に恒久的に収まらない review が SELECT 上限を埋めても範囲外の他ユーザーを次回処理する', async () => {
+		const overBudgetUser = await createTestUser(db);
+		const normalUser = await createTestUser(db);
+		const firstRun = new Date();
+		for (let i = 0; i < REVIEW_QUERY_LIMIT; i++) {
+			await createDueMemoWithReview(overBudgetUser, {
+				scheduledAt: new Date(firstRun.getTime() - REVIEW_QUERY_LIMIT - i - 1000)
+			});
+		}
+		await Promise.all(
+			Array.from({ length: SEND_BUDGET + 1 }, (_, i) =>
+				addSubscription(overBudgetUser, `https://push.example/blocker-${i}`)
+			)
+		);
+		const { review: normalReview } = await createDueMemoWithReview(normalUser, {
+			scheduledAt: new Date(firstRun.getTime() - 1)
+		});
+		await addSubscription(normalUser, 'https://push.example/normal');
+
+		const firstSummary = await notifyDueReviews(db, vapid, firstRun);
+		expect(firstSummary.reviewsSelected).toBe(REVIEW_QUERY_LIMIT);
+		expect(firstSummary.reviewsDeferred).toBe(REVIEW_QUERY_LIMIT);
+		expect(sendPush).not.toHaveBeenCalled();
+
+		const secondSummary = await notifyDueReviews(db, vapid, new Date(firstRun.getTime() + 1000));
+		expect(secondSummary.reviewsProcessed).toBe(1);
+		expect(sendPush).toHaveBeenCalledWith(
+			expect.objectContaining({ endpoint: 'https://push.example/normal' }),
+			expect.anything(),
+			vapid
+		);
+		expect((await reload(normalReview.id)).notifiedAt).not.toBeNull();
 	});
 
 	it('メモごとに最小の未完了 step の review だけを対象にする（#17 の不変条件）', async () => {
