@@ -47,6 +47,9 @@ export type NotifyDueReviewsSummary = {
 	sendsAttempted: number;
 	sendsSucceeded: number;
 	sendsFailed: number;
+	expiredSubscriptions: number;
+	expiredSubscriptionsDeleted: number;
+	subscriptionCleanupFailed: number;
 };
 
 type DueReviewRow = {
@@ -55,6 +58,8 @@ type DueReviewRow = {
 	memoTitle: string;
 	userId: string;
 };
+
+type StoredPushSubscription = PushSubscriptionRecord & { id: string };
 
 async function selectDueReviews(db: Db, now: Date): Promise<DueReviewRow[]> {
 	const earlierReviews = alias(reviews, 'earlier_reviews');
@@ -104,12 +109,13 @@ async function selectDueReviews(db: Db, now: Date): Promise<DueReviewRow[]> {
 async function selectSubscriptionsByUserId(
 	db: Db,
 	userIds: string[]
-): Promise<Map<string, PushSubscriptionRecord[]>> {
-	const byUserId = new Map<string, PushSubscriptionRecord[]>();
+): Promise<Map<string, StoredPushSubscription[]>> {
+	const byUserId = new Map<string, StoredPushSubscription[]>();
 	if (userIds.length === 0) return byUserId;
 
 	const rows = await db
 		.select({
+			id: pushSubscriptions.id,
 			userId: pushSubscriptions.userId,
 			endpoint: pushSubscriptions.endpoint,
 			p256dh: pushSubscriptions.p256dh,
@@ -118,14 +124,32 @@ async function selectSubscriptionsByUserId(
 		.from(pushSubscriptions)
 		.where(inArray(pushSubscriptions.userId, userIds));
 
-	// グルーピング後は userId は Map のキーにのみ必要で、値（sendPush に渡す
-	// PushSubscriptionRecord）には含めない。
+	// グルーピング後は userId は Map のキーにのみ必要なので値には含めない。
+	// id は失効時に送信前と同じ行だけを削除するため保持する。
 	for (const { userId, ...subscription } of rows) {
 		const list = byUserId.get(userId) ?? [];
 		list.push(subscription);
 		byUserId.set(userId, list);
 	}
 	return byUserId;
+}
+
+async function deleteExpiredSubscription(
+	db: Db,
+	subscription: StoredPushSubscription
+): Promise<boolean> {
+	const deleted = await db
+		.delete(pushSubscriptions)
+		.where(
+			and(
+				eq(pushSubscriptions.id, subscription.id),
+				eq(pushSubscriptions.endpoint, subscription.endpoint),
+				eq(pushSubscriptions.p256dh, subscription.p256dh),
+				eq(pushSubscriptions.auth, subscription.auth)
+			)
+		)
+		.returning({ id: pushSubscriptions.id });
+	return deleted.length > 0;
 }
 
 // SELECT と UPDATE の間に完了・再計算が割り込んでも、古くなった候補を通知しないよう
@@ -164,13 +188,21 @@ export async function notifyDueReviews(
 		reviewsFailed: 0,
 		sendsAttempted: 0,
 		sendsSucceeded: 0,
-		sendsFailed: 0
+		sendsFailed: 0,
+		expiredSubscriptions: 0,
+		expiredSubscriptionsDeleted: 0,
+		subscriptionCleanupFailed: 0
 	};
 
 	let remainingBudget = SEND_BUDGET;
+	// selectSubscriptionsByUserId のスナップショットは DB から行を削除しても変わらない。
+	// 同一 cron 内の別 review で失効 endpoint へ再送しないため、その場でも除外する。
+	const expiredSubscriptionIds = new Set<string>();
 
 	for (const review of dueReviews) {
-		const subscriptions = subscriptionsByUserId.get(review.userId) ?? [];
+		const subscriptions = (subscriptionsByUserId.get(review.userId) ?? []).filter(
+			(subscription) => !expiredSubscriptionIds.has(subscription.id)
+		);
 
 		// この review だけ予算に収まらない。scheduledAt の古い順に処理しているため、
 		// 次回の cron 実行に回して他の（予算に収まる）review の処理は続ける。
@@ -216,8 +248,13 @@ export async function notifyDueReviews(
 			for (const subscription of subscriptions) {
 				summary.sendsAttempted += 1;
 				try {
+					const pushSubscription: PushSubscriptionRecord = {
+						endpoint: subscription.endpoint,
+						p256dh: subscription.p256dh,
+						auth: subscription.auth
+					};
 					const result = await sendPush(
-						subscription,
+						pushSubscription,
 						{ memoId: review.memoId, title: review.memoTitle, url: `/app/reviews/${review.id}` },
 						vapid
 					);
@@ -225,6 +262,31 @@ export async function notifyDueReviews(
 						summary.sendsSucceeded += 1;
 					} else {
 						summary.sendsFailed += 1;
+					}
+					if (result.outcome === 'expired') {
+						expiredSubscriptionIds.add(subscription.id);
+						summary.expiredSubscriptions += 1;
+						try {
+							if (await deleteExpiredSubscription(db, subscription)) {
+								summary.expiredSubscriptionsDeleted += 1;
+							} else {
+								// 送信中の再購読で鍵が更新されると、古い鍵を条件に含む DELETE は
+								// 0件になる。cron 開始時の古いスナップショットを使い続けると、
+								// 後続 review は送信対象0件のまま notifiedAt だけが立つため、
+								// 現在の購読を読み直して次の review から新しい鍵を使う。
+								const refreshed = await selectSubscriptionsByUserId(db, [review.userId]);
+								subscriptionsByUserId.set(review.userId, refreshed.get(review.userId) ?? []);
+								expiredSubscriptionIds.delete(subscription.id);
+							}
+						} catch (err) {
+							// 配信結果の集計や残りの送信は、購読の後始末失敗とは分離する。
+							// 次の cron で再び expired になれば削除を再試行できる。
+							console.error(
+								`[scheduler] 失効購読の削除に失敗 (subscription=${subscription.id}):`,
+								err
+							);
+							summary.subscriptionCleanupFailed += 1;
+						}
 					}
 				} catch (err) {
 					// sendPush は例外を投げない設計（packages/push）だが、呼び出し側の想定外の

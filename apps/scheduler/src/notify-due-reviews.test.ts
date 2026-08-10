@@ -270,6 +270,120 @@ describe('notifyDueReviews', () => {
 		expect(summary.sendsSucceeded).toBe(0);
 	});
 
+	it('404/410 で失効した購読を DB から削除する', async () => {
+		sendPush.mockResolvedValue({ outcome: 'expired' } satisfies PushSendResult);
+		const userId = await createTestUser(db);
+		await createDueMemoWithReview(userId);
+		await addSubscription(userId, 'https://push.example/expired');
+
+		const summary = await notifyDueReviews(db, vapid);
+
+		const subscriptions = await db
+			.select()
+			.from(pushSubscriptions)
+			.where(eq(pushSubscriptions.endpoint, 'https://push.example/expired'));
+		expect(subscriptions).toHaveLength(0);
+		expect(summary.expiredSubscriptions).toBe(1);
+		expect(summary.expiredSubscriptionsDeleted).toBe(1);
+		expect(summary.subscriptionCleanupFailed).toBe(0);
+	});
+
+	it('失効を検出した購読には同じ cron 内の別 review を再送しない', async () => {
+		sendPush.mockResolvedValue({ outcome: 'expired' } satisfies PushSendResult);
+		const userId = await createTestUser(db);
+		await createDueMemoWithReview(userId, { scheduledAt: new Date(Date.now() - 2000) });
+		await createDueMemoWithReview(userId, { scheduledAt: new Date(Date.now() - 1000) });
+		await addSubscription(userId, 'https://push.example/expired');
+
+		const summary = await notifyDueReviews(db, vapid);
+
+		expect(sendPush).toHaveBeenCalledTimes(1);
+		expect(summary.reviewsProcessed).toBe(2);
+		expect(summary.expiredSubscriptions).toBe(1);
+		expect(summary.expiredSubscriptionsDeleted).toBe(1);
+	});
+
+	it.each([
+		{ outcome: 'sent' },
+		{ outcome: 'retryable' },
+		{ outcome: 'invalid' },
+		{ outcome: 'rejected', status: 403 }
+	] satisfies PushSendResult[])('$outcome の購読は削除しない', async (result) => {
+		sendPush.mockResolvedValue(result);
+		const userId = await createTestUser(db);
+		await createDueMemoWithReview(userId);
+		await addSubscription(userId, `https://push.example/${result.outcome}`);
+
+		const summary = await notifyDueReviews(db, vapid);
+
+		const subscriptions = await db
+			.select()
+			.from(pushSubscriptions)
+			.where(eq(pushSubscriptions.endpoint, `https://push.example/${result.outcome}`));
+		expect(subscriptions).toHaveLength(1);
+		expect(summary.expiredSubscriptions).toBe(0);
+		expect(summary.expiredSubscriptionsDeleted).toBe(0);
+	});
+
+	it('送信中に同じ endpoint が再購読された場合は、新しい鍵を後続 review の送信に使う', async () => {
+		const userId = await createTestUser(db);
+		await createDueMemoWithReview(userId, { scheduledAt: new Date(Date.now() - 2000) });
+		await createDueMemoWithReview(userId, { scheduledAt: new Date(Date.now() - 1000) });
+		await addSubscription(userId, 'https://push.example/renewed');
+		sendPush
+			.mockImplementationOnce(async () => {
+				await db
+					.update(pushSubscriptions)
+					.set({ p256dh: 'renewed-p256dh', auth: 'renewed-auth' })
+					.where(eq(pushSubscriptions.endpoint, 'https://push.example/renewed'));
+				return { outcome: 'expired' } satisfies PushSendResult;
+			})
+			.mockResolvedValueOnce({ outcome: 'sent' } satisfies PushSendResult);
+
+		const summary = await notifyDueReviews(db, vapid);
+
+		const [subscription] = await db
+			.select()
+			.from(pushSubscriptions)
+			.where(eq(pushSubscriptions.endpoint, 'https://push.example/renewed'));
+		expect(subscription).toMatchObject({ p256dh: 'renewed-p256dh', auth: 'renewed-auth' });
+		expect(sendPush).toHaveBeenCalledTimes(2);
+		expect(sendPush).toHaveBeenNthCalledWith(
+			2,
+			{
+				endpoint: 'https://push.example/renewed',
+				p256dh: 'renewed-p256dh',
+				auth: 'renewed-auth'
+			},
+			expect.any(Object),
+			vapid
+		);
+		expect(summary.expiredSubscriptions).toBe(1);
+		expect(summary.expiredSubscriptionsDeleted).toBe(0);
+		expect(summary.sendsSucceeded).toBe(1);
+	});
+
+	it('失効購読の削除に失敗しても残りの送信を続け、削除失敗を別に集計する', async () => {
+		sendPush
+			.mockResolvedValueOnce({ outcome: 'expired' } satisfies PushSendResult)
+			.mockResolvedValueOnce({ outcome: 'sent' } satisfies PushSendResult);
+		const userId = await createTestUser(db);
+		await createDueMemoWithReview(userId);
+		await addSubscription(userId, 'https://push.example/expired');
+		await addSubscription(userId, 'https://push.example/healthy');
+		const deleteSpy = vi.spyOn(db, 'delete').mockImplementationOnce(() => {
+			throw new Error('db down');
+		});
+
+		const summary = await notifyDueReviews(db, vapid);
+		deleteSpy.mockRestore();
+
+		expect(sendPush).toHaveBeenCalledTimes(2);
+		expect(summary.sendsFailed).toBe(1);
+		expect(summary.sendsSucceeded).toBe(1);
+		expect(summary.subscriptionCleanupFailed).toBe(1);
+	});
+
 	it('sendPush が例外を投げても他の送信・他の review の処理を止めない', async () => {
 		const userA = await createTestUser(db);
 		const userB = await createTestUser(db);
