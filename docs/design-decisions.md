@@ -1665,15 +1665,14 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
 
 ## scheduler での実送信 (#21)
 
-- **`reviewsDeferred`（送信予算不足でスキップ）と `reviewsFailed`（review 単位の
-  予期しない例外、例えば notifiedAt の UPDATE 失敗）は別カウンタにする**
+- **`reviewsDeferred`（送信予算不足）、`reviewsContended`（並行実行が先に claim）、
+  `reviewsFailed`（review 単位の予期しない例外）は別カウンタにする**
   （4回目の設計レビューで指摘・修正）。当初は両方を `reviewsDeferred` に
   合流させていたが、`SEND_BUDGET` を本番デプロイ後に実測して調整する際、
   ログの `deferred=N` だけでは「健全なスロットリングが機能している」のか
   「DB 更新等が例外を投げている」のかを区別できず、調整判断を誤らせる
   （前者なら `SEND_BUDGET` を上げる調整で済むが、後者は別途原因調査が必要）。
-  `reviewsSelected === reviewsProcessed + reviewsDeferred + reviewsFailed` を
-  常に保つ
+  それぞれをログから区別できるようにする
 - **CPU 予算は「review の件数」ではなく「sendPush の呼び出し回数」で管理する**
   （advisor によるレビューで指摘）。CPU を消費するのは crypto（ECDSA 署名 +
   ECDH 鍵合意 + AES-GCM 暗号化）であり、その回数は review 件数ではなく
@@ -1694,10 +1693,9 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
   ため、放置される限り毎回先頭に居座り続ける）。`continue` であれば、そのユーザー
   の review だけが毎回スキップされる（既知の限界。次の指摘のとおり対応は行わない）
   に留まり、他ユーザーの通知は妨げない
-- **具体的な `SEND_BUDGET` の値は未計測のまま保守的な仮値を置いている**。
-  #8/#20 は本番デプロイ後の実測（Workers Logs）をこの Issue に申し送っていたが、
-  このセッションでは本番デプロイを行っておらず実測できていない。本番デプロイ後に
-  実測し、必要なら値を調整すること
+- **具体的な `SEND_BUDGET` は保守的な値 5 とする**。CPU 実測は Issue #21 の
+  完了条件に含めないことをユーザー確認済み。運用ログで CPU 超過が観測された場合は
+  値を下げる
   - Cloudflare 公式ドキュメント（developers.cloudflare.com/workers/platform/limits/）
     で確認: **Free プランの Cron Trigger の CPU 時間制限も HTTP リクエストと同じ
     10ms/呼び出し**（advisor の指摘で裏取りした。Cron Trigger 専用の別枠は無い）
@@ -1715,9 +1713,9 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
   非最小 step にも通知が送られ、通知の遷移先 `/app/reviews/{id}` を開くと
   `getDueReviewDetail` の `assertIsCurrentStep` が `ConflictError` を返す
   （「通知は届くが開けない」）ことに加え、本来アクションできない step が
-  `SEND_BUDGET` を無駄に消費する。`apps/web` と同じ `min(step) GROUP BY memoId`
-  のサブクエリを scheduler 側にも用意した（`apps/web` の関数を import せず
-  同じパターンを複製した。scheduler は apps/web に依存できないため）。同じ理由で
+  `SEND_BUDGET` を無駄に消費する。scheduler では外側の LIMIT 前に全未完了行を
+  `GROUP BY` しないよう、候補行に対して「より小さい未完了 step が存在しない」ことを
+  相関 `NOT EXISTS` で確認する。同じ理由で
   `apps/web` の `listDueReviews` が既に持っていた `memos.archivedAt` の除外と
   `id` の tie-breaker（`scheduledAt` はミリ秒精度で同時刻の行が起こり得るため、
   どの review が今回の `SEND_BUDGET` を使うかを実行ごとに安定させる）も
@@ -1744,11 +1742,15 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
   実行できるページであり、かつ「期限切れ通知への防御」（#17 の
   `getDueReviewDetail` が due 条件・現在の step を再検証する）が既に実装済みの
   ため、古い通知から遷移しても安全に扱える
-- **cron の重複実行による二重送信（at-least-once）は意図的に受容し、ロック等の
-  対策は設けない**。`reviews.notifiedAt` の UPDATE に付けた `isNull` 条件は
-  同時実行同士が互いの更新を無意味に上書きしない（clobber 防止）ためだけの
-  ものであり、2つの実行が同じ行を同時に SELECT して二重送信すること自体は
-  防げない
+- **外部送信の前に `notifiedAt` を条件付き UPDATE し、並行 cron 間の原子的な
+  claim として使う**。同じ review を SELECT した複数実行のうち、
+  `WHERE notified_at IS NULL` の UPDATE に勝った1実行だけが `sendPush` へ進む。
+  全送信が retryable なら claim を解除して次回に回す。送信後に印を付ける方式では、
+  UPDATE の条件だけでは外部送信の重複を防げないため、順序を逆にした
+- **retryable の最終試行日時を `notificationAttemptedAt` に記録し、未試行 review を
+  次回の cron で先に処理する**。古い retryable が毎回 `SEND_BUDGET` を使い切っても、
+  後続の未試行 review が永久に飢餓しないようにする。未完了・未通知行用の部分
+  インデックスも同じ並び順で追加する
 - **手元での動作確認には `--persist-to` でローカル永続化先を共有する必要がある**
   （scheduler Worker の雛形（#5）の節で申し送っていた対応）。`apps/web` と
   `apps/scheduler` は個別に `wrangler dev` すると別々の `.wrangler/state` を
@@ -1785,10 +1787,8 @@ VAPID_PRIVATE_KEY` が必要**（ユーザーが実行する必要がある。#1
   `gh issue view 22` で確認の上、#21 の欠落ではなく既存のスコープ分割
   （design-decisions.md 上記「送信ライブラリの決定」節、L1605-1606 の
   `#22 の削除処理` という記述も同じ分割を示す）どおりと判断し、棄却した
-- **`SEND_BUDGET` は未計測のまま仮値を置くことを、実装前にユーザーに確認済み**
-  （本番デプロイ後に実測して調整する前提。#8/#20 からの申し送りがこのセッションでも
-  実測できなかったため、ユーザーに「保守的な既定値で仮決めする／今ここで本番相当の
-  計測をする／具体的な値を指定する」の3択を提示し、保守的な仮決めを選んだ）
+- **`SEND_BUDGET` の CPU 実測は不要**とユーザー確認済み。保守的な既定値 5 と、
+  送信件数・失敗件数・deferred 件数の運用ログを用いる
 
 - リポジトリ: public
 - Issue の粒度: 1 Issue = 1 PR（半日〜1日程度）

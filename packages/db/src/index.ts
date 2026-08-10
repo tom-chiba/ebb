@@ -14,10 +14,13 @@ export {
 	inArray,
 	isNotNull,
 	isNull,
+	lt,
 	lte,
+	notExists,
 	or,
 	sql
 } from 'drizzle-orm';
+export { alias } from 'drizzle-orm/sqlite-core';
 export type { BatchItem } from 'drizzle-orm/batch';
 
 export function createDb(d1: D1Database) {

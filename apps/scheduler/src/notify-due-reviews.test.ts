@@ -196,6 +196,56 @@ describe('notifyDueReviews', () => {
 		await notifyDueReviews(db, vapid);
 
 		expect((await reload(review.id)).notifiedAt).toBeNull();
+		expect((await reload(review.id)).notificationAttemptedAt).not.toBeNull();
+	});
+
+	it('retryable が予算を使い切っても、次回は未試行の review を先に処理する', async () => {
+		sendPush.mockResolvedValue({ outcome: 'retryable' } satisfies PushSendResult);
+		const oldUsers = await Promise.all(
+			Array.from({ length: SEND_BUDGET }, () => createTestUser(db))
+		);
+		for (const [i, userId] of oldUsers.entries()) {
+			await createDueMemoWithReview(userId, {
+				scheduledAt: new Date(Date.now() - 10_000 - i)
+			});
+			await addSubscription(userId, `https://push.example/retry-${i}`);
+		}
+		const newUser = await createTestUser(db);
+		const { review: neverAttempted } = await createDueMemoWithReview(newUser, {
+			scheduledAt: new Date(Date.now() - 1000)
+		});
+		await addSubscription(newUser, 'https://push.example/never-attempted');
+
+		await notifyDueReviews(db, vapid, new Date());
+		sendPush.mockClear();
+		await notifyDueReviews(db, vapid, new Date(Date.now() + 1000));
+
+		expect(sendPush).toHaveBeenCalledWith(
+			expect.objectContaining({ endpoint: 'https://push.example/never-attempted' }),
+			expect.anything(),
+			vapid
+		);
+		expect((await reload(neverAttempted.id)).notificationAttemptedAt).not.toBeNull();
+	});
+
+	it('並行実行でも同じ review への sendPush は1回だけ呼ぶ', async () => {
+		const userId = await createTestUser(db);
+		const { review } = await createDueMemoWithReview(userId);
+		await addSubscription(userId, 'https://push.example/concurrent');
+		sendPush.mockImplementation(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			return { outcome: 'sent' } satisfies PushSendResult;
+		});
+		const now = new Date();
+
+		const summaries = await Promise.all([
+			notifyDueReviews(db, vapid, now),
+			notifyDueReviews(db, vapid, now)
+		]);
+
+		expect(sendPush).toHaveBeenCalledTimes(1);
+		expect(summaries.reduce((sum, summary) => sum + summary.sendsAttempted, 0)).toBe(1);
+		expect((await reload(review.id)).notifiedAt).not.toBeNull();
 	});
 
 	it('1件でも sent なら notifiedAt を立てる（他端末が retryable でも重複送信より優先）', async () => {

@@ -1,2 +1,4 @@
+# apps/web/.dev.vars と同じローカル専用の VAPID 鍵ペア・subject を設定する。
+VAPID_PUBLIC_KEY=
 VAPID_PRIVATE_KEY=
-# apps/web/.dev.vars.example と同じ VAPID 鍵ペアの秘密鍵を使う（公開鍵は wrangler.jsonc の vars で共有済み）。
+VAPID_SUBJECT=mailto:

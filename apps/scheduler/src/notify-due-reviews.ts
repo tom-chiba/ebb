@@ -1,14 +1,16 @@
 import {
 	and,
+	alias,
 	asc,
 	eq,
 	inArray,
 	isNull,
+	lt,
 	lte,
 	memos,
 	pushSubscriptions,
 	reviews,
-	sql,
+	notExists,
 	type Db
 } from '@ebb/db';
 import {
@@ -29,9 +31,8 @@ export const REVIEW_QUERY_LIMIT = 50;
 //
 // Free プランは CPU 10ms/呼び出し（Cron Trigger も同じ制限であることを
 // developers.cloudflare.com/workers/platform/limits/ で確認済み）で、Web Push
-// 1通ごとに ECDSA 署名 + ECDH 鍵合意 + AES-GCM 暗号化が走る。#8/#20 は
-// 本番デプロイ後の実測（Workers Logs）をこの Issue に申し送っていたが未実施のため、
-// ここでは保守的な仮値を置く。本番デプロイ後に実測し、必要なら調整すること。
+// 1通ごとに ECDSA 署名 + ECDH 鍵合意 + AES-GCM 暗号化が走る。CPU 実測は
+// Issue #21 の完了条件に含めず、保守的な値を採用することをユーザー確認済み。
 export const SEND_BUDGET = 5;
 
 export type NotifyDueReviewsSummary = {
@@ -43,6 +44,8 @@ export type NotifyDueReviewsSummary = {
 	// deferred=N だけでは「健全なスロットリング」か「DB 更新等の例外」かを
 	// 区別できず、調整判断を誤らせる（設計レビューで指摘・修正）。
 	reviewsDeferred: number;
+	// 同時実行が先に claim したため、この実行では送信しなかった件数。
+	reviewsContended: number;
 	// review 単位の予期しない例外（例: notifiedAt の UPDATE 失敗）により
 	// 今回処理し切れなかった件数。
 	reviewsFailed: number;
@@ -58,35 +61,18 @@ type DueReviewRow = {
 	userId: string;
 };
 
-// メモごとの「未完了の最小 step」を1行だけ持つサブクエリ。apps/web の
-// listDueReviews（apps/web/src/lib/server/reviews.ts の minPendingStepSubquery）と
-// 同じ不変条件（#17 が確定させた「常に最小の未完了 step からのみ通知・操作できる」）
-// をここでも適用する。**両者は同じロジックの複製であり、片方を直すときはもう片方も
-// 確認すること**（apps/web は apps/scheduler に依存できず、逆に apps/scheduler は
-// apps/web に依存できないため import で共有できない。設計レビューで指摘・確認済み）。
-// reviews はメモ作成時に全 step 分が一括生成されるため、ユーザーが長期間操作しないと
-// 同じメモの複数 step が同時に期限到来・未通知になり得る。このサブクエリを経由しないと、
-// 非最小 step にも通知が送られ、その通知の遷移先 `/app/reviews/{id}` を開くと
-// `getDueReviewDetail` の `assertIsCurrentStep` が `ConflictError` になる
-// （設計レビューで指摘）。
-function minPendingStepSubquery(db: Db) {
-	return db
-		.select({
-			memoId: reviews.memoId,
-			minStep: sql<number>`min(${reviews.step})`.as('min_step')
-		})
-		.from(reviews)
-		.where(isNull(reviews.completedAt))
-		.groupBy(reviews.memoId)
-		.as('min_pending_step');
-}
-
 async function selectDueReviews(db: Db, now: Date): Promise<DueReviewRow[]> {
-	const minPendingStep = minPendingStepSubquery(db);
-	const joinMinStep = and(
-		eq(reviews.memoId, minPendingStep.memoId),
-		eq(reviews.step, minPendingStep.minStep)
-	);
+	const earlierReviews = alias(reviews, 'earlier_reviews');
+	const hasEarlierPendingStep = db
+		.select({ id: earlierReviews.id })
+		.from(earlierReviews)
+		.where(
+			and(
+				eq(earlierReviews.memoId, reviews.memoId),
+				isNull(earlierReviews.completedAt),
+				lt(earlierReviews.step, reviews.step)
+			)
+		);
 	return (
 		db
 			.select({
@@ -96,13 +82,13 @@ async function selectDueReviews(db: Db, now: Date): Promise<DueReviewRow[]> {
 				userId: memos.userId
 			})
 			.from(reviews)
-			.innerJoin(minPendingStep, joinMinStep)
 			.innerJoin(memos, eq(reviews.memoId, memos.id))
 			.where(
 				and(
 					lte(reviews.scheduledAt, now),
 					isNull(reviews.completedAt),
 					isNull(reviews.notifiedAt),
+					notExists(hasEarlierPendingStep),
 					// アーカイブ済みメモの未完了 reviews は archiveMemo が削除するため理屈上は
 					// 発生しないが、apps/web の listDueReviews と同じ理由でここでも明示的に
 					// 除外し、その不変条件に依存しない。
@@ -112,7 +98,10 @@ async function selectDueReviews(db: Db, now: Date): Promise<DueReviewRow[]> {
 			// scheduledAt はミリ秒精度で同時刻の行が起こり得るため、id を tie-breaker にして
 			// 「どの review が今回の SEND_BUDGET を使うか」を実行ごとに安定させる
 			// （apps/web の listDueReviews と同じ理由）。
-			.orderBy(asc(reviews.scheduledAt), asc(reviews.id))
+			// 未試行（notificationAttemptedAt=NULL）を retryable の再試行より先に回す。
+			// これにより古い失敗行が SEND_BUDGET を毎回独占しても、新しい未試行行が
+			// 永久に飢餓しない。各グループ内は従来どおり scheduledAt, id で安定化する。
+			.orderBy(asc(reviews.notificationAttemptedAt), asc(reviews.scheduledAt), asc(reviews.id))
 			.limit(REVIEW_QUERY_LIMIT)
 	);
 }
@@ -162,9 +151,6 @@ function shouldMarkNotified(outcomes: PushSendResult['outcome'][]): boolean {
 }
 
 // 期限到来かつ未完了かつ未通知の reviews を取得し、各所有者の購読へ Web Push を送る。
-// cron の重複実行があれば同じ行を2つの実行が同時に SELECT し得るが、対策（ロック等）は
-// 設けない。「送信後にマークする」= at-least-once を意図的に受容する
-// （notifiedAt の UPDATE に付けた `isNull` 条件は clobber 防止のみで、二重送信そのものは防げない）。
 export async function notifyDueReviews(
 	db: Db,
 	vapid: VapidConfig,
@@ -179,6 +165,7 @@ export async function notifyDueReviews(
 		reviewsSelected: dueReviews.length,
 		reviewsProcessed: 0,
 		reviewsDeferred: 0,
+		reviewsContended: 0,
 		reviewsFailed: 0,
 		sendsAttempted: 0,
 		sendsSucceeded: 0,
@@ -204,6 +191,19 @@ export async function notifyDueReviews(
 		}
 
 		try {
+			// 外部送信の前に notifiedAt を原子的な claim として立てる。同じ review を
+			// 選んだ並行 cron のうち、UPDATE に勝った1実行だけが sendPush へ進む。
+			// retryable で全滅した場合は下で notifiedAt を戻し、次回に再試行する。
+			const claimed = await db
+				.update(reviews)
+				.set({ notifiedAt: now, notificationAttemptedAt: now })
+				.where(and(eq(reviews.id, review.id), isNull(reviews.notifiedAt)))
+				.returning({ id: reviews.id });
+			if (claimed.length === 0) {
+				summary.reviewsContended += 1;
+				continue;
+			}
+
 			const outcomes: PushSendResult['outcome'][] = [];
 			for (const subscription of subscriptions) {
 				summary.sendsAttempted += 1;
@@ -229,19 +229,19 @@ export async function notifyDueReviews(
 			}
 			remainingBudget -= subscriptions.length;
 
-			if (shouldMarkNotified(outcomes)) {
+			if (!shouldMarkNotified(outcomes)) {
 				await db
 					.update(reviews)
-					.set({ notifiedAt: now })
-					.where(and(eq(reviews.id, review.id), isNull(reviews.notifiedAt)));
+					.set({ notifiedAt: null })
+					.where(and(eq(reviews.id, review.id), eq(reviews.notifiedAt, now)));
 			}
 			summary.reviewsProcessed += 1;
 		} catch (err) {
 			// review 単位で失敗を握り、残りの review の処理を継続する
 			// （受け入れ条件: 1件の送信が失敗しても残りの送信は続行される）。
-			// notifiedAt は立たないため次回の cron 実行が再試行する。reviewsDeferred
-			// （予算不足）とは別カウンタにして、reviewsSelected === reviewsProcessed +
-			// reviewsDeferred + reviewsFailed を常に保つ。
+			// claim 前の失敗なら notifiedAt は立たない。claim 後の解放 UPDATE 自体が
+			// 失敗した場合は二重送信防止を優先して claim を維持する。
+			// reviewsDeferred（予算不足）や reviewsContended（並行実行）とは別に数える。
 			console.error(`[scheduler] review の通知処理に失敗 (review=${review.id}):`, err);
 			summary.reviewsFailed += 1;
 		}

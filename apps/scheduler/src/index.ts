@@ -10,7 +10,7 @@ export default {
 			const vapid = readVapidConfig(env);
 			const summary = await notifyDueReviews(db, vapid, new Date(event.scheduledTime));
 			console.log(
-				`[scheduler] reviews: selected=${summary.reviewsSelected} processed=${summary.reviewsProcessed} deferred=${summary.reviewsDeferred} failed=${summary.reviewsFailed} / sends: attempted=${summary.sendsAttempted} succeeded=${summary.sendsSucceeded} failed=${summary.sendsFailed}`
+				`[scheduler] reviews: selected=${summary.reviewsSelected} processed=${summary.reviewsProcessed} deferred=${summary.reviewsDeferred} contended=${summary.reviewsContended} failed=${summary.reviewsFailed} / sends: attempted=${summary.sendsAttempted} succeeded=${summary.sendsSucceeded} failed=${summary.sendsFailed}`
 			);
 		} catch (err) {
 			console.error('[scheduler] notifyDueReviews に失敗した:', err);
