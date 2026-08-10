@@ -269,6 +269,14 @@ export async function notifyDueReviews(
 						try {
 							if (await deleteExpiredSubscription(db, subscription)) {
 								summary.expiredSubscriptionsDeleted += 1;
+							} else {
+								// 送信中の再購読で鍵が更新されると、古い鍵を条件に含む DELETE は
+								// 0件になる。cron 開始時の古いスナップショットを使い続けると、
+								// 後続 review は送信対象0件のまま notifiedAt だけが立つため、
+								// 現在の購読を読み直して次の review から新しい鍵を使う。
+								const refreshed = await selectSubscriptionsByUserId(db, [review.userId]);
+								subscriptionsByUserId.set(review.userId, refreshed.get(review.userId) ?? []);
+								expiredSubscriptionIds.delete(subscription.id);
 							}
 						} catch (err) {
 							// 配信結果の集計や残りの送信は、購読の後始末失敗とは分離する。

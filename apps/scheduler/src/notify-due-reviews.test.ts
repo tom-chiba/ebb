@@ -325,17 +325,20 @@ describe('notifyDueReviews', () => {
 		expect(summary.expiredSubscriptionsDeleted).toBe(0);
 	});
 
-	it('送信中に同じ endpoint が再購読された場合は、新しい鍵の購読を削除しない', async () => {
+	it('送信中に同じ endpoint が再購読された場合は、新しい鍵を後続 review の送信に使う', async () => {
 		const userId = await createTestUser(db);
-		await createDueMemoWithReview(userId);
+		await createDueMemoWithReview(userId, { scheduledAt: new Date(Date.now() - 2000) });
+		await createDueMemoWithReview(userId, { scheduledAt: new Date(Date.now() - 1000) });
 		await addSubscription(userId, 'https://push.example/renewed');
-		sendPush.mockImplementation(async () => {
-			await db
-				.update(pushSubscriptions)
-				.set({ p256dh: 'renewed-p256dh', auth: 'renewed-auth' })
-				.where(eq(pushSubscriptions.endpoint, 'https://push.example/renewed'));
-			return { outcome: 'expired' } satisfies PushSendResult;
-		});
+		sendPush
+			.mockImplementationOnce(async () => {
+				await db
+					.update(pushSubscriptions)
+					.set({ p256dh: 'renewed-p256dh', auth: 'renewed-auth' })
+					.where(eq(pushSubscriptions.endpoint, 'https://push.example/renewed'));
+				return { outcome: 'expired' } satisfies PushSendResult;
+			})
+			.mockResolvedValueOnce({ outcome: 'sent' } satisfies PushSendResult);
 
 		const summary = await notifyDueReviews(db, vapid);
 
@@ -344,8 +347,20 @@ describe('notifyDueReviews', () => {
 			.from(pushSubscriptions)
 			.where(eq(pushSubscriptions.endpoint, 'https://push.example/renewed'));
 		expect(subscription).toMatchObject({ p256dh: 'renewed-p256dh', auth: 'renewed-auth' });
+		expect(sendPush).toHaveBeenCalledTimes(2);
+		expect(sendPush).toHaveBeenNthCalledWith(
+			2,
+			{
+				endpoint: 'https://push.example/renewed',
+				p256dh: 'renewed-p256dh',
+				auth: 'renewed-auth'
+			},
+			expect.any(Object),
+			vapid
+		);
 		expect(summary.expiredSubscriptions).toBe(1);
 		expect(summary.expiredSubscriptionsDeleted).toBe(0);
+		expect(summary.sendsSucceeded).toBe(1);
 	});
 
 	it('失効購読の削除に失敗しても残りの送信を続け、削除失敗を別に集計する', async () => {

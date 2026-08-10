@@ -5,7 +5,8 @@
 - Web App Manifest（`apps/web/static/manifest.webmanifest`）
   - `name` / `short_name` / `start_url` / `display: standalone` / `icons`（192, 512）
 - `apps/web/src/service-worker.ts`
-  - `notificationclick`: 既存のクライアントがあればフォーカス、なければトップページを開く
+  - `notificationclick`: 既存のクライアントがあれば通知対象の復習画面へ遷移してフォーカスし、
+    なければ同じ復習画面を新しいタブで開く
   - `fetch` ハンドラは追加していない（後述の A/B 検証の結果、不要と判断した）
 - `apps/web/src/routes/+layout.svelte`
   - `<link rel="manifest">` / `<link rel="apple-touch-icon">` / `<meta name="theme-color">`
@@ -49,8 +50,9 @@ playwright-cli 経由の実 Chrome（`--persistent` プロファイル）で確�
   `BrowserContext.serviceWorkers()` で取得した Worker コンテキストに対して
   `worker.evaluate()` を実行し、`self.clients.matchAll` / `self.clients.openWindow` を
   差し替えた上で `notificationclick` イベントを直接 dispatch することで、
-  既存クライアントがある場合の `focus()` 分岐、ない場合の `openWindow('/')` 分岐の
-  両方を実際のコードパスで確認した
+  既存クライアントがある場合の通知対象 URL への `navigate()` + `focus()` 分岐、ない場合の
+  同 URL への `openWindow()` 分岐の両方を実際のコードパスで確認した（#22 で遷移先を
+  トップページから `/app/reviews/{reviewId}` に変更）
 - `fetch` ハンドラの要否を A/B で検証した: ハンドラを追加した状態と削除した状態の両方で
   `Page.getInstallabilityErrors` が `[]`、`beforeinstallprompt` の発火も変わらないことを
   確認した（Chrome 151 で実測）。Chrome for Developers 公式ブログには「`beforeinstallprompt`
