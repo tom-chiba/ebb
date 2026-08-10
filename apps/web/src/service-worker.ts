@@ -25,14 +25,15 @@ sw.addEventListener('activate', (event) => {
 sw.addEventListener('push', (event) => {
 	event.waitUntil(
 		(async () => {
-			let data: { title?: string; body?: string } | undefined;
+			let data: { title?: string; body?: string; url?: string } | undefined;
 			try {
 				data = event.data?.json();
 			} catch {
 				data = undefined;
 			}
 			await sw.registration.showNotification(data?.title ?? 'Ebb', {
-				body: data?.body
+				body: data?.body,
+				data: { url: data?.url }
 			});
 		})()
 	);
@@ -42,12 +43,23 @@ sw.addEventListener('notificationclick', (event) => {
 	event.notification.close();
 	event.waitUntil(
 		(async () => {
+			const notificationData: unknown = event.notification.data;
+			const targetUrl =
+				typeof notificationData === 'object' &&
+				notificationData !== null &&
+				'url' in notificationData &&
+				typeof notificationData.url === 'string'
+					? notificationData.url
+					: '/';
 			const clients = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
 			const existing = clients.find((client) => 'focus' in client);
 			if (existing) {
+				if ('navigate' in existing) {
+					await existing.navigate(targetUrl);
+				}
 				await existing.focus();
 			} else {
-				await sw.clients.openWindow('/');
+				await sw.clients.openWindow(targetUrl);
 			}
 		})()
 	);
