@@ -39,6 +39,7 @@ erDiagram
         timestamp_ms scheduled_at
         timestamp_ms completed_at "NULL 可"
         timestamp_ms notified_at "NULL 可"
+        timestamp_ms notification_attempted_at "NULL 可"
     }
     push_subscriptions {
         text id PK
@@ -188,6 +189,11 @@ notified_at IS NULL`）を追加した。未完了・未通知の行だけを持
 `memo_id` 単体にも索引を追加（`reviews_memoId_idx`）。SQLite は FK に自動で索引を
 張らないため、`ON DELETE CASCADE` によるカスケード削除の効率と、#17 の「1メモの
 復習履歴一覧」用。
+
+#21 では送信予算不足で延期した行が SELECT 上限を占有し続けないよう、最終試行日時
+`notification_attempted_at` を追加した。scheduler は未試行（NULL）を先に、延期済みを
+後に並べる。これに合わせて `reviews_pending_notificationAttemptedAt_scheduledAt_idx`
+（`notification_attempted_at, scheduled_at, id`、条件は既存の部分インデックスと同じ）も追加した。
 
 **#21 への申し送りは #16 で解消済み**: 当初 `memos.archived_at`（ソフトアーカイブ）は
 `reviews` に一切伝播せず、「アーカイブ済みメモの reviews を `memos` との JOIN で除外する」か

@@ -46,6 +46,19 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
+      - name: Verify required scheduler secrets are set
+        # Worker secrets は Worker ごとに独立している。web 側に同名の secret があっても
+        # scheduler からは参照できないため、scheduler 自身の設定を確認する。
+        run: |
+          names=$(pnpm --filter @ebb/scheduler exec wrangler secret list --format=json | jq -r '.[].name')
+          if ! grep -qx VAPID_PRIVATE_KEY <<< "$names"; then
+            echo "::error::Missing required scheduler secret: VAPID_PRIVATE_KEY — run 'pnpm --filter @ebb/scheduler exec wrangler secret put VAPID_PRIVATE_KEY'"
+            exit 1
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
       - name: Build
         run: pnpm build
 

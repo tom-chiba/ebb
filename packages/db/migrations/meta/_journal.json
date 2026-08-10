@@ -71,6 +71,13 @@
 			"when": 1786028759456,
 			"tag": "0009_user_settings_default_preset_owner_trigger",
 			"breakpoints": true
+		},
+		{
+			"idx": 10,
+			"version": "6",
+			"when": 1786346429166,
+			"tag": "0010_cheerful_warbird",
+			"breakpoints": true
 		}
 	]
 }

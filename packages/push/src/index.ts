@@ -90,10 +90,8 @@ export function readVapidConfig(env: VapidEnvSource): VapidConfig {
 	return { subject: subject!, publicKey: publicKey!, privateKey: privateKey! };
 }
 
-// Web Push はキュー無しの cron ポーリングで運用する方針（docs/design-decisions.md）。
-// そのため sendPush 自身はリトライしない。'retryable' を返された呼び出し側が
-// reviews.notifiedAt を更新しないままにしておけば、次回の cron 実行が自然に再送する
-// （単発の指数バックオフ等をここに実装する必要はない）。
+// sendPush 自身はリトライしない。'retryable' の再試行可否は呼び出し側の配送保証に
+// 委ねる。scheduler は Issue #21 の重複防止を優先し、送信試行後は再送しない。
 export async function sendPush(
 	subscription: PushSubscriptionRecord,
 	payload: PushPayload,

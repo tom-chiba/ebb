@@ -78,7 +78,10 @@ export const reviews = sqliteTable(
 		step: integer('step').notNull(),
 		scheduledAt: timestampMs('scheduled_at').notNull(),
 		completedAt: timestampMs('completed_at'),
-		notifiedAt: timestampMs('notified_at')
+		notifiedAt: timestampMs('notified_at'),
+		// 送信予算不足で延期した review を未試行より後に回し、SELECT 上限の範囲外にある
+		// review を永久に飢餓させないための最終試行日時。claim・延期時に更新する。
+		notificationAttemptedAt: timestampMs('notification_attempted_at')
 	},
 	(table) => [
 		index('reviews_memoId_idx').on(table.memoId),
@@ -91,6 +94,11 @@ export const reviews = sqliteTable(
 		// が履歴の増加と無関係な件数でスキャンできるようにする
 		index('reviews_pending_scheduledAt_idx')
 			.on(table.scheduledAt)
+			.where(sql`${table.completedAt} is null and ${table.notifiedAt} is null`),
+		// scheduler は未試行（NULL）を先に、延期済みを後に並べる。scheduled_at を
+		// 第2キーにして、各グループ内では古い review から処理する。
+		index('reviews_pending_notificationAttemptedAt_scheduledAt_idx')
+			.on(table.notificationAttemptedAt, table.scheduledAt, table.id)
 			.where(sql`${table.completedAt} is null and ${table.notifiedAt} is null`),
 		// バッチ生成・再計算（#16/#18）時の重複 INSERT を防ぐ
 		unique('reviews_memoId_step_unique').on(table.memoId, table.step)

@@ -1,0 +1,17 @@
+{
+	// vitest-pool-workers 専用の設定。apps/web/wrangler.test.jsonc と同じ理由
+	// （本番用 wrangler.jsonc は VAPID の実値や cron 設定を含み、テストには不要）で切り出す。
+	"name": "ebb-scheduler-test",
+	// apps/web/wrangler.test.jsonc と同じ値（vitest-pool-workers@0.18.8 に同梱の workerd が対応する
+	// 最新の compatibility_date、実測）。
+	"compatibility_date": "2026-07-29",
+	"compatibility_flags": ["nodejs_compat"],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "ebb",
+			"database_id": "9d613b4c-3fa7-454d-a7d9-0c0930eb7b40",
+			"migrations_dir": "../../packages/db/migrations"
+		}
+	]
+}

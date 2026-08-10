@@ -1,0 +1,4 @@
+# apps/web/.dev.vars と同じローカル専用の VAPID 鍵ペア・subject を設定する。
+VAPID_PUBLIC_KEY=
+VAPID_PRIVATE_KEY=
+VAPID_SUBJECT=mailto:

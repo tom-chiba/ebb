@@ -51,6 +51,8 @@ export interface CompletedReview {
 // due 判定（scheduledAt <= now）はこのサブクエリの外で行う。中に入れると
 // 「期限が来ている行の中での最小 step」になり、期限前の若い step を飛ばして
 // 期限切れの後続 step を表示しうる（advisor 指摘）。
+// apps/scheduler/src/notify-due-reviews.ts も、相関 NOT EXISTS という別のSQL表現で
+// 同じ不変条件を適用している（#21）。この条件を変更するときは両方を確認すること。
 function minPendingStepSubquery(db: Db) {
 	return db
 		.select({
@@ -259,7 +261,7 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 			return {
 				query: db
 					.update(reviews)
-					.set({ scheduledAt, notifiedAt: null })
+					.set({ scheduledAt, notifiedAt: null, notificationAttemptedAt: null })
 					.where(and(eq(reviews.id, row.id), isNull(reviews.completedAt), wonThisCompletion)),
 				step: row.step,
 				scheduledAt

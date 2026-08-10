@@ -1628,12 +1628,9 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
     不足が検出されない（2回目の設計レビューで指摘）。#21 で `apps/scheduler` の
     `wrangler.jsonc` に `VAPID_*` を追加し `wrangler types` を再生成すれば、
     その時点から「渡し忘れ」もコンパイルで検出できるようになる
-- **リトライ方針: `sendPush` はリトライしない（1回のみ試行）**。Queues 不採用で
-  cron ポーリングのみの構成（L73。要注意点2（L57-58）は Queues 採用寄りの
-  初期メモで、要注意点7（L73）の「Queues 不採用」がそれを上書きした後の
-  最終決定）のため、`retryable` を返された呼び出し側が `reviews.notifiedAt`
-  を更新しなければ、次回の cron 実行（毎分）が自然に再送する。関数内に
-  指数バックオフ等を持たせる必要はない
+- **リトライ方針: `sendPush` 自身はリトライしない（1回のみ試行）**。呼び出し側が
+  `retryable` をどう扱うかは配送保証に応じて決める。#21 の scheduler は「同じ復習に
+  二度届かない」を優先し、応答喪失後の再送による重複を避けるため at-most-once とする
 - VAPID 鍵は呼び出し側から引数で渡す（テスト容易性のため、関数内部で
   環境変数を直接読まない）。ただし「環境変数から読む」という受け入れ条件は
   `readVapidConfig(env)` を別途 export し、env var 名をこの1箇所に集約して満たす
@@ -1663,7 +1660,123 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
   #20 のスコープでは行わない。実際にスケジューラから送信するのは #21 のため、
   計測はそちらに委ねる
 
-## 開発の進め方
+## scheduler での実送信 (#21)
+
+- **`reviewsDeferred`（送信予算不足）、`reviewsContended`（並行実行が先に claim）、
+  `reviewsFailed`（review 単位の予期しない例外）は別カウンタにする**
+  （4回目の設計レビューで指摘・修正）。当初は両方を `reviewsDeferred` に
+  合流させていたが、`SEND_BUDGET` を本番デプロイ後に実測して調整する際、
+  ログの `deferred=N` だけでは「健全なスロットリングが機能している」のか
+  「DB 更新等が例外を投げている」のかを区別できず、調整判断を誤らせる
+  （前者なら `SEND_BUDGET` を上げる調整で済むが、後者は別途原因調査が必要）。
+  それぞれをログから区別できるようにする
+- **CPU 予算は「review の件数」ではなく「sendPush の呼び出し回数」で管理する**
+  （advisor によるレビューで指摘）。CPU を消費するのは crypto（ECDSA 署名 +
+  ECDH 鍵合意 + AES-GCM 暗号化）であり、その回数は review 件数ではなく
+  `review × その所有者の購読数`。#19 でユーザーは複数デバイスから購読できるため、
+  review 件数だけを LIMIT すると「1ユーザーが3台持っていれば1件の review で
+  3回の crypto 処理が走る」を無視してしまい、「大量に溜まった状態でも CPU 超過で
+  Worker が落ちない」という受け入れ条件を満たせない。`SEND_BUDGET`
+  （送信回数の予算）を主たる上限にし、review 単位で消費する。SELECT 自体にも
+  緩い上限（`REVIEW_QUERY_LIMIT`）を掛けるが、これはクエリ・メモリを一定以上
+  肥大化させないための副次的な上限に過ぎない
+- **予算を超える review に到達したら `continue`（その review だけスキップ）で、
+  `break`（それ以降の処理を丸ごと打ち切る）ではない**（正確性レビューで指摘・
+  修正）。当初は `break` にしていたが、`selectDueReviews` は scheduledAt 昇順の
+  ため、1ユーザーの購読数が `SEND_BUDGET` を超える review が一度先頭（最古）に
+  来ると、それ以降の**すべての** cron 実行が毎回そこで停止し、それより新しい
+  **他ユーザー**の通知まで永久に止まってしまう（該当 review はユーザーが
+  「復習した」操作をするまで `completedAt` が付かず、SELECT 対象から外れない
+  ため、放置される限り毎回先頭に居座り続ける）。さらに deferred 行の
+  `notificationAttemptedAt` を更新して次回の SELECT では後方へ回す。`continue` だけでは、
+  予算超過行が `REVIEW_QUERY_LIMIT` 件あると SELECT 枠の外の他ユーザーを依然として
+  永久に止めるため（5回目のレビューで指摘・修正）
+- **具体的な `SEND_BUDGET` は保守的な値 5 とする**。CPU 実測は Issue #21 の
+  完了条件に含めないことをユーザー確認済み。運用ログで CPU 超過が観測された場合は
+  値を下げる
+  - Cloudflare 公式ドキュメント（developers.cloudflare.com/workers/platform/limits/）
+    で確認: **Free プランの Cron Trigger の CPU 時間制限も HTTP リクエストと同じ
+    10ms/呼び出し**（advisor の指摘で裏取りした。Cron Trigger 専用の別枠は無い）
+- **1ユーザーの購読数が `SEND_BUDGET` を超える場合、そのユーザーの review は
+  常に「予算不足」と判定され続け、事実上処理されない**（既知の限界）。
+  実運用で想定されるデバイス数を大きく超える値のため対応は行わない
+- **`selectDueReviews` はメモごとに「未完了の最小 step」のみを対象にする**
+  （設計レビューで指摘・修正）。`reviews` はメモ作成時に全 step 分の
+  `scheduledAt` が baseTime から一括生成される（`packages/core` の
+  `nextReviewAt`）ため、ユーザーが長期間操作しないと同じメモの複数 step が
+  同時に期限到来・未完了・未通知になり得る。この不変条件（「常に最小の未完了
+  step からのみ通知・操作できる」）は #17 が `apps/web/src/lib/server/reviews.ts`
+  の `listDueReviews`/`getDueReviewDetail` で既に確定させているが、当初の
+  `selectDueReviews` はこれを見ずに条件だけで SELECT していた。これを見逃すと
+  非最小 step にも通知が送られ、通知の遷移先 `/app/reviews/{id}` を開くと
+  `getDueReviewDetail` の `assertIsCurrentStep` が `ConflictError` を返す
+  （「通知は届くが開けない」）ことに加え、本来アクションできない step が
+  `SEND_BUDGET` を無駄に消費する。scheduler では外側の LIMIT 前に全未完了行を
+  `GROUP BY` しないよう、候補行に対して「より小さい未完了 step が存在しない」ことを
+  相関 `NOT EXISTS` で確認する。同じ理由で
+  `apps/web` の `listDueReviews` が既に持っていた `memos.archivedAt` の除外と
+  `id` の tie-breaker（`scheduledAt` はミリ秒精度で同時刻の行が起こり得るため、
+  どの review が今回の `SEND_BUDGET` を使うかを実行ごとに安定させる）も
+  合わせて揃えた
+- **`notifiedAt` は外部送信を一度でも試行する review の claim 時に立て、その後は
+  `retryable` を含む結果にかかわらず維持する（at-most-once）**（5回目のレビューで
+  修正）。Push サービスが受理した後に応答だけ失われたケースと、受理前に失敗した
+  ケースを呼び出し側では判別できない。retryable 時に claim を解除すると前者を次回
+  cron が再送し、Issue #21 の「同じ復習について通知が二度届かない」に違反し得るため、
+  再試行による到達率より重複防止を優先する。購読が0件の場合も claim を維持する
+- **通知の遷移先 URL は `/app/reviews/{reviewId}`**。packages/push の単体テストの
+  payload フィクスチャは `/app/memos/...` だったが、これは決定ではなくテスト用の
+  適当な値だった。`/app/reviews/[id]` は #17 で実装済みの「復習した」操作まで
+  実行できるページであり、かつ「期限切れ通知への防御」（#17 の
+  `getDueReviewDetail` が due 条件・現在の step を再検証する）が既に実装済みの
+  ため、古い通知から遷移しても安全に扱える
+- **外部送信の前に `notifiedAt` を条件付き UPDATE し、並行 cron 間の原子的な
+  claim として使う**。同じ review を SELECT した複数実行のうち、
+  `WHERE notified_at IS NULL` の UPDATE に勝った1実行だけが `sendPush` へ進む。
+  claim では `completed_at IS NULL` と `scheduled_at <= now` も再検証し、SELECT 後に
+  完了・再計算された review へ古い通知を送らない（5回目のレビューで指摘・修正）。
+  送信後に印を付ける方式では、UPDATE の条件だけでは外部送信の重複を防げないため、
+  順序を逆にした
+- **`notificationAttemptedAt` は deferred review を SELECT の後方へローテーションする
+  ために記録する**。未完了・未通知行用の部分インデックスも同じ並び順で追加する
+- **手元での動作確認には `--persist-to` でローカル永続化先を共有する必要がある**
+  （scheduler Worker の雛形（#5）の節で申し送っていた対応）。`apps/web` と
+  `apps/scheduler` は個別に `wrangler dev` すると別々の `.wrangler/state` を
+  持つため、`apps/web` で作った memo/review を `apps/scheduler` の cron から
+  読めない。同じ `--persist-to <dir>` を両方に渡すことで解消する
+  （このセッションではこの方法で実 D1 に対して SELECT・sendPush 呼び出し・
+  `notifiedAt` の UPDATE が実際に動くことを確認した）
+- **`apps/scheduler` に `@ebb/push` を追加した結果、`compatibility_flags` に
+  `nodejs_compat` が必要になった**（`@block65/webcrypto-web-push` が
+  `node:crypto` を参照するため。`apps/web` は既に持っていたが、`apps/scheduler`
+  は元々 D1 しか使わず不要だったため欠けていた）。`wrangler dev --test-scheduled`
+  での動作確認で初回に警告が出て気付いた。vitest-pool-workers 用の
+  `wrangler.test.jsonc` には最初から付けていたためテストでは検出できず、
+  本番相当の `wrangler.jsonc` を実際に起動して確認したことで見つかった
+- **`VAPID_PRIVATE_KEY` は Worker 単位の secret のため、`apps/web` に
+  設定済みでも `apps/scheduler` Worker には別途 `wrangler secret put
+VAPID_PRIVATE_KEY` が必要**（ユーザーが実行する必要がある。#19/#20 の
+  VAPID 関連の secret 投入と同様、このセッションでは未実行）
+- **実際の push 配信確認はこのセッションでは行っていない**（#8/#19/#20 と同じ
+  制約：開発用サンドボックスは outbound network を許可リスト方式で制限しており、
+  実際の push サービスへの `fetch` が届かない）。検証済みなのは、実 D1
+  （`--persist-to` で共有した本物の SQLite）に対して「期限到来・未完了・未通知の
+  review を正しく選び、購読を JOIN し、`sendPush` を呼び、結果に応じて
+  `notifiedAt` を更新する」というオーケストレーション全体が動くことと、
+  無効な購読（テスト用の適当な `p256dh`/`auth`）に対して `sendPush` が
+  正しく `invalid`/`retryable` を返して処理が継続することのみ。実際の
+  ブラウザへの通知表示は、ユーザー自身の環境で本番デプロイ後に確認する
+  必要がある
+- **失効購読（`sendPush` が `expired` を返した購読）の削除は #21 のスコープに
+  含めない**。`packages/push` のコメントは削除を「呼び出し側の責務」としているが、
+  具体的にどの Issue で削除するかは #22（「購読失効の処理と通知クリック時の遷移」、
+  受け入れ条件に「送信失敗を機に DB から消える」と明記、#21 に依存）が担う。
+  2回目のレビューで2エージェントから独立に「削除処理が無い」と指摘されたが、
+  `gh issue view 22` で確認の上、#21 の欠落ではなく既存のスコープ分割
+  （design-decisions.md 上記「送信ライブラリの決定」節、L1605-1606 の
+  `#22 の削除処理` という記述も同じ分割を示す）どおりと判断し、棄却した
+- **`SEND_BUDGET` の CPU 実測は不要**とユーザー確認済み。保守的な既定値 5 と、
+  送信件数・失敗件数・deferred 件数の運用ログを用いる
 
 - リポジトリ: public
 - Issue の粒度: 1 Issue = 1 PR（半日〜1日程度）

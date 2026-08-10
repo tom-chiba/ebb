@@ -6,16 +6,20 @@
 	"scripts": {
 		"dev": "wrangler dev --test-scheduled",
 		"check": "tsc --noEmit",
-		"cf-typegen": "wrangler types --include-runtime=false",
+		"cf-typegen": "test -f .dev.vars || cp .dev.vars.example .dev.vars && wrangler types --include-runtime=false",
 		"migrate:local": "wrangler d1 migrations apply ebb --local",
-		"deploy": "wrangler deploy"
+		"deploy": "wrangler deploy",
+		"test": "vitest run"
 	},
 	"dependencies": {
-		"@ebb/db": "workspace:*"
+		"@ebb/db": "workspace:*",
+		"@ebb/push": "workspace:*"
 	},
 	"devDependencies": {
+		"@cloudflare/vitest-pool-workers": "^0.18.8",
 		"@cloudflare/workers-types": "^4.20260702.1",
 		"typescript": "catalog:",
+		"vitest": "^4.1.0",
 		"wrangler": "^4.118.0"
 	}
 }
