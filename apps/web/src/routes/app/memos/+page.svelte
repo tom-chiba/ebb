@@ -49,14 +49,14 @@
 	}
 
 	li {
-		border: 1px solid #ccc;
-		border-radius: 8px;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
 		padding: 0.75rem 1rem;
 	}
 
 	li p {
 		margin: 0.4rem 0 0;
-		color: #666;
+		color: var(--color-text-muted);
 	}
 
 	nav {

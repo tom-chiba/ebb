@@ -34,7 +34,7 @@
 		align-items: center;
 		margin-top: 1.5rem;
 		padding-top: 1rem;
-		border-top: 1px solid #ccc;
+		border-top: 1px solid var(--color-border);
 	}
 
 	.actions form {
@@ -59,22 +59,22 @@
 	.markdown-body :global(blockquote) {
 		margin: 0 0 1em;
 		padding-left: 0.9em;
-		border-left: 3px solid #ccc;
-		color: #666;
+		border-left: 3px solid var(--color-border);
+		color: var(--color-text-muted);
 	}
 
 	.markdown-body :global(code) {
-		font-family: ui-monospace, monospace;
-		background: #f0ece3;
+		font-family: var(--font-mono);
+		background: var(--color-code-inline-bg);
 		padding: 0.1em 0.3em;
-		border-radius: 4px;
+		border-radius: var(--radius-sm);
 	}
 
 	.markdown-body :global(pre) {
-		background: #1c1b18;
-		color: #e8e4db;
+		background: var(--color-code-bg);
+		color: var(--color-code-text);
 		padding: 0.9em 1em;
-		border-radius: 8px;
+		border-radius: var(--radius-md);
 		overflow-x: auto;
 	}
 

@@ -40,7 +40,7 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 0.75rem 1rem;
-		border-bottom: 1px solid #ccc;
+		border-bottom: 1px solid var(--color-border);
 	}
 
 	nav {
