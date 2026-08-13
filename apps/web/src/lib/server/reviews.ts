@@ -32,7 +32,7 @@ export interface DueReviewSummary {
 	memoTitle: string;
 	// ホームの一覧カードでの抜粋表示用。一覧クエリの時点で切り詰め、生の
 	// memos.content（最大 50,000 文字）を呼び出し元に持ち出さない
-	// （apps/web/src/routes/app/memos/+page.server.ts と同じ方針）。
+	// （apps/web/src/routes/(app)/memos/+page.server.ts と同じ方針）。
 	memoExcerpt: string;
 	step: number;
 	scheduledAt: Date;
@@ -134,7 +134,7 @@ export async function listDueReviews(db: Db, userId: string, options: ListOption
 
 	// 呼び出し元（ホームのカード表示）は抜粋しか使わないため、ここで切り詰めて
 	// 生の memos.content（最大 50,000 文字）を持ち出さない
-	// （apps/web/src/routes/app/memos/+page.server.ts と同じ方針）。
+	// （apps/web/src/routes/(app)/memos/+page.server.ts と同じ方針）。
 	const items: DueReviewSummary[] = rows.map((row) => ({
 		id: row.id,
 		memoId: row.memoId,

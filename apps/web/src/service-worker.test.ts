@@ -51,25 +51,25 @@ describe('service worker notifications', () => {
 
 		await dispatch('push', {
 			data: {
-				json: () => ({ title: '復習', body: '本文', url: '/app/reviews/review-1' })
+				json: () => ({ title: '復習', body: '本文', url: '/reviews/review-1' })
 			}
 		});
 
 		expect(serviceWorkerTest.showNotification).toHaveBeenCalledWith('復習', {
 			body: '本文',
-			data: { url: '/app/reviews/review-1' }
+			data: { url: '/reviews/review-1' }
 		});
 	});
 
 	it('通知クリック時は既存タブを復習 URL へ遷移してフォーカスし、新しいタブを開かない', async () => {
 		const existingClient = { navigate: vi.fn(), focus: vi.fn() };
 		serviceWorkerTest.matchAll.mockResolvedValue([existingClient]);
-		const notification = { data: { url: '/app/reviews/review-2' }, close: vi.fn() };
+		const notification = { data: { url: '/reviews/review-2' }, close: vi.fn() };
 
 		await dispatch('notificationclick', { notification });
 
 		expect(notification.close).toHaveBeenCalledOnce();
-		expect(existingClient.navigate).toHaveBeenCalledWith('/app/reviews/review-2');
+		expect(existingClient.navigate).toHaveBeenCalledWith('/reviews/review-2');
 		expect(existingClient.focus).toHaveBeenCalledOnce();
 		expect(serviceWorkerTest.openWindow).not.toHaveBeenCalled();
 	});
@@ -79,9 +79,9 @@ describe('service worker notifications', () => {
 		serviceWorkerTest.openWindow.mockResolvedValue(undefined);
 
 		await dispatch('notificationclick', {
-			notification: { data: { url: '/app/reviews/review-3' }, close: vi.fn() }
+			notification: { data: { url: '/reviews/review-3' }, close: vi.fn() }
 		});
 
-		expect(serviceWorkerTest.openWindow).toHaveBeenCalledWith('/app/reviews/review-3');
+		expect(serviceWorkerTest.openWindow).toHaveBeenCalledWith('/reviews/review-3');
 	});
 });

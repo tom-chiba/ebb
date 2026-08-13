@@ -23,7 +23,7 @@
 	<ul>
 		{#each data.items as memo (memo.id)}
 			<li>
-				<a href={resolve('/app/memos/[id]', { id: memo.id })}>{memo.title}</a>
+				<a href={resolve('/(app)/memos/[id]', { id: memo.id })}>{memo.title}</a>
 				<p>{memo.excerpt}</p>
 			</li>
 		{/each}
@@ -32,14 +32,14 @@
 
 <nav>
 	{#if hasPrev}
-		<a href="{resolve('/app/memos')}?offset={prevOffset}">← 前へ</a>
+		<a href="{resolve('/memos')}?offset={prevOffset}">← 前へ</a>
 	{/if}
 	{#if hasNext}
-		<a href="{resolve('/app/memos')}?offset={nextOffset}">次へ →</a>
+		<a href="{resolve('/memos')}?offset={nextOffset}">次へ →</a>
 	{/if}
 </nav>
 
-<Fab href={resolve('/app/memos/new')} label="新規メモを作成" />
+<Fab href={resolve('/memos/new')} label="新規メモを作成" />
 
 <style>
 	ul {

@@ -58,7 +58,7 @@
 	<ul>
 		{#each data.items as review (review.id)}
 			<li>
-				<a href="{resolve('/app/reviews/[id]', { id: review.id })}?from=home">
+				<a href="{resolve('/(app)/reviews/[id]', { id: review.id })}?from=home">
 					<div class="due">
 						<span class="dot" class:overdue={!isSameDay(review.scheduledAt, baseTime)}></span>
 						<span class="due-time">{formatTime(review.scheduledAt)} 期限</span>
@@ -70,11 +70,11 @@
 		{/each}
 	</ul>
 	{#if hasMore}
-		<p class="more"><a href={resolve('/app/reviews')}>もっと見る</a></p>
+		<p class="more"><a href={resolve('/reviews')}>もっと見る</a></p>
 	{/if}
 {/if}
 
-<Fab href={resolve('/app/memos/new')} label="新規メモを作成" />
+<Fab href={resolve('/memos/new')} label="新規メモを作成" />
 
 <style>
 	.header {

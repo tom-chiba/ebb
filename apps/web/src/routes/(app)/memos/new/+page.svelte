@@ -33,7 +33,7 @@
 	{/if}
 
 	<div class="actions">
-		<a href={resolve('/app/memos')}>キャンセル</a>
+		<a href={resolve('/memos')}>キャンセル</a>
 		<button type="submit">保存</button>
 	</div>
 </form>

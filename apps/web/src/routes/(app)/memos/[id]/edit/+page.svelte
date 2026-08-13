@@ -35,12 +35,12 @@
 	{#if form?.message}
 		<p class="error">{form.message}</p>
 		{#if form.conflict}
-			<a href={resolve('/app/memos/[id]/edit', { id: data.memo.id })}>最新の内容を確認する</a>
+			<a href={resolve('/(app)/memos/[id]/edit', { id: data.memo.id })}>最新の内容を確認する</a>
 		{/if}
 	{/if}
 
 	<div class="actions">
-		<a href={resolve('/app/memos/[id]', { id: data.memo.id })}>キャンセル</a>
+		<a href={resolve('/(app)/memos/[id]', { id: data.memo.id })}>キャンセル</a>
 		<button type="submit">保存</button>
 	</div>
 </form>

@@ -18,8 +18,8 @@
 </article>
 
 <div class="actions">
-	<a href={resolve('/app/memos')}>一覧へ戻る</a>
-	<a href={resolve('/app/memos/[id]/edit', { id: data.memo.id })}>編集</a>
+	<a href={resolve('/memos')}>一覧へ戻る</a>
+	<a href={resolve('/(app)/memos/[id]/edit', { id: data.memo.id })}>編集</a>
 	<form method="POST" action="?/delete" onsubmit={confirmDelete}>
 		<button type="submit">削除</button>
 	</form>

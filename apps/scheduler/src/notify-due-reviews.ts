@@ -255,7 +255,7 @@ export async function notifyDueReviews(
 					};
 					const result = await sendPush(
 						pushSubscription,
-						{ memoId: review.memoId, title: review.memoTitle, url: `/app/reviews/${review.id}` },
+						{ memoId: review.memoId, title: review.memoTitle, url: `/reviews/${review.id}` },
 						vapid
 					);
 					if (result.outcome === 'sent') {

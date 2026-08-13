@@ -163,7 +163,7 @@ describe('notifyDueReviews', () => {
 
 		expect(sendPush).toHaveBeenCalledWith(
 			expect.objectContaining({ endpoint: 'https://push.example/a' }),
-			{ memoId: memo.id, title: '復習タイトル', url: `/app/reviews/${review.id}` },
+			{ memoId: memo.id, title: '復習タイトル', url: `/reviews/${review.id}` },
 			vapid
 		);
 	});

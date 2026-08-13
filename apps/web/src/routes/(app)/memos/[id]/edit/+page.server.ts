@@ -74,7 +74,7 @@ export const actions: Actions = {
 				title,
 				content
 			});
-			redirect(303, `/app/memos/${memo.id}`);
+			redirect(303, `/memos/${memo.id}`);
 		} catch (err) {
 			if (err instanceof ValidationError) {
 				return fail(400, {
