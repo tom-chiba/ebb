@@ -265,7 +265,7 @@
 						{/if}
 
 						{#if previewing}
-							<button type="submit">確定して更新する</button>
+							<button type="submit" class="warning-button">確定して更新する</button>
 						{:else}
 							<button type="submit">更新する</button>
 						{/if}
@@ -350,8 +350,8 @@
 	}
 
 	li {
-		border: 1px solid #ccc;
-		border-radius: 8px;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
 		padding: 0.75rem 1rem;
 		display: flex;
 		flex-direction: column;
@@ -359,20 +359,26 @@
 	}
 
 	.flash {
-		background: #eef6ec;
-		border: 1px solid #b8d8ae;
-		border-radius: 8px;
+		background: var(--color-accent-bg);
+		border: 1px solid var(--color-accent-border);
+		border-radius: var(--radius-md);
 		padding: 0.75rem 1rem;
 	}
 
 	.warning {
-		background: #fdf3e5;
-		border: 1px solid #e8c98a;
-		border-radius: 8px;
+		background: var(--color-warning-bg);
+		border: 1px solid var(--color-warning-border);
+		border-radius: var(--radius-md);
 		padding: 0.75rem 1rem;
+		color: var(--color-warning-text);
+	}
+
+	.warning-button {
+		background: var(--color-warning-button);
+		color: var(--color-warning-button-text);
 	}
 
 	.error {
-		color: #b4562f;
+		color: var(--color-error);
 	}
 </style>

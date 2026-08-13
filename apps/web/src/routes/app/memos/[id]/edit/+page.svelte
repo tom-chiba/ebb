@@ -65,7 +65,7 @@
 	}
 
 	.error {
-		color: #b4562f;
+		color: var(--color-error);
 	}
 
 	.actions {
