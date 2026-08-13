@@ -88,6 +88,17 @@ function minPendingStepSubquery(db: Db) {
 // 「次回予定時刻」はメモの現在ステップの scheduledAt そのものであり、
 // 全ステップ完了済み（未完了行が1件も無い）メモはこのサブクエリに現れず、
 // LEFT JOIN 側で null になることで「復習完了」と判定できる。
+//
+// ここでは未完了行を min(step) ではなく min(scheduledAt) で選んでいる（一覧の
+// JOIN で1行に絞り込む都合上、step ではなく時刻を直接引く方が JOIN 条件が単純に
+// なるため）。これが「現在ステップ（最小 step）の scheduledAt」と一致するのは、
+// intervals が常に厳密昇順である（@ebb/core の parseIntervals が全てのプリセット
+// 作成・更新経路で検証し、SYSTEM_INTERVAL_PRESETS も昇順で定義されている）ため、
+// scheduledAt が step に対して単調増加する、というアプリ全体の不変条件に依存して
+// いる。メモ詳細側（apps/web/src/routes/(app)/memos/[id]/+page.server.ts の
+// nextStep 判定、schedule.find(row => row.completedAt === null)）は step 昇順で
+// 同じ行を求めており、この不変条件が崩れない限り両者は一致する（設計レビューで
+// 指摘）。将来 intervals の昇順検証を緩める場合は、この2箇所を必ず一緒に見直すこと。
 export function minPendingScheduledAtSubquery(db: Db) {
 	return db
 		.select({

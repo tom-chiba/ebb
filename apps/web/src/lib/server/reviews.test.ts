@@ -1129,4 +1129,17 @@ describe('listReviewSchedule', () => {
 		const schedule = await listReviewSchedule(db, crypto.randomUUID());
 		expect(schedule).toEqual([]);
 	});
+
+	it('reports every step as completed once all steps are done', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24, 72]
+		});
+		await db.update(reviews).set({ completedAt: new Date() }).where(eq(reviews.memoId, memo.id));
+
+		const schedule = await listReviewSchedule(db, memo.id);
+		expect(schedule).toHaveLength(3);
+		expect(schedule.every((row) => row.completedAt !== null)).toBe(true);
+	});
 });

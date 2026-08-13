@@ -534,6 +534,75 @@ describe('listMemosForBrowse', () => {
 		expect(result.total).toBe(1);
 	});
 
+	it('trims surrounding whitespace from a real query before matching', async () => {
+		await createMemo(db, ownerId, {
+			title: 'Cloudflare D1 のトランザクション制約',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const result = await listMemosForBrowse(db, ownerId, { q: '  D1  ' });
+		expect(result.total).toBe(1);
+	});
+
+	it('orders multiple matches newest-first, breaking createdAt ties by id', async () => {
+		const a = await createMemo(db, ownerId, {
+			title: 'match a',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const b = await createMemo(db, ownerId, {
+			title: 'match b',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const tiedTimestamp = new Date();
+		await db.update(memos).set({ createdAt: tiedTimestamp }).where(eq(memos.id, a.id));
+		await db.update(memos).set({ createdAt: tiedTimestamp }).where(eq(memos.id, b.id));
+
+		const result = await listMemosForBrowse(db, ownerId, { q: 'match' });
+		const expectedOrder = [a.id, b.id].sort().reverse();
+		expect(result.items.map((m) => m.id)).toEqual(expectedOrder);
+	});
+
+	it('paginates filtered results, keeping total as the filtered count', async () => {
+		const created = [];
+		for (let i = 0; i < 3; i++) {
+			created.push(
+				await createMemo(db, ownerId, {
+					title: `paged match ${i}`,
+					content: 'c',
+					intervalPresetId: ownerPresetId
+				})
+			);
+		}
+		// フィルタに一致しないメモも混ぜ、offset/limit がフィルタ後の結果に対して
+		// 適用されていることを確認する（フィルタ前の行に対して適用されるリグレッションの検出）。
+		await createMemo(db, ownerId, { title: 'unrelated', content: 'c', intervalPresetId: ownerPresetId });
+
+		const page1 = await listMemosForBrowse(db, ownerId, { q: 'paged match', limit: 2, offset: 0 });
+		const page2 = await listMemosForBrowse(db, ownerId, { q: 'paged match', limit: 2, offset: 2 });
+		expect(page1.total).toBe(3);
+		expect(page2.total).toBe(3);
+		expect(page1.items).toHaveLength(2);
+		expect(page2.items).toHaveLength(1);
+
+		const seenIds = [...page1.items, ...page2.items].map((m) => m.id).sort();
+		expect(seenIds).toEqual([...created.map((m) => m.id)].sort());
+	});
+
+	it('excludes archived memos even when their title matches the query', async () => {
+		const archived = await createMemo(db, ownerId, {
+			title: 'archived match',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await archiveMemo(db, ownerId, archived.id);
+
+		const result = await listMemosForBrowse(db, ownerId, { q: 'archived match' });
+		expect(result.items).toEqual([]);
+		expect(result.total).toBe(0);
+	});
+
 	// LIKE の % / _ はワイルドカードだが、検索語としてそのまま入力された場合は
 	// リテラルな1文字として扱われるべき（設計判断、apps/web/src/lib/server/memos.ts の
 	// likePattern を参照）。
@@ -584,6 +653,34 @@ describe('listMemosForBrowse', () => {
 
 		const result = await listMemosForBrowse(db, ownerId);
 		expect(result.items[0]?.nextScheduledAt).toBeNull();
+	});
+
+	// 上の2テストはメモを1件しか作らないため、LEFT JOIN の結合条件を取り違えても
+	// （例えば groupBy を落として他メモの行と混ざっても）検出できない。2件以上の
+	// メモを同時に持たせ、各メモの nextScheduledAt が自分自身の reviews にのみ
+	// 基づくことを確認する（レビューで指摘）。
+	it('computes nextScheduledAt independently per memo when multiple memos exist', async () => {
+		const completed = await createMemo(db, ownerId, {
+			title: 'fully completed',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24]
+		});
+		await db
+			.update(reviews)
+			.set({ completedAt: new Date() })
+			.where(eq(reviews.memoId, completed.id));
+		const pending = await createMemo(db, ownerId, {
+			title: 'still pending',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+
+		const result = await listMemosForBrowse(db, ownerId);
+		const byId = new Map(result.items.map((m) => [m.id, m]));
+		expect(byId.get(completed.id)?.nextScheduledAt).toBeNull();
+		expect(byId.get(pending.id)?.nextScheduledAt?.getTime()).toBe(
+			pending.createdAt.getTime() + 1 * 60 * 60 * 1000
+		);
 	});
 });
 
