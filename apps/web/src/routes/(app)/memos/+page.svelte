@@ -12,10 +12,10 @@
 	let prevOffset = $derived(Math.max(0, data.offset - data.limit));
 	let nextOffset = $derived(data.offset + data.limit);
 
-	function paramsFor(offset: number): SvelteURLSearchParams {
+	function paramsFor(offset: number): string {
 		const params = new SvelteURLSearchParams({ offset: String(offset) });
 		if (data.q) params.set('q', data.q);
-		return params;
+		return params.toString();
 	}
 </script>
 
