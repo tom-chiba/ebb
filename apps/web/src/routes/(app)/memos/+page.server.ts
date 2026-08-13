@@ -1,6 +1,6 @@
 import { requireAuthedDb } from '$lib/server/api';
 import { excerptOf } from '$lib/server/excerpt';
-import { listMemos } from '$lib/server/memos';
+import { listMemosForBrowse } from '$lib/server/memos';
 import { parsePaginationParam } from '$lib/server/pagination';
 import type { PageServerLoad } from './$types';
 
@@ -15,16 +15,20 @@ export const load: PageServerLoad = async (event) => {
 	// API と、人がブラウズするページとで意図的に挙動を変えている）。
 	const offsetParam = parsePaginationParam(event.url.searchParams.get('offset'));
 	const offset = typeof offsetParam === 'number' ? offsetParam : 0;
+	const q = event.url.searchParams.get('q')?.trim() || undefined;
 
-	const result = await listMemos(db, user.id, { limit: PAGE_SIZE, offset });
+	const result = await listMemosForBrowse(db, user.id, { limit: PAGE_SIZE, offset, q });
 	// 一覧は excerpt（先頭 80 文字程度）しか表示に使わないため、最大 50,000 文字の
 	// content を丸ごとクライアントへ送らず、ここで切り詰めてから返す。
 	return {
 		...result,
+		q: q ?? '',
 		items: result.items.map((memo) => ({
 			id: memo.id,
 			title: memo.title,
-			excerpt: excerptOf(memo.content)
+			excerpt: excerptOf(memo.content),
+			presetName: memo.presetName,
+			nextScheduledAt: memo.nextScheduledAt
 		}))
 	};
 };

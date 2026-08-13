@@ -84,6 +84,22 @@ function minPendingStepSubquery(db: Db) {
 		.as('min_pending_step');
 }
 
+// メモ一覧（apps/web/src/lib/server/memos.ts の listMemosForBrowse）向け。
+// 「次回予定時刻」はメモの現在ステップの scheduledAt そのものであり、
+// 全ステップ完了済み（未完了行が1件も無い）メモはこのサブクエリに現れず、
+// LEFT JOIN 側で null になることで「復習完了」と判定できる。
+export function minPendingScheduledAtSubquery(db: Db) {
+	return db
+		.select({
+			memoId: reviews.memoId,
+			minScheduledAt: sql<Date>`min(${reviews.scheduledAt})`.as('min_scheduled_at')
+		})
+		.from(reviews)
+		.where(isNull(reviews.completedAt))
+		.groupBy(reviews.memoId)
+		.as('min_pending_scheduled_at');
+}
+
 export async function listDueReviews(db: Db, userId: string, options: ListOptions = {}) {
 	const limit = clamp(options.limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT);
 	const offset = normalizeOffset(options.offset);
@@ -414,6 +430,25 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 		completedAt,
 		nextScheduledAt
 	};
+}
+
+export interface ReviewScheduleStep {
+	step: number;
+	scheduledAt: Date;
+	completedAt: Date | null;
+}
+
+// メモ詳細画面（apps/web/src/routes/(app)/memos/[id]）向け。そのメモの reviews 行を
+// 完了済み・未完了の両方まとめて step 昇順で返す。getDueReviewDetail は「現在の1
+// ステップ」の詳細を返す専用ロジック（assertIsCurrentStep 等）を含み、全ステップの
+// 一覧という別の要求には合わないため、独立した関数として用意する。
+export async function listReviewSchedule(db: Db, memoId: string): Promise<ReviewScheduleStep[]> {
+	return db
+		.select({ step: reviews.step, scheduledAt: reviews.scheduledAt, completedAt: reviews.completedAt })
+		.from(reviews)
+		.where(eq(reviews.memoId, memoId))
+		.orderBy(asc(reviews.step))
+		.all();
 }
 
 export interface ReviewRecalculationPlan {
