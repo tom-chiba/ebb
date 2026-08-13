@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { deserialize } from '$app/forms';
+	import { authClient } from '$lib/auth-client';
 	import { urlBase64ToUint8Array } from '$lib/push-subscribe';
 	import type { PageProps } from './$types';
 
@@ -12,6 +13,16 @@
 	let subscribed = $state(false);
 	let pushBusy = $state(false);
 	let pushStatusMessage = $state('');
+	let accountStatusMessage = $state('');
+
+	async function signOut() {
+		const { error: err } = await authClient.signOut();
+		if (err) {
+			accountStatusMessage = `ログアウトに失敗しました: ${err.message ?? JSON.stringify(err)}`;
+			return;
+		}
+		location.reload();
+	}
 
 	// pushManager.subscribe() が返した購読を ?/subscribePush へ保存する。成功時は
 	// true を返す。savePushSubscription は endpoint に対する upsert
@@ -323,6 +334,17 @@
 	{/if}
 </section>
 
+<section>
+	<h2>アカウント</h2>
+	<div class="account">
+		<span>{data.user.name}</span>
+		<button onclick={signOut}>ログアウト</button>
+	</div>
+	{#if accountStatusMessage}
+		<p class="error">{accountStatusMessage}</p>
+	{/if}
+</section>
+
 <style>
 	section {
 		margin-bottom: 2rem;
@@ -380,5 +402,14 @@
 
 	.error {
 		color: var(--color-error);
+	}
+
+	.account {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-card);
+		padding: 0.75rem 1rem;
 	}
 </style>
