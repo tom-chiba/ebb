@@ -17,6 +17,7 @@ import {
 	type Db
 } from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
+import { excerptOf } from './excerpt';
 import { ConflictError, NotFoundError } from './errors';
 import { clamp, normalizeOffset, type PaginationOptions } from './pagination';
 
@@ -29,11 +30,20 @@ export interface DueReviewSummary {
 	id: string;
 	memoId: string;
 	memoTitle: string;
+	// ホームの一覧カードでの抜粋表示用。一覧クエリの時点で切り詰め、生の
+	// memos.content（最大 50,000 文字）を呼び出し元に持ち出さない
+	// （apps/web/src/routes/app/memos/+page.server.ts と同じ方針）。
+	memoExcerpt: string;
 	step: number;
 	scheduledAt: Date;
 }
 
-export interface DueReviewDetail extends DueReviewSummary {
+export interface DueReviewDetail {
+	id: string;
+	memoId: string;
+	memoTitle: string;
+	step: number;
+	scheduledAt: Date;
 	memoContent: string;
 }
 
@@ -84,12 +94,13 @@ export async function listDueReviews(db: Db, userId: string, options: ListOption
 		lte(reviews.scheduledAt, now)
 	);
 
-	const [items, totalRows] = await Promise.all([
+	const [rows, totalRows] = await Promise.all([
 		db
 			.select({
 				id: reviews.id,
 				memoId: reviews.memoId,
 				memoTitle: memos.title,
+				memoContent: memos.content,
 				step: reviews.step,
 				scheduledAt: reviews.scheduledAt
 			})
@@ -111,6 +122,18 @@ export async function listDueReviews(db: Db, userId: string, options: ListOption
 			.where(where)
 			.all()
 	]);
+
+	// 呼び出し元（ホームのカード表示）は抜粋しか使わないため、ここで切り詰めて
+	// 生の memos.content（最大 50,000 文字）を持ち出さない
+	// （apps/web/src/routes/app/memos/+page.server.ts と同じ方針）。
+	const items: DueReviewSummary[] = rows.map((row) => ({
+		id: row.id,
+		memoId: row.memoId,
+		memoTitle: row.memoTitle,
+		memoExcerpt: excerptOf(row.memoContent),
+		step: row.step,
+		scheduledAt: row.scheduledAt
+	}));
 
 	return {
 		items,
