@@ -1811,3 +1811,45 @@ VAPID_PRIVATE_KEY` が必要**（ユーザーが実行する必要がある。#1
   認証済みの変更リクエスト、期限切れ・現在 step の再検証、誤操作時の回復手段が必要になる。
   既存の復習画面はこれらの検証と操作 UI を既に持つため、通知クリックで同画面へ遷移する
   導線を採用する
+
+## デザイントークン・タイポグラフィ基盤 (#55)
+
+- **`.flash` はアクセント淡色トークン（`--color-accent-bg: #eaf1ed` / `--color-accent-border:
+  #cddfd6`）に対応させた**。Issue が指定する採用色一覧には成功系（緑）の色が存在せず、
+  既存の `.flash`（`#eef6ec` / `#b8d8ae`）をそのまま個別トークン化すると、パレット外の
+  hex 値が2つ残ってしまい「主要な色がハードコードでなく共通の定義から参照できる」という
+  受け入れ条件を半分しか満たせない。アクセント色の淡色バリアントは positive な状態表示の
+  役割を兼ねると判断し、既存の緑系トーンは廃止してアクセントトークンに統合した
+- **カード/入力の枠線3色（`#e5e0d5` / `#ddd8cc` / `#eae5da`）は、参照元
+  （claude.ai design project 内 `Ebb Redesign.dc.html`）から役割の対応が取得できないため、
+  明度順で機械的に命名した**: `--color-border-subtle`(`#eae5da`、最淡) / `--color-border`
+  (`#e5e0d5`、中間・既定) / `--color-border-strong`(`#ddd8cc`、最濃)。これは実装上の想定で
+  あり、デザイン確定時に役割の割り当てが変わる可能性がある
+- **フォントは Google Fonts CDN ではなく `@fontsource/noto-sans-jp` /
+  `@fontsource/noto-serif-jp` をセルフホストで導入した**。両パッケージは weight ×
+  unicode-range（`japanese-*.css` 等）単位で `@font-face` が分割されているため、
+  `japanese-400.css` のように日本語サブセットだけを `app.css` から `@import` すれば、
+  ラテン文字・キリル文字等の不要な woff2（1 weight あたり数百 KB〜1MB超）を除外できる。
+  Vite がビルド時に `files/*.woff2`/`.woff` を `_app/immutable/assets/` 配下の静的アセットへ
+  bundling するため、本番ビルドでも Google Fonts CDN への外部リクエストは発生しない
+  （手動での woff2 ダウンロード・配置は不要と判断した）
+- **PWA の `theme-color`（`#1c2b39`、`manifest.webmanifest` と `+layout.svelte` の
+  `<meta>` にハードコードされている値）は本 Issue のスコープ外として変更していない**。
+  この重複は #9 で意図的に許容されているもので、今回導入した CSS カスタムプロパティは
+  ページコンテンツの配色にのみ適用し、ブラウザ UI 用の `theme-color` には関与しない
+- **既存の `.flash`/`.warning`/`.error` は表示クラス自体の共通化（1箇所への統合）は行わず、
+  各ファイルの色・radius の値をトークン参照に置き換えるのみに留めた**。Issue の作業内容が
+  求めるのは「新トークンへの置き換え」であり、複数ファイルへの重複定義自体の解消は
+  スコープに含めていないため
+- **警告バナーの文字色2値（`#6b4f21` / `#7a5f30`）は、両方とも `--color-warning-bg`
+  （`#fdf3e5`）上のテキスト用として、`--color-warning-text`(`#6b4f21`) をバナー本文に、
+  `--color-warning-text-secondary`(`#7a5f30`) を予備（現時点で未使用）として定義した**。
+  当初はこの2値のうち1つを `--color-warning-button` 背景の上のボタン文字色に転用したが、
+  レビューで `#8a6a2f` と `#7a5f30` の組み合わせが WCAG コントラスト比 1.19:1
+  （最低基準 4.5:1 を大幅に下回り実質判読不能）になることを指摘され誤りと判明した。
+  Issue はボタンの文字色を指定していないため、ボタン専用に `--color-warning-button-text`
+  (`#fffdf8`、`--color-warning-button` とのコントラスト比 4.94:1) を新規追加し、
+  警告バナーの文字色2値とは独立させた。当初 `--color-warning-text-strong` という名前も
+  付けていたが、このPR内の border トークンの命名規則（`-strong` = 明度順で最も濃い値）と
+  逆転していた（`#7a5f30` は `#6b4f21` より明るい）ため、意味を持たせない
+  `-secondary` に変更した
