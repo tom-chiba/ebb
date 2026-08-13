@@ -30,7 +30,7 @@
 </form>
 
 {#if data.items.length === 0}
-	{#if data.q}
+	{#if data.q && data.total === 0}
 		<p>「{data.q}」に一致するメモはありません。</p>
 	{:else if data.total === 0}
 		<p>まだメモがありません。</p>
