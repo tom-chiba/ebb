@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import Fab from '$lib/components/Fab.svelte';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -11,7 +12,6 @@
 </script>
 
 <h1>メモ</h1>
-<p><a href={resolve('/app/memos/new')}>＋ 新規作成</a></p>
 
 {#if data.items.length === 0}
 	{#if data.total === 0}
@@ -38,6 +38,8 @@
 		<a href="{resolve('/app/memos')}?offset={nextOffset}">次へ →</a>
 	{/if}
 </nav>
+
+<Fab href={resolve('/app/memos/new')} label="新規メモを作成" />
 
 <style>
 	ul {

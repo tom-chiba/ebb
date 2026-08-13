@@ -55,6 +55,9 @@
 	--radius-card: 14px;
 	--radius-button: 26px;
 	--radius-chip: 14px;
+
+	/* layout */
+	--bottom-nav-height: 52px;
 }
 
 body {

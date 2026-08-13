@@ -1,50 +1,81 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
-	import { authClient } from '$lib/auth-client';
 	import type { LayoutProps } from './$types';
 
-	let { data, children }: LayoutProps = $props();
+	let { children }: LayoutProps = $props();
 
-	let statusMessage = $state('');
-
-	async function signOut() {
-		const { error: err } = await authClient.signOut();
-		if (err) {
-			statusMessage = `ログアウトに失敗しました: ${err.message ?? JSON.stringify(err)}`;
-			return;
-		}
-		location.reload();
+	function isActivePath(pathname: string, base: string): boolean {
+		return pathname === base || pathname.startsWith(`${base}/`);
 	}
+
+	let isHome = $derived(page.url.pathname === resolve('/app'));
+	let isReviews = $derived(isActivePath(page.url.pathname, resolve('/app/reviews')));
+	let isMemos = $derived(isActivePath(page.url.pathname, resolve('/app/memos')));
+	let isSettings = $derived(isActivePath(page.url.pathname, resolve('/app/settings')));
 </script>
 
-<header>
-	<nav>
-		<a href={resolve('/app')}>ホーム</a>
-		<a href={resolve('/app/reviews')}>今日の復習</a>
-		<a href={resolve('/app/memos')}>メモ</a>
-		<a href={resolve('/app/settings')}>設定</a>
-	</nav>
-	<span>{data.user.name}</span>
-	<button onclick={signOut}>ログアウト</button>
-</header>
+<main>
+	{@render children()}
+</main>
 
-{#if statusMessage}
-	<p>{statusMessage}</p>
-{/if}
-
-{@render children()}
+<nav class="bottom-nav">
+	<a href={resolve('/app')} class:active={isHome} aria-current={isHome ? 'page' : undefined}>
+		ホーム
+	</a>
+	<a
+		href={resolve('/app/reviews')}
+		class:active={isReviews}
+		aria-current={isReviews ? 'page' : undefined}
+	>
+		復習
+	</a>
+	<a
+		href={resolve('/app/memos')}
+		class:active={isMemos}
+		aria-current={isMemos ? 'page' : undefined}
+	>
+		メモ
+	</a>
+	<a
+		href={resolve('/app/settings')}
+		class:active={isSettings}
+		aria-current={isSettings ? 'page' : undefined}
+	>
+		設定
+	</a>
+</nav>
 
 <style>
-	header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.75rem 1rem;
-		border-bottom: 1px solid var(--color-border);
+	main {
+		padding-bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom) + 4.5rem);
 	}
 
-	nav {
+	.bottom-nav {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 0;
 		display: flex;
-		gap: 1rem;
+		padding-bottom: env(safe-area-inset-bottom);
+		background: var(--color-bg);
+		border-top: 1px solid var(--color-border);
+	}
+
+	.bottom-nav a {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		min-height: var(--bottom-nav-height);
+		text-align: center;
+		font-size: 0.72rem;
+		color: var(--color-text-caption);
+		text-decoration: none;
+	}
+
+	.bottom-nav a.active {
+		color: var(--color-accent);
+		font-weight: 700;
 	}
 </style>
