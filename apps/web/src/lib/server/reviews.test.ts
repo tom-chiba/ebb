@@ -21,6 +21,7 @@ import {
 	completeReview,
 	getDueReviewDetail,
 	listDueReviews,
+	listReviewSchedule,
 	planReviewRecalculation
 } from './reviews';
 import { createTestUser } from './test-helpers';
@@ -1088,5 +1089,44 @@ describe('planReviewRecalculation', () => {
 			.all();
 		expect(rows.map((r) => r.step)).toEqual([0, 1, 2]);
 		expect(rows.filter((r) => r.completedAt === null)).toHaveLength(2);
+	});
+});
+
+describe('listReviewSchedule', () => {
+	it('returns all steps ordered ascending, both completed and pending', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24, 72]
+		});
+
+		const schedule = await listReviewSchedule(db, memo.id);
+		expect(schedule.map((row) => row.step)).toEqual([0, 1, 2]);
+		expect(schedule.every((row) => row.completedAt === null)).toBe(true);
+	});
+
+	it('distinguishes completed steps (with completedAt) from pending ones (without)', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24, 72]
+		});
+		const [firstStep] = await db
+			.select()
+			.from(reviews)
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 0)))
+			.all();
+		if (!firstStep) throw new Error('fixture setup failed');
+		const completedAt = new Date();
+		await db.update(reviews).set({ completedAt }).where(eq(reviews.id, firstStep.id));
+
+		const schedule = await listReviewSchedule(db, memo.id);
+		expect(schedule[0]?.completedAt?.getTime()).toBe(completedAt.getTime());
+		expect(schedule[1]?.completedAt).toBeNull();
+	});
+
+	it('returns an empty array for a memo with no reviews', async () => {
+		const schedule = await listReviewSchedule(db, crypto.randomUUID());
+		expect(schedule).toEqual([]);
 	});
 });

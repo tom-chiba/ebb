@@ -92,7 +92,11 @@ export function minPendingScheduledAtSubquery(db: Db) {
 	return db
 		.select({
 			memoId: reviews.memoId,
-			minScheduledAt: sql<Date>`min(${reviews.scheduledAt})`.as('min_scheduled_at')
+			// reviews.scheduledAt は integer(mode: 'timestamp_ms') 列だが、min() を通した
+			// raw sql 式は drizzle の timestamp デコードを経由しないため、ここでは素の
+			// エポックミリ秒（number）として扱う。呼び出し側（listMemosForBrowse）で
+			// Date へ変換する。
+			minScheduledAt: sql<number>`min(${reviews.scheduledAt})`.as('min_scheduled_at')
 		})
 		.from(reviews)
 		.where(isNull(reviews.completedAt))

@@ -9,6 +9,7 @@ import {
 	createMemo,
 	getMemo,
 	listMemos,
+	listMemosForBrowse,
 	TITLE_MAX_LENGTH,
 	updateMemo
 } from './memos';
@@ -488,6 +489,101 @@ describe('listMemos / getMemo', () => {
 		});
 		await archiveMemo(db, ownerId, memo.id);
 		await expect(getMemo(db, ownerId, memo.id)).rejects.toThrow(NotFoundError);
+	});
+});
+
+describe('listMemosForBrowse', () => {
+	it('returns all memos with preset name when q is not specified', async () => {
+		await createMemo(db, ownerId, {
+			title: 'Cloudflare D1 のトランザクション制約',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const result = await listMemosForBrowse(db, ownerId);
+		expect(result.total).toBe(1);
+		expect(result.items[0]?.presetName).toBe('owner preset');
+	});
+
+	it('matches memos whose title contains the query as a substring', async () => {
+		await createMemo(db, ownerId, {
+			title: 'Cloudflare D1 のトランザクション制約',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await createMemo(db, ownerId, {
+			title: 'Web Push の VAPID 鍵',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+
+		const result = await listMemosForBrowse(db, ownerId, { q: 'D1' });
+		expect(result.items.map((m) => m.title)).toEqual(['Cloudflare D1 のトランザクション制約']);
+		expect(result.total).toBe(1);
+	});
+
+	it('returns no items when the query matches nothing', async () => {
+		await createMemo(db, ownerId, { title: 'title', content: 'c', intervalPresetId: ownerPresetId });
+		const result = await listMemosForBrowse(db, ownerId, { q: 'no such title' });
+		expect(result.items).toEqual([]);
+		expect(result.total).toBe(0);
+	});
+
+	it('treats a blank query the same as no query', async () => {
+		await createMemo(db, ownerId, { title: 'title', content: 'c', intervalPresetId: ownerPresetId });
+		const result = await listMemosForBrowse(db, ownerId, { q: '   ' });
+		expect(result.total).toBe(1);
+	});
+
+	// LIKE の % / _ はワイルドカードだが、検索語としてそのまま入力された場合は
+	// リテラルな1文字として扱われるべき（設計判断、apps/web/src/lib/server/memos.ts の
+	// likePattern を参照）。
+	it('treats literal % and _ in the query as literal characters, not wildcards', async () => {
+		await createMemo(db, ownerId, { title: '50% off', content: 'c', intervalPresetId: ownerPresetId });
+		await createMemo(db, ownerId, {
+			title: '50X off',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+
+		const percentMatch = await listMemosForBrowse(db, ownerId, { q: '50%' });
+		expect(percentMatch.items.map((m) => m.title)).toEqual(['50% off']);
+
+		const underscoreQuery = await listMemosForBrowse(db, ownerId, { q: '50_' });
+		expect(underscoreQuery.items).toEqual([]);
+	});
+
+	it('does not match another user memo, even with a matching title', async () => {
+		await createMemo(db, otherUserId, {
+			title: 'shared title',
+			content: 'c',
+			intervalPresetId: otherUserPresetId
+		});
+		const result = await listMemosForBrowse(db, ownerId, { q: 'shared' });
+		expect(result.items).toEqual([]);
+	});
+
+	it('reports the next scheduled time as the earliest pending review', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24]
+		});
+		const result = await listMemosForBrowse(db, ownerId);
+		expect(result.items[0]?.nextScheduledAt?.getTime()).toBe(
+			memo.createdAt.getTime() + 1 * 60 * 60 * 1000
+		);
+	});
+
+	it('reports null next scheduled time once every review step is completed', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24]
+		});
+		await db.update(reviews).set({ completedAt: new Date() }).where(eq(reviews.memoId, memo.id));
+
+		const result = await listMemosForBrowse(db, ownerId);
+		expect(result.items[0]?.nextScheduledAt).toBeNull();
 	});
 });
 

@@ -107,9 +107,7 @@ export async function listMemosForBrowse(
 	const where = and(
 		eq(memos.userId, userId),
 		isNull(memos.archivedAt),
-		trimmedQuery
-			? sql`${memos.title} LIKE ${likePattern(trimmedQuery)} ESCAPE '\'`
-			: undefined
+		trimmedQuery ? sql`${memos.title} LIKE ${likePattern(trimmedQuery)} ESCAPE '\\'` : undefined
 	);
 
 	const minPendingScheduledAt = minPendingScheduledAtSubquery(db);
@@ -140,7 +138,7 @@ export async function listMemosForBrowse(
 			title: row.title,
 			content: row.content,
 			presetName: row.presetName,
-			nextScheduledAt: row.nextScheduledAt
+			nextScheduledAt: row.nextScheduledAt === null ? null : new Date(row.nextScheduledAt)
 		})),
 		total: totalRows[0]?.total ?? 0,
 		limit,
