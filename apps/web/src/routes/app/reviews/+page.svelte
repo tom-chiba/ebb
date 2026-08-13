@@ -16,7 +16,7 @@
 	}
 </script>
 
-<h1>今日の復習</h1>
+<h1>復習</h1>
 
 {#if data.completedTitle}
 	{@const nextScheduledAt = data.nextScheduledAt}

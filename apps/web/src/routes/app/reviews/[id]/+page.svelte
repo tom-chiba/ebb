@@ -16,6 +16,9 @@
 <div class="actions">
 	<a href={resolve('/app/reviews')}>一覧へ戻る</a>
 	<form method="POST" action="?/complete">
+		{#if data.from}
+			<input type="hidden" name="from" value={data.from} />
+		{/if}
 		<button type="submit">復習した</button>
 	</form>
 </div>
