@@ -20,10 +20,11 @@ export const load: PageServerLoad = async (event) => {
 		// 常に最小の未完了 step からのみ完了させる不変条件（apps/web/src/lib/server/reviews.ts
 		// の assertIsCurrentStep と同じ前提）により、未完了行のうち step が最小のものが
 		// 「次回予定」として強調すべき行になる。全行が完了済みなら該当なし（= 復習完了）。
-		// メモ一覧側（apps/web/src/lib/server/reviews.ts の
-		// minPendingScheduledAtSubquery、min(scheduledAt) で同じ行を選ぶ）と判定方法が
-		// 異なる（step 昇順 vs 時刻の最小値）ため、両者が同じ行を指すのは intervals が
-		// 常に厳密昇順であるという不変条件に依存している（同ファイルのコメント参照）。
+		// メモ一覧側（apps/web/src/lib/server/reviews.ts の minPendingScheduledAtSubquery、
+		// min(scheduledAt) で同じ行を選ぶ）とは判定方法が異なる（min(step) vs
+		// min(scheduledAt)）。通常は一致するが、プリセット切替後の再アンカリング未実施
+		// （#18 スコープ）が絡む場合は一致しないことがある。詳細は
+		// minPendingScheduledAtSubquery のコメントを参照。
 		const nextStep = schedule.find((row) => row.completedAt === null);
 
 		return {

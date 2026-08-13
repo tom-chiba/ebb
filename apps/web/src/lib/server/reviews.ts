@@ -91,14 +91,24 @@ function minPendingStepSubquery(db: Db) {
 //
 // ここでは未完了行を min(step) ではなく min(scheduledAt) で選んでいる（一覧の
 // JOIN で1行に絞り込む都合上、step ではなく時刻を直接引く方が JOIN 条件が単純に
-// なるため）。これが「現在ステップ（最小 step）の scheduledAt」と一致するのは、
-// intervals が常に厳密昇順である（@ebb/core の parseIntervals が全てのプリセット
-// 作成・更新経路で検証し、SYSTEM_INTERVAL_PRESETS も昇順で定義されている）ため、
-// scheduledAt が step に対して単調増加する、というアプリ全体の不変条件に依存して
-// いる。メモ詳細側（apps/web/src/routes/(app)/memos/[id]/+page.server.ts の
-// nextStep 判定、schedule.find(row => row.completedAt === null)）は step 昇順で
-// 同じ行を求めており、この不変条件が崩れない限り両者は一致する（設計レビューで
-// 指摘）。将来 intervals の昇順検証を緩める場合は、この2箇所を必ず一緒に見直すこと。
+// なるため）。メモ詳細側（apps/web/src/routes/(app)/memos/[id]/+page.server.ts の
+// nextStep 判定、schedule.find(row => row.completedAt === null)）は min(step) で
+// 同じ行を求めており、通常は intervals が常に厳密昇順である（@ebb/core の
+// parseIntervals が全てのプリセット作成・更新経路で検証し、SYSTEM_INTERVAL_PRESETS
+// も昇順で定義されている）ため scheduledAt が step に対して単調増加し、両者は
+// 一致する（設計レビューで指摘）。
+//
+// ただし intervals が昇順であっても一致しないケースが存在する: メモの
+// intervalPresetId が作成後に別プリセットへ変更され（updateMemo は reviews を
+// 再生成しない。#18 のスコープ）、その後 completeReview が未完了ステップを
+// 新プリセットの intervals で再アンカリングする際、新 intervals の範囲外に
+// なった step は再アンカリングされず古い scheduledAt が残る（completeReview の
+// reanchorUpdates 節を参照）。この場合、古い scheduledAt を持つ後続 step が
+// 新しく再アンカリングされた前段の step より早い時刻になり得るため、
+// min(scheduledAt) と min(step) が異なる行を指すことがある（正確性レビューで
+// 指摘）。この不整合自体は #18 のスコープであり#60では解消しない。現状の Web UI
+// （memos/[id]/edit）は既存メモの intervalPresetId 変更を提供していないため、
+// この経路は API を直接叩いた場合にのみ到達する。
 export function minPendingScheduledAtSubquery(db: Db) {
 	return db
 		.select({
