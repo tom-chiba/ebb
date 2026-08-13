@@ -796,6 +796,109 @@ describe('getDueReviewDetail', () => {
 		expect(detail.scheduledAt.getTime()).toBe(due.scheduledAt.getTime());
 	});
 
+	// ownerPreset の intervals: [1, 24, 72] （3 ステップ）。
+	it('returns totalSteps and a preview of the next scheduledAt', async () => {
+		const { due } = await createDueReview(ownerId, ownerPresetId, { content: '本文' });
+
+		const before = Date.now();
+		const detail = await getDueReviewDetail(db, ownerId, due.id);
+		const after = Date.now();
+
+		expect(detail.totalSteps).toBe(3);
+		// step 0 を今完了したとみなした場合の次ステップ（step 1、interval 24h）の予定時刻。
+		expect(detail.previewNextScheduledAt).not.toBeNull();
+		const previewMs = detail.previewNextScheduledAt?.getTime() ?? 0;
+		expect(previewMs).toBeGreaterThanOrEqual(before + 24 * 60 * 60 * 1000);
+		expect(previewMs).toBeLessThanOrEqual(after + 24 * 60 * 60 * 1000);
+	});
+
+	it('returns null preview when the current step is the final one', async () => {
+		const singlePreset = await db
+			.insert(intervalPresets)
+			.values({ userId: ownerId, name: 'single-step', intervals: [1] })
+			.returning();
+		const presetId = singlePreset[0]?.id;
+		if (!presetId) throw new Error('fixture setup failed');
+		const { due } = await createDueReview(ownerId, presetId, { content: '本文' });
+
+		const detail = await getDueReviewDetail(db, ownerId, due.id);
+		expect(detail.totalSteps).toBe(1);
+		expect(detail.previewNextScheduledAt).toBeNull();
+	});
+
+	// 上のテストは「作成直後に唯一のステップ」という縮退ケースのみを見ていた
+	// （テスト網羅性レビューで指摘）。複数ステップのプリセットで前段まで完了済みの、
+	// より実態に近い「進行後の最終ステップ」を検証する。
+	it('returns null preview for the final step of a multi-step preset after earlier steps are completed', async () => {
+		const memo = await createDueMemo(ownerId, ownerPresetId, { content: '本文' }); // intervals: [1, 24, 72]
+
+		let listed = await listDueReviews(db, ownerId);
+		await completeReview(db, ownerId, listed.items[0]!.id); // step 0 完了
+
+		await makeAllReviewsDue(db, memo.id);
+		listed = await listDueReviews(db, ownerId);
+		await completeReview(db, ownerId, listed.items[0]!.id); // step 1 完了
+
+		await makeAllReviewsDue(db, memo.id);
+		listed = await listDueReviews(db, ownerId);
+		const finalDue = listed.items[0];
+		if (!finalDue) throw new Error('fixture setup failed');
+
+		const detail = await getDueReviewDetail(db, ownerId, finalDue.id);
+		expect(detail.step).toBe(2);
+		expect(detail.totalSteps).toBe(3);
+		expect(detail.previewNextScheduledAt).toBeNull();
+	});
+
+	// プリセット変更で intervals が短くなっても、reviews 側に残っている未完了ステップの
+	// 実数を totalSteps に反映し、次ステップの存在有無（previewNextScheduledAt の null 判定）が
+	// completeReview の実際の結果と矛盾しないことを検証する（正確性レビューで指摘）。
+	// このテストが通る経路は「再アンカリング不能によるフォールバック（既存の scheduledAt を
+	// そのまま採用する）」分岐のみである。previewNextScheduledAt が nextReviewAt(now, ...) で
+	// 実際に再計算される（フォールバックしない）経路は、基準時刻が now と completedAt で
+	// 異なるため厳密な一致を検証できず、このテストの対象外（テスト網羅性レビューで指摘）。
+	it('keeps totalSteps and the re-anchor-fallback branch of the preview consistent with completeReview when the preset has been shortened mid-progress', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'memo', // intervals: [1, 24, 72]
+			content: '本文',
+			intervalPresetId: ownerPresetId
+		});
+		const [shortPreset] = await db
+			.insert(intervalPresets)
+			.values({ userId: ownerId, name: 'short', intervals: [1] })
+			.returning();
+		if (!shortPreset) throw new Error('fixture setup failed');
+		await updateMemo(db, ownerId, memo.id, memo.updatedAt, { intervalPresetId: shortPreset.id });
+
+		await makeAllReviewsDue(db, memo.id);
+		const listed = await listDueReviews(db, ownerId);
+		const due = listed.items[0];
+		if (!due) throw new Error('fixture setup failed');
+
+		const [step1Before] = await db
+			.select()
+			.from(reviews)
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 1)))
+			.all();
+		if (!step1Before) throw new Error('fixture setup failed');
+
+		const detail = await getDueReviewDetail(db, ownerId, due.id);
+		// reviews 側には元の3ステップ分の行が残っており、短縮後のプリセット
+		// （intervals: [1]、length 1）とは異なる。ヘッダーの「全 m 回」は
+		// 実際に画面遷移できるステップ数（3）と一致させる必要がある。
+		expect(detail.totalSteps).toBe(3);
+		// intervals[1] は存在しないため再アンカリング不可（nextReviewAt は undefined）。
+		// completeReview と同じフォールバックで、既存の scheduledAt（step1Before）を返すべき。
+		expect(detail.previewNextScheduledAt).not.toBeNull();
+		expect(detail.previewNextScheduledAt?.getTime()).toBe(step1Before.scheduledAt.getTime());
+
+		const result = await completeReview(db, ownerId, due.id);
+		// completeReview が実際に返す nextScheduledAt（次のステップは残っている）と
+		// プレビューが一致していること。
+		expect(result.nextScheduledAt).not.toBeNull();
+		expect(result.nextScheduledAt?.getTime()).toBe(detail.previewNextScheduledAt?.getTime());
+	});
+
 	// completeReview 側の同種テストと対になる検証。期限前の review は一覧に出ないだけでなく、
 	// id を直接指定しても復習画面を開けない。
 	it('rejects viewing the current step before its scheduledAt has arrived', async () => {
