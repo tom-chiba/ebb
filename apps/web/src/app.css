@@ -1,0 +1,74 @@
+@import '@fontsource/noto-sans-jp/japanese-400.css';
+@import '@fontsource/noto-sans-jp/japanese-500.css';
+@import '@fontsource/noto-sans-jp/japanese-700.css';
+@import '@fontsource/noto-serif-jp/japanese-500.css';
+@import '@fontsource/noto-serif-jp/japanese-600.css';
+
+:root {
+	/* accent */
+	--color-accent: #3d6b5c;
+	--color-accent-hover: #2f5648;
+	--color-accent-bg: #eaf1ed;
+	--color-accent-border: #cddfd6;
+
+	/* text */
+	--color-text: #24221e;
+	--color-text-secondary: #3a3630;
+	--color-text-muted: #6f6a5f;
+	--color-text-caption: #8a8478;
+	--color-text-faint: #a8a29a;
+
+	/* surface */
+	--color-bg: #eceae4;
+	--color-surface-card: #faf8f3;
+	--color-surface-input: #fffdf8;
+
+	/* border（明度順: subtle > border > strong） */
+	--color-border-subtle: #eae5da;
+	--color-border: #e5e0d5;
+	--color-border-strong: #ddd8cc;
+
+	/* warning */
+	--color-warning-bg: #fdf3e5;
+	--color-warning-border: #e8c98a;
+	--color-warning-text: #6b4f21;
+	--color-warning-text-secondary: #7a5f30;
+	--color-warning-button: #8a6a2f;
+	--color-warning-button-text: #fffdf8;
+
+	/* error / destructive */
+	--color-error: #b4562f;
+
+	/* code */
+	--color-code-bg: #1c1b18;
+	--color-code-text: #e8e4db;
+	--color-code-inline-bg: #f0ece3;
+
+	/* typography */
+	--font-heading: 'Noto Serif JP', serif;
+	--font-sans: 'Noto Sans JP', sans-serif;
+	--font-mono: ui-monospace, monospace;
+
+	/* radius */
+	--radius-sm: 4px;
+	--radius-md: 8px;
+	--radius-card: 14px;
+	--radius-button: 26px;
+	--radius-chip: 14px;
+}
+
+body {
+	background: var(--color-bg);
+	color: var(--color-text);
+	font-family: var(--font-sans);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+	font-family: var(--font-heading);
+	font-weight: 600;
+}
