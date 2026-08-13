@@ -1884,3 +1884,37 @@ VAPID_PRIVATE_KEY` が必要**（ユーザーが実行する必要がある。#1
   `app/settings/+page.svelte` に移設した**。`app/+layout.server.ts` の
   `{ user: locals.user }` は SvelteKit の親子 load データ結合により設定画面でも
   そのまま参照できるため、layout 側のデータ構造は変更していない
+
+## 復習詳細画面のリデザイン (#59)
+
+- **ヘッダーの「全 m 回」は `intervalPresets.intervals.length` ではなく、
+  そのメモの `reviews` 行の総数（完了済み + 未完了）を数えて計算する**
+  （`apps/web/src/lib/server/reviews.ts` の `getDueReviewDetail`）。
+  `updateMemo`（#13）は `intervalPresetId` を変更しても既存の `reviews` 行を
+  作り直さないため（#18 のスコープ、`completeReview` 節の既存コメントと同じ
+  前提）、プリセット変更後は `intervals.length` と実際の `reviews` 行数が
+  ずれ得る。ヘッダーは実際に画面遷移できるステップ数と一致させる必要がある
+  ため、`reviews` 側の実数を正とした
+- **次回予定のプレビュー（`previewNextScheduledAt`）は、ページの読み込み時点
+  (`now`) を基準に計算する**。実際に「復習した」を押した時点の `completedAt`
+  とは（ページを開いてから押すまでの経過時間だけ）ズレ得るが、表示は分単位
+  （`Intl.DateTimeFormat` の `timeStyle: 'short'`）のため、通常の操作時間内
+  では表示上の差は出ない。プリセット短縮等で再アンカリング計算ができない
+  場合のフォールバック（既存の `scheduledAt` を返す）は `completeReview` と
+  `resolveNextScheduledAt` ヘルパーを共有しており、この分岐は厳密に一致する
+  （テストで検証済み）。再計算される分岐の厳密な一致はテストしていない
+  （基準時刻が異なるため原理的に検証不可能、テストコードのコメントに明記）
+- **`.complete-bar`（「復習した」ボタン+プレビュー行）は `position: fixed` で
+  下部タブバーの直上に重ねる**。参照デザイン（`Ebb Redesign.dc.html` の
+  「復習の詳細」フレーム）にはタブバー自体が存在しない構成だが、既存の
+  `app/+layout.svelte` は全ページ共通でタブバーを表示する実装になっており、
+  この画面だけタブバーを隠す変更は本 Issue のスコープ外と判断し、タブバーは
+  残したままその上に固定バーを重ねる形にした
+- **Markdown 表示スタイル（`.markdown-body`）は `$lib/components/MarkdownBody.svelte`
+  に共通化したが、`formatDateTime`（`Intl.DateTimeFormat('ja-JP', {dateStyle:
+'medium', timeStyle:'short'})`）は `$lib/format-date-time.ts` に切り出した
+  上で、既存の重複箇所（`app/+page.svelte`, `app/reviews/+page.svelte`）は
+  移行せず残した**。Issue が要求する共通化は markdown-body のみであり、
+  `formatDateTime` の重複自体は本 Issue が持ち込んだものではない。今回
+  新規に追加するコードでさらに重複を増やさない（3箇所目のコピーを作らない）
+  対応に留め、既存2箇所への変更はスコープ外として見送った

@@ -10,7 +10,13 @@ export const load: PageServerLoad = async (event) => {
 	try {
 		const review = await getDueReviewDetail(db, user.id, event.params.id);
 		return {
-			review: { id: review.id, memoTitle: review.memoTitle },
+			review: {
+				id: review.id,
+				memoTitle: review.memoTitle,
+				step: review.step,
+				totalSteps: review.totalSteps,
+				previewNextScheduledAt: review.previewNextScheduledAt
+			},
 			renderedContent: renderMarkdown(review.memoContent),
 			// ホームのカードから来た場合はここに from=home が付いており、完了後も
 			// ホームへ戻す（下の complete アクション）。フォームの hidden input へ渡すため、

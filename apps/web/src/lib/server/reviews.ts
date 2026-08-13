@@ -43,8 +43,17 @@ export interface DueReviewDetail {
 	memoId: string;
 	memoTitle: string;
 	step: number;
+	// このメモの reviews 行の総数（完了済み + 未完了、「n 回目 / 全 m 回」表示用）。
+	// intervalPresets.intervals.length ではなくこちらを正とする理由は totalSteps の
+	// 計算箇所（getDueReviewDetail）のコメントを参照。
+	totalSteps: number;
 	scheduledAt: Date;
 	memoContent: string;
+	// 今この場で完了した場合に次のステップが再アンカリングされる予定時刻の事前計算。
+	// completeReview と同じ nextReviewAt(baseTime, intervals, step) を使うため、実際に
+	// 完了した際の値と（完了操作までの経過時間による分単位のずれを除き）一致する。
+	// 次のステップが存在しない（このステップが最終ステップ）場合は null。
+	previewNextScheduledAt: Date | null;
 }
 
 export interface CompletedReview {
@@ -158,6 +167,37 @@ async function assertIsCurrentStep(db: Db, memoId: string, step: number) {
 	}
 }
 
+// getDueReviewDetail・completeReview の両方が使う「プリセットの intervals を id から取得する」
+// クエリの共通化（設計レビューで指摘）。
+async function getPresetIntervals(db: Db, presetId: string): Promise<number[]> {
+	const presetRows = await db
+		.select({ intervals: intervalPresets.intervals })
+		.from(intervalPresets)
+		.where(eq(intervalPresets.id, presetId))
+		.limit(1)
+		.all();
+	return presetRows[0]?.intervals ?? [];
+}
+
+// getDueReviewDetail（プレビュー）・completeReview（実際の記録）の両方が使う、
+// 「次ステップの行が見つかった場合にどの日時を返すか」の決定ロジックの共通化
+// （設計レビューで指摘）。次ステップの行が無ければ「このメモの復習は完了する」
+// （null）。行があれば、再アンカリング計算（nextReviewAt）が済んでいればその新しい
+// 日時を、計算できなかった（プリセット短縮等で intervals[step] が存在しない）場合は
+// 既存の scheduledAt を返す（プリセット短縮時にも #17 の「対象ステップの完了」自体を
+// 失敗させない、という completeReview の既存の前提と同じフォールバック）。
+// 共有しているのはこのフォールバック処理のみ。「次ステップの行が存在するか」自体の
+// クエリ・取得方法は、呼び出し元が必要とするデータの形が異なるため（completeReview は
+// 再アンカリング計算のため残り全ステップの一覧が別途必要）、各関数で個別に行っている
+// （設計レビューで指摘: コメントが実態より広く「判定ロジックを共有」と書いていたのを訂正）。
+function resolveNextScheduledAt(
+	nextRow: { scheduledAt: Date } | undefined,
+	reanchoredScheduledAt: Date | undefined
+): Date | null {
+	if (!nextRow) return null;
+	return reanchoredScheduledAt ?? nextRow.scheduledAt;
+}
+
 export async function getDueReviewDetail(
 	db: Db,
 	userId: string,
@@ -172,7 +212,8 @@ export async function getDueReviewDetail(
 			memoContent: memos.content,
 			step: reviews.step,
 			scheduledAt: reviews.scheduledAt,
-			completedAt: reviews.completedAt
+			completedAt: reviews.completedAt,
+			intervalPresetId: memos.intervalPresetId
 		})
 		.from(reviews)
 		.innerJoin(memos, eq(reviews.memoId, memos.id))
@@ -191,13 +232,53 @@ export async function getDueReviewDetail(
 
 	await assertIsCurrentStep(db, row.memoId, row.step);
 
+	const intervals = await getPresetIntervals(db, row.intervalPresetId);
+
+	// 「全 m 回」は現在のプリセットの intervals ではなく、このメモの reviews 行の総数
+	// （完了済み + 未完了）で数える。updateMemo（#13）は intervalPresetId を変更しても
+	// 既存の reviews 行を作り直さないため（#18 のスコープ、reviews.ts の completeReview
+	// 節にある既存コメントと同じ前提）、プリセット変更後は intervals.length と実際の
+	// reviews 行数がずれ得る。ヘッダーの「n 回目 / 全 m 回」は実際に画面遷移できる
+	// ステップ数と一致させる必要があるため、reviews 側の実数を正とする。
+	const totalRows = await db
+		.select({ total: count() })
+		.from(reviews)
+		.where(eq(reviews.memoId, row.memoId))
+		.all();
+	// count() は必ず1行返すため totalRows[0] は必ず存在するが、listDueReviews と同じ
+	// 慣習で `?? 0` にする（設計レビューで指摘: 以前は `?? intervals.length` だった。
+	// これは到達しないコードである上、直前のコメントが「reviews 側の実数を正とする」と
+	// 述べているのに intervals 側の値へフォールバックしており矛盾していた）。
+	const totalSteps = totalRows[0]?.total ?? 0;
+
+	// 次のステップの reviews 行が実在するかを見て「次回予定」の有無を判定する
+	// （intervals.length だけを見ると、プリセット変更後に「次のステップが無い」と
+	// 誤判定し、実際に「復習した」を押した際の completeReview の結果と矛盾する
+	// 表示になってしまう。正確性レビューで指摘。見つかった行から返す日時の決定は
+	// resolveNextScheduledAt として completeReview と共有している）。
+	const nextStep = row.step + 1;
+	const nextStepRows = await db
+		.select({ scheduledAt: reviews.scheduledAt })
+		.from(reviews)
+		.where(
+			and(eq(reviews.memoId, row.memoId), eq(reviews.step, nextStep), isNull(reviews.completedAt))
+		)
+		.limit(1)
+		.all();
+	const previewNextScheduledAt = resolveNextScheduledAt(
+		nextStepRows[0],
+		nextReviewAt(now, intervals, nextStep)
+	);
+
 	return {
 		id: row.id,
 		memoId: row.memoId,
 		memoTitle: row.memoTitle,
 		memoContent: row.memoContent,
 		step: row.step,
-		scheduledAt: row.scheduledAt
+		totalSteps,
+		scheduledAt: row.scheduledAt,
+		previewNextScheduledAt
 	};
 }
 
@@ -234,13 +315,7 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 	// 完了時刻を起点に、このメモの残り未完了ステップの scheduledAt を再計算する
 	// （ユーザー承認済みの設計判断、docs/design-decisions.md の #17 節）。放置していた
 	// 期間をそのまま引き継いで一括消化できてしまうことを避け、間隔反復として機能させる。
-	const presetRows = await db
-		.select({ intervals: intervalPresets.intervals })
-		.from(intervalPresets)
-		.where(eq(intervalPresets.id, target.intervalPresetId))
-		.limit(1)
-		.all();
-	const intervals = presetRows[0]?.intervals ?? [];
+	const intervals = await getPresetIntervals(db, target.intervalPresetId);
 
 	const remaining = await db
 		.select({ id: reviews.id, step: reviews.step, scheduledAt: reviews.scheduledAt })
@@ -323,13 +398,14 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 	// を返したステップは除外済み）だけから判定すると、両者とも見つからず null になり、
 	// 実際には未完了ステップが残っているのに「すべて完了しました」と表示されてしまう
 	// （正確性レビューで指摘）。フィルタ前の remaining で「次のステップの行自体が
-	// 存在するか」を見た上で、再アンカリングされていればその新しい日時を、
-	// されていなければ（プリセット短縮で計算不能だった場合）既存の scheduledAt を返す。
+	// 存在するか」を見た上で判定する（resolveNextScheduledAt、getDueReviewDetail の
+	// プレビュー計算と共有するロジック）。
 	const nextStep = target.step + 1;
 	const nextRow = remaining.find((row) => row.step === nextStep);
-	const nextScheduledAt = nextRow
-		? (reanchorUpdates.find((u) => u.step === nextStep)?.scheduledAt ?? nextRow.scheduledAt)
-		: null;
+	const nextScheduledAt = resolveNextScheduledAt(
+		nextRow,
+		reanchorUpdates.find((u) => u.step === nextStep)?.scheduledAt
+	);
 
 	return {
 		id,
