@@ -76,7 +76,7 @@
 	}
 
 	/* bottom は下部タブバー（自身の高さに env(safe-area-inset-bottom) を
-	   含んでいる、apps/web/src/routes/+layout.svelte 参照）の直上に来る位置。
+	   含んでいる、apps/web/src/routes/(app)/+layout.svelte 参照）の直上に来る位置。
 	   このバー自体は端末の下端に接しないため、padding にセーフエリアを重ねて
 	   加算しない（正確性レビューで指摘: 二重加算していた）。 */
 	.complete-bar {
