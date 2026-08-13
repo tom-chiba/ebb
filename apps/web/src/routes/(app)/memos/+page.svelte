@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import Fab from '$lib/components/Fab.svelte';
 	import { formatShortDateTime } from '$lib/format-date-time';
 	import type { PageProps } from './$types';
@@ -11,17 +12,17 @@
 	let prevOffset = $derived(Math.max(0, data.offset - data.limit));
 	let nextOffset = $derived(data.offset + data.limit);
 
-	function pageLink(offset: number): string {
-		const params = new URLSearchParams({ offset: String(offset) });
+	function paramsFor(offset: number): SvelteURLSearchParams {
+		const params = new SvelteURLSearchParams({ offset: String(offset) });
 		if (data.q) params.set('q', data.q);
-		return `${resolve('/memos')}?${params.toString()}`;
+		return params;
 	}
 </script>
 
 <div class="title-row">
 	<h1>メモ</h1>
 	{#if data.total > 0}
-		<span class="count">全 {data.total} 件</span>
+		<span class="count">{data.q ? `${data.total} 件` : `全 ${data.total} 件`}</span>
 	{/if}
 </div>
 
@@ -59,10 +60,10 @@
 
 <nav>
 	{#if hasPrev}
-		<a href={pageLink(prevOffset)}>← 前へ</a>
+		<a href="{resolve('/memos')}?{paramsFor(prevOffset)}">← 前へ</a>
 	{/if}
 	{#if hasNext}
-		<a href={pageLink(nextOffset)}>次へ →</a>
+		<a href="{resolve('/memos')}?{paramsFor(nextOffset)}">次へ →</a>
 	{/if}
 </nav>
 

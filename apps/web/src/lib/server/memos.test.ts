@@ -522,14 +522,22 @@ describe('listMemosForBrowse', () => {
 	});
 
 	it('returns no items when the query matches nothing', async () => {
-		await createMemo(db, ownerId, { title: 'title', content: 'c', intervalPresetId: ownerPresetId });
+		await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
 		const result = await listMemosForBrowse(db, ownerId, { q: 'no such title' });
 		expect(result.items).toEqual([]);
 		expect(result.total).toBe(0);
 	});
 
 	it('treats a blank query the same as no query', async () => {
-		await createMemo(db, ownerId, { title: 'title', content: 'c', intervalPresetId: ownerPresetId });
+		await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
 		const result = await listMemosForBrowse(db, ownerId, { q: '   ' });
 		expect(result.total).toBe(1);
 	});
@@ -577,7 +585,11 @@ describe('listMemosForBrowse', () => {
 		}
 		// フィルタに一致しないメモも混ぜ、offset/limit がフィルタ後の結果に対して
 		// 適用されていることを確認する（フィルタ前の行に対して適用されるリグレッションの検出）。
-		await createMemo(db, ownerId, { title: 'unrelated', content: 'c', intervalPresetId: ownerPresetId });
+		await createMemo(db, ownerId, {
+			title: 'unrelated',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
 
 		const page1 = await listMemosForBrowse(db, ownerId, { q: 'paged match', limit: 2, offset: 0 });
 		const page2 = await listMemosForBrowse(db, ownerId, { q: 'paged match', limit: 2, offset: 2 });
@@ -607,7 +619,11 @@ describe('listMemosForBrowse', () => {
 	// リテラルな1文字として扱われるべき（設計判断、apps/web/src/lib/server/memos.ts の
 	// likePattern を参照）。
 	it('treats literal % and _ in the query as literal characters, not wildcards', async () => {
-		await createMemo(db, ownerId, { title: '50% off', content: 'c', intervalPresetId: ownerPresetId });
+		await createMemo(db, ownerId, {
+			title: '50% off',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
 		await createMemo(db, ownerId, {
 			title: '50X off',
 			content: 'c',

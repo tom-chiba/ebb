@@ -469,7 +469,11 @@ export interface ReviewScheduleStep {
 // 一覧という別の要求には合わないため、独立した関数として用意する。
 export async function listReviewSchedule(db: Db, memoId: string): Promise<ReviewScheduleStep[]> {
 	return db
-		.select({ step: reviews.step, scheduledAt: reviews.scheduledAt, completedAt: reviews.completedAt })
+		.select({
+			step: reviews.step,
+			scheduledAt: reviews.scheduledAt,
+			completedAt: reviews.completedAt
+		})
 		.from(reviews)
 		.where(eq(reviews.memoId, memoId))
 		.orderBy(asc(reviews.step))
