@@ -30,11 +30,7 @@
 	>
 		復習
 	</a>
-	<a
-		href={resolve('/memos')}
-		class:active={isMemos}
-		aria-current={isMemos ? 'page' : undefined}
-	>
+	<a href={resolve('/memos')} class:active={isMemos} aria-current={isMemos ? 'page' : undefined}>
 		メモ
 	</a>
 	<a
