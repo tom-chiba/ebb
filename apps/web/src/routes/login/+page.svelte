@@ -18,6 +18,90 @@
 	}
 </script>
 
-<h1>ログイン</h1>
-<button onclick={signInWithGoogle}>Google でログイン</button>
-<p>{statusMessage}</p>
+<div class="login">
+	<div class="brand">
+		<div class="logo-mark"></div>
+		<h1>Ebb</h1>
+		<p class="copy">
+			書いたメモを、忘れかけた頃に届けます。<br />1時間後、1日後、3日後 —
+			思い出すたびに記憶は残ります。
+		</p>
+	</div>
+	<button type="button" class="google-button" onclick={signInWithGoogle}>Google でログイン</button>
+	<p class="helper">通知の許可はログイン後、設定から行います。</p>
+	{#if statusMessage}
+		<p class="status">{statusMessage}</p>
+	{/if}
+</div>
+
+<style>
+	.login {
+		min-height: 100dvh;
+		max-width: 480px;
+		margin: 0 auto;
+		padding: 0 2rem;
+		box-sizing: border-box;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+	}
+
+	.brand {
+		display: flex;
+		flex-direction: column;
+		gap: 0.875rem;
+		margin-bottom: 2.5rem;
+	}
+
+	.logo-mark {
+		width: 44px;
+		height: 44px;
+		border-radius: 12px;
+		background: var(--color-accent);
+	}
+
+	.brand h1 {
+		font-size: 2.125rem;
+		letter-spacing: 0.01em;
+		margin: 0;
+	}
+
+	.copy {
+		font-size: 0.906rem;
+		line-height: 1.95;
+		color: var(--color-text-muted);
+		margin: 0;
+	}
+
+	.google-button {
+		height: 52px;
+		width: 100%;
+		border: 1px solid var(--color-border-strong);
+		border-radius: var(--radius-button);
+		background: var(--color-surface-input);
+		color: var(--color-text);
+		font-family: var(--font-sans);
+		font-size: 0.9375rem;
+		font-weight: 500;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.625rem;
+		cursor: pointer;
+	}
+
+	.helper {
+		font-size: 0.719rem;
+		line-height: 1.8;
+		color: var(--color-text-caption);
+		margin-top: 0.875rem;
+		text-align: center;
+	}
+
+	.status {
+		font-size: 0.8rem;
+		color: var(--color-text-muted);
+		text-align: center;
+		margin-top: 0.75rem;
+	}
+</style>
