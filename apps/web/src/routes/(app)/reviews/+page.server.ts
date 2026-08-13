@@ -8,7 +8,7 @@ const PAGE_SIZE = 10;
 export const load: PageServerLoad = async (event) => {
 	const { user, db } = requireAuthedDb(event);
 
-	// /app/memos/+page.server.ts と同じ理由で、壊れた・改ざんされた offset は
+	// /memos/+page.server.ts と同じ理由で、壊れた・改ざんされた offset は
 	// エラーにせず1ページ目へフォールバックする（リンクを辿るだけの人間向けページのため）。
 	const offsetParam = parsePaginationParam(event.url.searchParams.get('offset'));
 	const offset = typeof offsetParam === 'number' ? offsetParam : 0;

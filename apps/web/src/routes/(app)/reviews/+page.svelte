@@ -41,7 +41,7 @@
 	<ul>
 		{#each data.items as review (review.id)}
 			<li>
-				<a href={resolve('/app/reviews/[id]', { id: review.id })}>{review.memoTitle}</a>
+				<a href={resolve('/(app)/reviews/[id]', { id: review.id })}>{review.memoTitle}</a>
 				<p>期限: {formatDateTime(review.scheduledAt)}</p>
 			</li>
 		{/each}
@@ -50,10 +50,10 @@
 
 <nav>
 	{#if hasPrev}
-		<a href="{resolve('/app/reviews')}?offset={prevOffset}">← 前へ</a>
+		<a href="{resolve('/reviews')}?offset={prevOffset}">← 前へ</a>
 	{/if}
 	{#if hasNext}
-		<a href="{resolve('/app/reviews')}?offset={nextOffset}">もっと見る →</a>
+		<a href="{resolve('/reviews')}?offset={nextOffset}">もっと見る →</a>
 	{/if}
 </nav>
 

@@ -29,6 +29,6 @@ export const actions: Actions = {
 		} catch (err) {
 			handleDomainError(err);
 		}
-		redirect(303, '/app/memos');
+		redirect(303, '/memos');
 	}
 };

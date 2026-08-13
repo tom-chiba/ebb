@@ -9,7 +9,7 @@
 
 <div class="page">
 	<div class="header">
-		<a href={resolve('/app/reviews')}>← 一覧</a>
+		<a href={resolve('/reviews')}>← 一覧</a>
 		<span class="progress">{data.review.step + 1} 回目 / 全 {data.review.totalSteps} 回</span>
 	</div>
 
@@ -76,7 +76,7 @@
 	}
 
 	/* bottom は下部タブバー（自身の高さに env(safe-area-inset-bottom) を
-	   含んでいる、apps/web/src/routes/app/+layout.svelte 参照）の直上に来る位置。
+	   含んでいる、apps/web/src/routes/(app)/+layout.svelte 参照）の直上に来る位置。
 	   このバー自体は端末の下端に接しないため、padding にセーフエリアを重ねて
 	   加算しない（正確性レビューで指摘: 二重加算していた）。 */
 	.complete-bar {

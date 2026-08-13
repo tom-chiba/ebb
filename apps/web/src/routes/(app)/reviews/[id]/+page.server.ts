@@ -38,7 +38,7 @@ export const actions: Actions = {
 			const from = formData.get('from');
 			// 完了直後の一覧はこの review が消えた状態になるため、offset を維持すると
 			// 後続の行がひとつずつ前にずれて表示がスキップされうる。素の一覧 URL に戻す。
-			const destination = from === 'home' ? '/app' : '/app/reviews';
+			const destination = from === 'home' ? '/' : '/reviews';
 			const params = new URLSearchParams({ completedTitle: result.memoTitle });
 			if (result.nextScheduledAt) {
 				params.set('nextScheduledAt', result.nextScheduledAt.toISOString());

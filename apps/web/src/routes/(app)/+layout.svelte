@@ -9,10 +9,10 @@
 		return pathname === base || pathname.startsWith(`${base}/`);
 	}
 
-	let isHome = $derived(page.url.pathname === resolve('/app'));
-	let isReviews = $derived(isActivePath(page.url.pathname, resolve('/app/reviews')));
-	let isMemos = $derived(isActivePath(page.url.pathname, resolve('/app/memos')));
-	let isSettings = $derived(isActivePath(page.url.pathname, resolve('/app/settings')));
+	let isHome = $derived(page.url.pathname === resolve('/'));
+	let isReviews = $derived(isActivePath(page.url.pathname, resolve('/reviews')));
+	let isMemos = $derived(isActivePath(page.url.pathname, resolve('/memos')));
+	let isSettings = $derived(isActivePath(page.url.pathname, resolve('/settings')));
 </script>
 
 <main>
@@ -20,25 +20,21 @@
 </main>
 
 <nav class="bottom-nav">
-	<a href={resolve('/app')} class:active={isHome} aria-current={isHome ? 'page' : undefined}>
+	<a href={resolve('/')} class:active={isHome} aria-current={isHome ? 'page' : undefined}>
 		ホーム
 	</a>
 	<a
-		href={resolve('/app/reviews')}
+		href={resolve('/reviews')}
 		class:active={isReviews}
 		aria-current={isReviews ? 'page' : undefined}
 	>
 		復習
 	</a>
-	<a
-		href={resolve('/app/memos')}
-		class:active={isMemos}
-		aria-current={isMemos ? 'page' : undefined}
-	>
+	<a href={resolve('/memos')} class:active={isMemos} aria-current={isMemos ? 'page' : undefined}>
 		メモ
 	</a>
 	<a
-		href={resolve('/app/settings')}
+		href={resolve('/settings')}
 		class:active={isSettings}
 		aria-current={isSettings ? 'page' : undefined}
 	>

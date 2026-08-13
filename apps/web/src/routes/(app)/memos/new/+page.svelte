@@ -5,21 +5,17 @@
 	let { data, form }: PageProps = $props();
 </script>
 
-<h1>メモを編集</h1>
+<h1>新規メモ</h1>
 
 <form method="POST">
-	<input
-		type="hidden"
-		name="expectedUpdatedAt"
-		value={form?.expectedUpdatedAt ?? data.memo.updatedAt.toISOString()}
-	/>
+	<input type="hidden" name="id" value={data.draftId} />
 
 	<label>
 		タイトル
 		<input
 			type="text"
 			name="title"
-			value={form?.title ?? data.memo.title}
+			value={form?.title ?? ''}
 			maxlength={data.titleMaxLength}
 			required
 		/>
@@ -28,19 +24,16 @@
 	<label>
 		本文（Markdown）
 		<textarea name="content" rows="16" maxlength={data.contentMaxLength}
-			>{form?.content ?? data.memo.content}</textarea
+			>{form?.content ?? ''}</textarea
 		>
 	</label>
 
 	{#if form?.message}
 		<p class="error">{form.message}</p>
-		{#if form.conflict}
-			<a href={resolve('/app/memos/[id]/edit', { id: data.memo.id })}>最新の内容を確認する</a>
-		{/if}
 	{/if}
 
 	<div class="actions">
-		<a href={resolve('/app/memos/[id]', { id: data.memo.id })}>キャンセル</a>
+		<a href={resolve('/memos')}>キャンセル</a>
 		<button type="submit">保存</button>
 	</div>
 </form>

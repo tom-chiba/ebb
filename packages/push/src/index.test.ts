@@ -59,7 +59,7 @@ describe('sendPush', () => {
 		vi.restoreAllMocks();
 	});
 
-	const payload = { memoId: 'memo-1', title: '復習の時間です', url: '/app/memos/memo-1' };
+	const payload = { memoId: 'memo-1', title: '復習の時間です', url: '/memos/memo-1' };
 
 	function mockFetchResolvedWith(status: number) {
 		return vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status }));
