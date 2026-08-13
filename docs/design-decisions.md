@@ -73,7 +73,13 @@
 7. **Queues 不採用のため cron の送信件数に上限が必須**
    → `SELECT ... LIMIT 20` 程度に絞り、残りは次周期へ。毎分実行なら 1時間 1200 件さばける
 8. **E2E で Google OAuth を通すのは不安定**
-   → Playwright の `storageState` にセッションを注入する方式にする
+   → `createAuth` の `emailAndPassword` を `dev`（`$app/environment`、`/debug/*` と同じ
+   判定）限定で有効化し、`/debug/auth/dev-login`（dev 限定、固定メール/パスワードで
+   signIn/signUp）経由でセッションを発行する方式にした（#65）。本番ビルドでは
+   `emailAndPassword` 自体が無効になり、`dev-login` も 404 になるため本番の認証ロジックに
+   影響しない。固定パスワードはローカル D1 に永続化されるため変更しない運用とする
+   （変更すると既存ユーザーとパスワード不一致になり、`dev-login` 側の再作成処理が
+   常に走る）
 9. 購読が失効したら（Push サービスが 410 Gone を返す）DB から購読を削除する処理が必要
 
 ## モノレポの土台（#1）

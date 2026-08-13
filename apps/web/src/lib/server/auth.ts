@@ -1,6 +1,7 @@
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { sveltekitCookies } from 'better-auth/svelte-kit';
+import { dev } from '$app/environment';
 import { getRequestEvent } from '$app/server';
 import { createDb } from '@ebb/db';
 
@@ -19,6 +20,12 @@ export function createAuth(env: Env, origin: string) {
 				clientId: env.GOOGLE_CLIENT_ID,
 				clientSecret: env.GOOGLE_CLIENT_SECRET
 			}
+		},
+		// `dev` は `vite dev`（`pnpm dev`）実行時のみ true で、本番ビルドでは静的に false になる
+		// （/debug/* の既存ページと同じ判定）。サンドボックスで Google OAuth の実ログインが
+		// 通らないため、ローカル動作確認専用の /debug/auth/dev-login からのみ使う（#65）。
+		emailAndPassword: {
+			enabled: dev
 		},
 		// 既定は `enabled: true ?? isProduction`（NODE_ENV === 'production' 判定）だが、
 		// Workers は NODE_ENV を自動で立てないため明示的に有効化する。既定の in-memory storage
