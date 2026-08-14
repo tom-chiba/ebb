@@ -11,6 +11,20 @@ describe('renderMarkdown', () => {
 		expect(renderMarkdown('1. a\n2. b')).toContain('<ol>\n<li>a</li>\n<li>b</li>\n</ol>');
 	});
 
+	it('renders blockquotes', () => {
+		expect(renderMarkdown('> quoted text')).toContain(
+			'<blockquote>\n<p>quoted text</p>\n</blockquote>'
+		);
+	});
+
+	it('renders bold text', () => {
+		expect(renderMarkdown('**bold**')).toContain('<strong>bold</strong>');
+	});
+
+	it('renders inline code', () => {
+		expect(renderMarkdown('`code`')).toContain('<code>code</code>');
+	});
+
 	it('renders fenced code blocks without interpreting their contents as markdown', () => {
 		const out = renderMarkdown('```\nconst x = 1;\n```');
 		expect(out).toContain('<pre><code>const x = 1;\n</code></pre>');
