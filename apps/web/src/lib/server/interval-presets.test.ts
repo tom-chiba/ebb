@@ -8,6 +8,7 @@ import {
 	DEFAULT_INTERVAL_PRESET_ID,
 	getDefaultPresetId,
 	getPresetNameAndIntervals,
+	listMemosUsingPreset,
 	listPresetsForUser,
 	MAX_BATCH_STATEMENTS,
 	PRESET_NAME_MAX_LENGTH,
@@ -221,6 +222,24 @@ describe('previewPresetIntervalsUpdate', () => {
 	it('returns zero when the preset is not yet used by any memo', async () => {
 		const { previewCount } = await previewPresetIntervalsUpdate(db, ownerId, ownerPresetId, '2h');
 		expect(previewCount).toBe(0);
+	});
+
+	it('#63: intervals の変更前後の差分を返す（owner preset の元の intervals は [1, 24, 72]）', async () => {
+		const { diff } = await previewPresetIntervalsUpdate(db, ownerId, ownerPresetId, '2h, 4d, 6d');
+		expect(diff).toEqual([
+			{ oldHours: 1, newHours: 2, status: 'changed' },
+			{ oldHours: 24, newHours: 96, status: 'changed' },
+			{ oldHours: 72, newHours: 144, status: 'changed' }
+		]);
+	});
+
+	it('#63: 途中のステップを削除した場合、以降の共通ステップは changed にならない', async () => {
+		const { diff } = await previewPresetIntervalsUpdate(db, ownerId, ownerPresetId, '1h, 3d');
+		expect(diff).toEqual([
+			{ oldHours: 1, newHours: 1, status: 'unchanged' },
+			{ oldHours: 24, newHours: undefined, status: 'removed' },
+			{ oldHours: 72, newHours: 72, status: 'unchanged' }
+		]);
 	});
 
 	it('rejects the preview when the update would exceed MAX_BATCH_STATEMENTS, before it ever succeeds', async () => {
@@ -591,6 +610,30 @@ describe('updateCustomPresetIntervals', () => {
 			.where(eq(reviews.memoId, getsArchivedMidFlight.id))
 			.all();
 		expect(archivedRows).toHaveLength(0);
+	});
+});
+
+describe('listMemosUsingPreset', () => {
+	it('returns the id/title of memos referencing the preset, including archived ones', async () => {
+		const active = await createMemo(db, ownerId, {
+			title: 'active memo',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const archived = await createMemo(db, ownerId, {
+			title: 'archived memo',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await archiveMemo(db, ownerId, archived.id);
+
+		const result = await listMemosUsingPreset(db, ownerPresetId);
+		expect(result.map((memo) => memo.id).sort()).toEqual([active.id, archived.id].sort());
+		expect(result.find((memo) => memo.id === active.id)?.title).toBe('active memo');
+	});
+
+	it('returns an empty array when no memo references the preset', async () => {
+		expect(await listMemosUsingPreset(db, ownerPresetId)).toEqual([]);
 	});
 });
 
