@@ -12,7 +12,7 @@ import {
 	type BatchItem,
 	type Db
 } from '@ebb/db';
-import { parseIntervals } from '@ebb/core';
+import { diffIntervals, parseIntervals, type IntervalDiffEntry } from '@ebb/core';
 import {
 	ConflictError,
 	isUniqueConstraintViolation,
@@ -173,7 +173,7 @@ export async function createCustomPreset(
 // （#13/#17 と同じ、存在有無を秘匿する方針）。一方システム標準プリセット
 // （userId が NULL）を指した場合は、対象が何であるか自体は公開情報のため、
 // 「編集・削除できない」という理由を明示した ValidationError にする。
-async function getOwnedCustomPreset(db: Db, userId: string, presetId: string) {
+export async function getOwnedCustomPreset(db: Db, userId: string, presetId: string) {
 	const rows = await db
 		.select({
 			id: intervalPresets.id,
@@ -288,6 +288,22 @@ async function countIncompleteReviewsForMemos(db: Db, memoIds: string[]): Promis
 	return rows.length;
 }
 
+// プリセット編集画面（#63）の「このプリセットを使っているメモ」一覧・削除ボタンの
+// 活性判定に使う。deleteCustomPreset の使用中判定と同じく、アーカイブ済みメモも
+// 含めて「使用中」とみなす（memos.interval_preset_id は onDelete: 'no action' で
+// あり、アーカイブ済みメモが参照している間はプリセットを削除できないため、この
+// 画面で見せる「使用中」もその制約と一致させる）。
+export async function listMemosUsingPreset(
+	db: Db,
+	presetId: string
+): Promise<{ id: string; title: string }[]> {
+	return db
+		.select({ id: memos.id, title: memos.title })
+		.from(memos)
+		.where(eq(memos.intervalPresetId, presetId))
+		.all();
+}
+
 // プリセット変更（intervals の編集）で更新される reviews の件数のプレビュー。
 // 「N 件の予定が更新されます」の表示用。所有権チェック（getOwnedCustomPreset）と
 // intervals の構文検証（parseIntervalsOrValidationError）を実行系（
@@ -296,21 +312,24 @@ async function countIncompleteReviewsForMemos(db: Db, memoIds: string[]): Promis
 // 他ユーザーの custom プリセットやシステムプリセットの id を渡すことでそのプリセットを
 // 使っている（自分のものではない）メモの未完了 reviews 件数を取得できてしまう
 // （正確性レビューで指摘された情報漏洩）。
+// diff（#63、変更前後のステップ差分表示用）は getOwnedCustomPreset が返す現在の
+// intervals と、この呼び出しで検証済みの新しい intervals を比較するだけの
+// 副産物であり、この関数以外で計算する必要はない。
 export async function previewPresetIntervalsUpdate(
 	db: Db,
 	userId: string,
 	presetId: string,
 	rawIntervals: string
-): Promise<{ previewCount: number }> {
-	await getOwnedCustomPreset(db, userId, presetId);
-	// 構文検証のみ行い、結果（新しい intervals）自体はプレビューの件数計算には
-	// 使わない。「N件」は既存の未完了行のうち削除・作り直しの対象になる件数であり、
-	// 新しい intervals の長さに依存しないため（詳細は countIncompleteReviewsForMemos）。
-	parseIntervalsOrValidationError(rawIntervals);
+): Promise<{ previewCount: number; diff: IntervalDiffEntry[] }> {
+	const owned = await getOwnedCustomPreset(db, userId, presetId);
+	const intervals = parseIntervalsOrValidationError(rawIntervals);
 
 	const memoIds = await collectAffectedMemoIds(db, presetId);
 	assertWithinBatchStatementLimit(estimateWorstCaseBatchStatementCount(memoIds.length));
-	return { previewCount: await countIncompleteReviewsForMemos(db, memoIds) };
+	return {
+		previewCount: await countIncompleteReviewsForMemos(db, memoIds),
+		diff: diffIntervals(owned.intervals, intervals)
+	};
 }
 
 export async function updateCustomPresetIntervals(

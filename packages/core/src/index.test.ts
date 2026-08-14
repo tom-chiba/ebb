@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+	diffIntervals,
 	fixedIntervalStrategy,
 	formatIntervals,
 	MAX_INTERVAL_COUNT,
@@ -162,6 +163,80 @@ describe('formatIntervals', () => {
 		for (const intervals of examples) {
 			expect(parseIntervals(formatIntervals(intervals))).toEqual(intervals);
 		}
+	});
+});
+
+describe('diffIntervals', () => {
+	it('値が同じインデックスは unchanged にする', () => {
+		expect(diffIntervals([1, 24, 72], [1, 24, 72])).toEqual([
+			{ oldHours: 1, newHours: 1, status: 'unchanged' },
+			{ oldHours: 24, newHours: 24, status: 'unchanged' },
+			{ oldHours: 72, newHours: 72, status: 'unchanged' }
+		]);
+	});
+
+	it('同じインデックスで値が異なれば changed にする', () => {
+		expect(diffIntervals([1, 120], [1, 168])).toEqual([
+			{ oldHours: 1, newHours: 1, status: 'unchanged' },
+			{ oldHours: 120, newHours: 168, status: 'changed' }
+		]);
+	});
+
+	it('新しい方が長い分は added にする', () => {
+		expect(diffIntervals([1], [1, 24, 336])).toEqual([
+			{ oldHours: 1, newHours: 1, status: 'unchanged' },
+			{ oldHours: undefined, newHours: 24, status: 'added' },
+			{ oldHours: undefined, newHours: 336, status: 'added' }
+		]);
+	});
+
+	it('新しい方が短い分は removed にする', () => {
+		expect(diffIntervals([1, 24, 336], [1])).toEqual([
+			{ oldHours: 1, newHours: 1, status: 'unchanged' },
+			{ oldHours: 24, newHours: undefined, status: 'removed' },
+			{ oldHours: 336, newHours: undefined, status: 'removed' }
+		]);
+	});
+
+	it('両方空配列なら空配列を返す', () => {
+		expect(diffIntervals([], [])).toEqual([]);
+	});
+
+	it('#63: 途中のステップを削除しても、以降の共通ステップまで changed 扱いにならない', () => {
+		// [1, 24, 72] から 24 だけを削除した場合、72 は値として変わっていないため
+		// unchanged のまま保たれるべき（インデックスだけで比較すると 24→72 の
+		// changed に誤認識してしまう）。
+		expect(diffIntervals([1, 24, 72], [1, 72])).toEqual([
+			{ oldHours: 1, newHours: 1, status: 'unchanged' },
+			{ oldHours: 24, newHours: undefined, status: 'removed' },
+			{ oldHours: 72, newHours: 72, status: 'unchanged' }
+		]);
+	});
+
+	it('#63: 途中にステップを挿入しても、前後の共通ステップまで changed 扱いにならない', () => {
+		expect(diffIntervals([1, 72], [1, 24, 72])).toEqual([
+			{ oldHours: 1, newHours: 1, status: 'unchanged' },
+			{ oldHours: undefined, newHours: 24, status: 'added' },
+			{ oldHours: 72, newHours: 72, status: 'unchanged' }
+		]);
+	});
+
+	it('#63: 前後に共通ステップがある区間内の値変更は changed にする', () => {
+		expect(diffIntervals([1, 24, 72], [1, 50, 72])).toEqual([
+			{ oldHours: 1, newHours: 1, status: 'unchanged' },
+			{ oldHours: 24, newHours: 50, status: 'changed' },
+			{ oldHours: 72, newHours: 72, status: 'unchanged' }
+		]);
+	});
+
+	it('#63: 1つの区間に複数の削除・追加がある場合、先頭から順にペアリングして changed にし、余りだけ removed/added にする', () => {
+		// 区間内: old側 [24, 48]、new側 [30] → 24→30 は changed、余った 48 は removed。
+		expect(diffIntervals([1, 24, 48, 72], [1, 30, 72])).toEqual([
+			{ oldHours: 1, newHours: 1, status: 'unchanged' },
+			{ oldHours: 24, newHours: 30, status: 'changed' },
+			{ oldHours: 48, newHours: undefined, status: 'removed' },
+			{ oldHours: 72, newHours: 72, status: 'unchanged' }
+		]);
 	});
 });
 

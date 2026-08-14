@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { deserialize } from '$app/forms';
+	import { resolve } from '$app/paths';
 	import { authClient } from '$lib/auth-client';
 	import { urlBase64ToUint8Array } from '$lib/push-subscribe';
 	import type { PageProps } from './$types';
@@ -257,7 +258,10 @@
 </section>
 
 <section class="card">
-	<div class="section-label">プリセット</div>
+	<div class="section-header">
+		<div class="section-label">プリセット</div>
+		<a href={resolve('/settings/presets/new')} class="link-button">＋ 追加</a>
+	</div>
 	<ul class="preset-list">
 		{#each data.presets as preset (preset.id)}
 			<li>
@@ -271,109 +275,22 @@
 						</div>
 					</div>
 				{:else}
-					{@const updateForm =
-						form && form.action === 'updatePreset' && form.presetId === preset.id ? form : null}
-					{@const previewing =
-						updateForm !== null &&
-						'previewCount' in updateForm &&
-						!('success' in updateForm && updateForm.success)}
-					<div class="preset-row">
+					<a
+						href={resolve('/(app)/settings/presets/[id]/edit', { id: preset.id })}
+						class="preset-row preset-row-link"
+					>
 						<div class="option-text">
 							<span class="option-name">{preset.name}</span>
 							<span class="option-meta"
 								>{preset.intervalsText} ・ {preset.inUseCount}件のメモが参照中（アーカイブ済み含む）</span
 							>
 						</div>
-					</div>
-					<div class="preset-detail">
-						<form method="POST" action="?/updatePreset">
-							<input type="hidden" name="presetId" value={preset.id} />
-							<label>
-								間隔（例: 1h, 12h, 2d, 10d。最大{data.maxIntervalCount}件）
-								<input
-									type="text"
-									name="intervals"
-									value={updateForm && 'intervals' in updateForm
-										? updateForm.intervals
-										: preset.intervalsText}
-								/>
-							</label>
-
-							{#if updateForm && 'success' in updateForm && updateForm.success}
-								<p class="flash">{updateForm.updatedReviewsCount}件の予定を更新しました。</p>
-							{:else if previewing && updateForm && 'previewCount' in updateForm}
-								<p class="warning">
-									{updateForm.previewCount}件の予定が更新されます。よろしいですか？
-								</p>
-								<input type="hidden" name="confirmed" value="true" />
-							{:else if updateForm && 'message' in updateForm}
-								<p class="error">{updateForm.message}</p>
-							{/if}
-
-							{#if previewing}
-								<button type="submit" class="warning-button">確定して更新する</button>
-							{:else}
-								<button type="submit" class="primary-button">更新する</button>
-							{/if}
-						</form>
-
-						<form method="POST" action="?/deletePreset">
-							<input type="hidden" name="presetId" value={preset.id} />
-							<button type="submit" class="destructive-link" disabled={preset.inUse}>削除</button>
-						</form>
-						{#if preset.inUse}
-							<p class="hint">使用中のメモがあるため削除できません。</p>
-						{/if}
-						{#if form && form.action === 'deletePreset' && form.presetId === preset.id && 'message' in form}
-							<p class="error">{form.message}</p>
-						{/if}
-					</div>
+						<span class="option-chevron" aria-hidden="true">›</span>
+					</a>
 				{/if}
 			</li>
 		{/each}
 	</ul>
-	{#if form && form.action === 'deletePreset' && 'success' in form && form.success}
-		<p class="flash">プリセットを削除しました。</p>
-	{/if}
-	{#if form && form.action === 'createPreset' && 'success' in form && form.success}
-		<p class="flash">プリセットを作成しました。</p>
-	{/if}
-
-	<!-- JSなしでも開閉できるよう、状態管理をせずネイティブの <details> に委ねる
-	     （docs/design-decisions.mdのprogressive enhancement方針）。 -->
-	<details
-		class="create-form"
-		open={form ? form.action === 'createPreset' && !('success' in form && form.success) : undefined}
-	>
-		<summary class="link-button">＋ 追加</summary>
-		<form method="POST" action="?/createPreset" class="preset-detail">
-			<label>
-				名前
-				<input
-					type="text"
-					name="name"
-					value={form && form.action === 'createPreset' && 'name' in form ? form.name : ''}
-					maxlength={data.presetNameMaxLength}
-					required
-				/>
-			</label>
-			<label>
-				間隔（例: 1h, 12h, 2d, 10d。最大{data.maxIntervalCount}件）
-				<input
-					type="text"
-					name="intervals"
-					value={form && form.action === 'createPreset' && 'intervals' in form
-						? form.intervals
-						: ''}
-					required
-				/>
-			</label>
-			<button type="submit" class="primary-button">作成</button>
-			{#if form && form.action === 'createPreset' && 'message' in form}
-				<p class="error">{form.message}</p>
-			{/if}
-		</form>
-	</details>
 </section>
 
 <section class="card">
@@ -412,6 +329,12 @@
 		color: var(--color-text-caption);
 	}
 
+	.section-header {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+	}
+
 	form {
 		display: flex;
 		flex-direction: column;
@@ -438,6 +361,7 @@
 		font-size: 0.8125rem;
 		font-weight: 500;
 		color: var(--color-accent);
+		text-decoration: none;
 		cursor: pointer;
 	}
 
@@ -606,39 +530,19 @@
 		align-items: center;
 		gap: 0.75rem;
 		width: 100%;
-		padding: 0.75rem 0 0;
+		padding: 0.75rem 0;
 	}
 
-	.preset-detail {
-		padding: 0 0 0.875rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.625rem;
-	}
-
-	.create-form {
-		padding-top: 0.875rem;
-		border-top: 1px solid var(--color-border-subtle);
-	}
-
-	.create-form summary {
+	.preset-row-link {
+		color: inherit;
+		text-decoration: none;
 		cursor: pointer;
+	}
+
+	.option-chevron {
+		flex: none;
 		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--color-accent);
-		list-style: none;
-	}
-
-	.create-form summary::-webkit-details-marker {
-		display: none;
-	}
-
-	.create-form[open] summary {
-		margin-bottom: 0.625rem;
-	}
-
-	.create-form .preset-detail {
-		padding: 0;
+		color: var(--color-text-faint);
 	}
 
 	.flash {
@@ -649,31 +553,10 @@
 		margin: 0;
 	}
 
-	.warning {
-		background: var(--color-warning-bg);
-		border: 1px solid var(--color-warning-border);
-		border-radius: var(--radius-md);
-		padding: 0.75rem 1rem;
-		color: var(--color-warning-text);
-		margin: 0;
-	}
-
 	.primary-button {
 		align-self: flex-start;
 		background: var(--color-accent);
 		color: var(--color-surface-card);
-		border: none;
-		border-radius: var(--radius-button);
-		font-family: var(--font-sans);
-		font-weight: 700;
-		padding: 0.625rem 1rem;
-		cursor: pointer;
-	}
-
-	.warning-button {
-		align-self: flex-start;
-		background: var(--color-warning-button);
-		color: var(--color-warning-button-text);
 		border: none;
 		border-radius: var(--radius-button);
 		font-family: var(--font-sans);
