@@ -50,10 +50,13 @@
 ## 実装上の要注意点（Issue に反映）
 
 1. **Workers で `web-push` パッケージは動かない**（Node crypto 依存）
-   → Web Crypto ベースの実装（`@block65/webcrypto-web-push` 等）が必要
-   - #8 で `@block65/webcrypto-web-push` の採用を確定した。legacy な
-     `aesgcm` 実装だが、2026 時点の Chrome / FCM では実際に受理・復号・表示
-     されることを実測済み（詳細は `docs/web-push-spike.md`）
+   → Web Crypto ベースの実装が必要
+   - #8 で `@block65/webcrypto-web-push`（legacy な `aesgcm` 実装）の採用を
+     確定したが、デスクトップ Chrome では実際に受理・復号・表示されたものの
+     Android 実機では表示されなかった（#9 で保留していた確認を #77 で実施）。
+     #77 で `crypto.subtle` ベースの RFC 8291 `aes128gcm` 自前実装に置き換え、
+     `@block65/webcrypto-web-push` への依存は削除した（詳細は
+     `docs/web-push-spike.md`）
 2. **Free プランは CPU 10ms/リクエスト**
    → cron で全件その場送信は不可。Queues でファンアウトし 1メッセージ = 1通知にする
    → Queues 無料枠は 1万オペ/日（保持 24h）= 実質 1日1万通知が上限
@@ -1576,6 +1579,15 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
 
 ## packages/push に Web Push 送信処理を実装する (#20)
 
+> **#77 による訂正**: 以下は `@block65/webcrypto-web-push`（legacy `aesgcm`）
+> 採用時点の記録。Android 実機で通知が表示されない不具合が発覚し、#77 で
+> `crypto.subtle` ベースの RFC 8291 `aes128gcm` 自前実装に置き換えた。
+> `sendPush` の型・インターフェース（`PushSendResult` / `PushSubscriptionRecord` /
+> `PushPayload` / 戻り値の5値分類 / auth のみ明示検証する方針 / リトライしない方針）
+> は変更していないため、以下の記述はその部分に限り引き続き有効。暗号化の実装詳細
+> （`buildPushPayload` への言及、ペイロードサイズの実測値）のみ #77 時点の実装とは
+> 異なる。
+
 - **`sendPush(subscription, payload, vapid)` は `packages/db` に依存しない**
   （L184-189 の方針どおり）。`subscription` は D1 の行と同じ平坦な形
   （`{ endpoint, p256dh, auth }`）で受け取り、`@block65/webcrypto-web-push` が要求する
@@ -1759,6 +1771,10 @@ plans[index] }))` という実装は、「memoIds と plans が同じ順序・�
   での動作確認で初回に警告が出て気付いた。vitest-pool-workers 用の
   `wrangler.test.jsonc` には最初から付けていたためテストでは検出できず、
   本番相当の `wrangler.jsonc` を実際に起動して確認したことで見つかった
+  > **#77 による訂正**: #77 で `@block65/webcrypto-web-push` を `crypto.subtle`
+  > 自前実装に置き換えたため、この `nodejs_compat` の根拠（`node:crypto` 依存）は
+  > 無くなった。ただしフラグ自体を外して良いかは実デプロイでの確認が必要なため、
+  > #77 のスコープでは変更していない
 - **`VAPID_PRIVATE_KEY` は Worker 単位の secret のため、`apps/web` に
   設定済みでも `apps/scheduler` Worker には別途 `wrangler secret put
 VAPID_PRIVATE_KEY` が必要**（ユーザーが実行する必要がある。#19/#20 の

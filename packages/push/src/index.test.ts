@@ -34,7 +34,13 @@ async function generateVapidConfig(): Promise<VapidConfig> {
 
 // ブラウザの pushManager.subscribe() が返す keys.p256dh / keys.auth と同じ形
 // （p256dh は ECDH P-256 の raw 公開鍵、auth は 16 バイトの共有シークレット）を実際に生成する。
-async function generateSubscriptionKeys(): Promise<{ p256dh: string; auth: string }> {
+// privateKey は本来ブラウザ内に留まり外部には出てこないが、ラウンドトリップの復号
+// テスト（「端末が実際に復号できるか」の唯一の代理検証）のためにここでは保持する。
+async function generateSubscriptionKeys(): Promise<{
+	p256dh: string;
+	auth: string;
+	privateKey: CryptoKey;
+}> {
 	const keyPair = (await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, [
 		'deriveBits'
 	])) as CryptoKeyPair;
@@ -42,17 +48,120 @@ async function generateSubscriptionKeys(): Promise<{ p256dh: string; auth: strin
 		(await crypto.subtle.exportKey('raw', keyPair.publicKey)) as ArrayBuffer
 	);
 	const authBytes = crypto.getRandomValues(new Uint8Array(16));
-	return { p256dh: toBase64Url(publicKeyBytes), auth: toBase64Url(authBytes) };
+	return {
+		p256dh: toBase64Url(publicKeyBytes),
+		auth: toBase64Url(authBytes),
+		privateKey: keyPair.privateKey
+	};
+}
+
+function base64UrlToBytes(value: string): Uint8Array {
+	const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
+	const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+	return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+}
+
+// 実装の hkdfExpand / info 文字列を一切 import せず、RFC 8291 をこのテストで
+// 独立に書き下す。実装と定数を共有すると、片方の info 文字列が間違っていても
+// 両側で一致してテストが無意味に通ってしまう（アドバイザ指摘）。
+async function independentHkdfExtract(salt: Uint8Array, ikm: Uint8Array): Promise<Uint8Array> {
+	const key = await crypto.subtle.importKey('raw', salt, { name: 'HMAC', hash: 'SHA-256' }, false, [
+		'sign'
+	]);
+	return new Uint8Array(await crypto.subtle.sign('HMAC', key, ikm));
+}
+
+async function independentHkdfExpand(
+	prk: Uint8Array,
+	info: Uint8Array,
+	length: number
+): Promise<Uint8Array> {
+	const key = await crypto.subtle.importKey('raw', prk, { name: 'HMAC', hash: 'SHA-256' }, false, [
+		'sign'
+	]);
+	const infoAndCounter = new Uint8Array(info.length + 1);
+	infoAndCounter.set(info, 0);
+	infoAndCounter[info.length] = 0x01;
+	const block = new Uint8Array(await crypto.subtle.sign('HMAC', key, infoAndCounter));
+	return block.slice(0, length);
+}
+
+// 受信端末（Service Worker が動くブラウザ）が実際に行う復号を、実装のヘルパーを
+// 一切使わずに独立実装し、平文が SW（apps/web/src/service-worker.ts）が期待する
+// JSON と一致することを検証する。
+async function decryptAes128GcmForTest(
+	body: Uint8Array,
+	receiverPrivateKey: CryptoKey,
+	receiverPublicKeyBase64Url: string,
+	authSecretBase64Url: string
+): Promise<{ plaintext: string; recordSize: number; keyIdLength: number }> {
+	const salt = body.slice(0, 16);
+	const recordSize = new DataView(body.buffer, body.byteOffset + 16, 4).getUint32(0, false);
+	const keyIdLength = body[20]!;
+	const senderPublicKeyBytes = body.slice(21, 21 + keyIdLength);
+	const ciphertext = body.slice(21 + keyIdLength);
+
+	const senderPublicKey = await crypto.subtle.importKey(
+		'raw',
+		senderPublicKeyBytes,
+		{ name: 'ECDH', namedCurve: 'P-256' },
+		false,
+		[]
+	);
+	const sharedSecret = new Uint8Array(
+		await crypto.subtle.deriveBits(
+			{ name: 'ECDH', public: senderPublicKey } as Parameters<typeof crypto.subtle.deriveBits>[0],
+			receiverPrivateKey,
+			256
+		)
+	);
+
+	const encoder = new TextEncoder();
+	const authSecret = base64UrlToBytes(authSecretBase64Url);
+	const receiverPublicKeyBytes = base64UrlToBytes(receiverPublicKeyBase64Url);
+
+	const authInfoKey = await independentHkdfExtract(authSecret, sharedSecret);
+	const ikm = await independentHkdfExpand(
+		authInfoKey,
+		new Uint8Array([
+			...encoder.encode('WebPush: info\0'),
+			...receiverPublicKeyBytes,
+			...senderPublicKeyBytes
+		]),
+		32
+	);
+	const prk = await independentHkdfExtract(salt, ikm);
+	const cekBytes = await independentHkdfExpand(
+		prk,
+		encoder.encode('Content-Encoding: aes128gcm\0'),
+		16
+	);
+	const nonce = await independentHkdfExpand(prk, encoder.encode('Content-Encoding: nonce\0'), 12);
+
+	const cek = await crypto.subtle.importKey('raw', cekBytes, { name: 'AES-GCM' }, false, [
+		'decrypt'
+	]);
+	const decrypted = new Uint8Array(
+		await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, cek, ciphertext)
+	);
+	// 末尾は RFC 8188 の「最後のレコード」デリミタ 0x02
+	if (decrypted[decrypted.length - 1] !== 0x02) {
+		throw new Error('レコードデリミタ(0x02)が末尾にない');
+	}
+	const plaintext = new TextDecoder().decode(decrypted.slice(0, -1));
+	return { plaintext, recordSize, keyIdLength };
 }
 
 describe('sendPush', () => {
 	let vapid: VapidConfig;
 	let subscription: PushSubscriptionRecord;
+	let subscriptionPrivateKey: CryptoKey;
 
 	beforeAll(async () => {
 		vapid = await generateVapidConfig();
-		const keys = await generateSubscriptionKeys();
+		const { privateKey, ...keys } = await generateSubscriptionKeys();
 		subscription = { endpoint: 'https://push.example.com/abc', ...keys };
+		subscriptionPrivateKey = privateKey;
 	});
 
 	afterEach(() => {
@@ -78,12 +187,83 @@ describe('sendPush', () => {
 		expect(endpoint).toBe(subscription.endpoint);
 		expect(init.method?.toLowerCase()).toBe('post');
 		const headers = init.headers as Record<string, string>;
-		expect(headers['content-encoding']).toBe('aesgcm');
-		expect(headers.authorization).toMatch(/^WebPush /);
+		expect(headers['content-encoding']).toBe('aes128gcm');
+		expect(headers.authorization).toMatch(/^vapid /);
+		expect(headers['content-type']).toBe('application/octet-stream');
+		expect(headers.ttl).toBe('2419200');
+		expect(headers.urgency).toBe('normal');
 		// 送信されるボディは暗号化済みで、平文の JSON とは異なる
 		// （少なくとも平文の title 文字列がそのまま出現しない）
 		const bodyText = new TextDecoder().decode(init.body as Uint8Array);
 		expect(bodyText).not.toContain(payload.title);
+	});
+
+	// 「FCM が2xxを返す」ことは実装の正しさを保証しない（#77 の発端そのもの
+	// — legacy aesgcm でも FCM は受理していた）。唯一の信頼できる代理検証は、
+	// 受信端末と同じ手順（実装のヘルパーは使わない独立実装）で実際に復号できること。
+	it('送信したボディを受信側の手順で独立に復号すると、SW が期待する JSON と一致する', async () => {
+		const fetchMock = mockFetchResolvedWith(201);
+		await sendPush(subscription, payload, vapid);
+
+		const [, init] = fetchMock.mock.calls[0]!;
+		const body = init!.body as Uint8Array;
+		const { plaintext, recordSize, keyIdLength } = await decryptAes128GcmForTest(
+			body,
+			subscriptionPrivateKey,
+			subscription.p256dh,
+			subscription.auth
+		);
+
+		expect(JSON.parse(plaintext)).toEqual(payload);
+		expect(recordSize).toBe(4096);
+		// idlen は 65（0x04 プレフィックス付き非圧縮点の ECDH 公開鍵長）
+		expect(keyIdLength).toBe(65);
+	});
+
+	it('Authorization ヘッダの VAPID JWT が VAPID 公開鍵で正しく検証でき、aud/sub/exp が妥当', async () => {
+		const fetchMock = mockFetchResolvedWith(201);
+		await sendPush(subscription, payload, vapid);
+
+		const [, init] = fetchMock.mock.calls[0]!;
+		const headers = init!.headers as Record<string, string>;
+		const authorization = headers.authorization;
+		if (!authorization) {
+			throw new Error('Authorization ヘッダが無い');
+		}
+		const match = authorization.match(/^vapid t=([^,]+), k=(.+)$/);
+		if (!match) {
+			throw new Error(`Authorization ヘッダの形式が不正: ${authorization}`);
+		}
+		const [, token, keyInHeader] = match as [string, string, string];
+		expect(keyInHeader).toBe(vapid.publicKey);
+
+		const [headerPart, claimsPart, signaturePart] = token.split('.');
+		const publicKeyBytes = base64UrlToBytes(vapid.publicKey);
+		const verifyKey = await crypto.subtle.importKey(
+			'jwk',
+			{
+				kty: 'EC',
+				crv: 'P-256',
+				x: toBase64Url(publicKeyBytes.slice(1, 33)),
+				y: toBase64Url(publicKeyBytes.slice(33, 65)),
+				ext: true
+			},
+			{ name: 'ECDSA', namedCurve: 'P-256' },
+			false,
+			['verify']
+		);
+		const signatureValid = await crypto.subtle.verify(
+			{ name: 'ECDSA', hash: 'SHA-256' },
+			verifyKey,
+			base64UrlToBytes(signaturePart!),
+			new TextEncoder().encode(`${headerPart}.${claimsPart}`)
+		);
+		expect(signatureValid).toBe(true);
+
+		const claims = JSON.parse(new TextDecoder().decode(base64UrlToBytes(claimsPart!)));
+		expect(claims.aud).toBe(new URL(subscription.endpoint).origin);
+		expect(claims.sub).toBe(vapid.subject);
+		expect(claims.exp).toBeGreaterThan(Math.floor(Date.now() / 1000));
 	});
 
 	it.each([404, 410])('%i を返したら expired になる（リトライしない）', async (status) => {
@@ -156,9 +336,11 @@ describe('sendPush', () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
-	// auth は壊れていても例外を投げない（HKDF がダミーハッシュを返す）ため、
+	// auth は非ゼロの誤長（15/17バイト等）だと HKDF が例外を投げず素通りするため、
 	// 下記2件が decodedByteLength ガードの唯一の防御線であり、実際に回帰を検出する
-	// （ガードを外すと 'retryable' になって落ちることを実装時に確認済み）。
+	// （ガードを外すと 'retryable' になって落ちることを実装時に確認済み。1文字
+	// （デコード後0バイト）の方は importKey が例外を投げるため try/catch でも
+	// 捕まるが、ガードを区別せず一律に弾く設計であることを確認する目的で残す）。
 	it('subscription.auth が1文字（デコード後0バイト）でも fetch を呼ばずに invalid になる', async () => {
 		const fetchMock = mockFetchThrowsIfCalled();
 		const result = await sendPush({ ...subscription, auth: 'a' }, payload, vapid);
