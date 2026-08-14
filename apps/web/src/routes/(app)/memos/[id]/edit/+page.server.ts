@@ -5,6 +5,7 @@ import {
 	translateMemoValidationMessage
 } from '$lib/server/form-messages';
 import { ConflictError, handleDomainError, ValidationError } from '$lib/server/errors';
+import { listPresetsForUser } from '$lib/server/interval-presets';
 import { CONTENT_MAX_LENGTH, getMemo, TITLE_MAX_LENGTH, updateMemo } from '$lib/server/memos';
 import { normalizeLineEndings } from '$lib/server/text';
 import type { Actions, PageServerLoad } from './$types';
@@ -13,13 +14,22 @@ export const load: PageServerLoad = async (event) => {
 	const { user, db } = requireAuthedDb(event);
 	try {
 		const memo = await getMemo(db, user.id, event.params.id);
-		// テンプレートが使うのは id/title/content/updatedAt のみ。userId・
-		// intervalPresetId・createdAt は使わないので返さない（一覧・詳細ページと
-		// 同じく、表示に使わないフィールドをクライアントへ送らない方針）。
+		const presets = await listPresetsForUser(db, user.id);
+		// テンプレートが使うのは id/title/content/intervalPresetId/updatedAt のみ。
+		// userId・createdAt は使わないので返さない（一覧・詳細ページと同じく、表示に
+		// 使わないフィールドをクライアントへ送らない方針）。intervalPresetId は
+		// プリセット選択チップの初期選択に使うため #61 で追加。
 		return {
-			memo: { id: memo.id, title: memo.title, content: memo.content, updatedAt: memo.updatedAt },
+			memo: {
+				id: memo.id,
+				title: memo.title,
+				content: memo.content,
+				intervalPresetId: memo.intervalPresetId,
+				updatedAt: memo.updatedAt
+			},
 			titleMaxLength: TITLE_MAX_LENGTH,
-			contentMaxLength: CONTENT_MAX_LENGTH
+			contentMaxLength: CONTENT_MAX_LENGTH,
+			presets: presets.map((preset) => ({ id: preset.id, name: preset.name }))
 		};
 	} catch (err) {
 		handleDomainError(err);
@@ -33,23 +43,27 @@ export const actions: Actions = {
 		const title = form.get('title');
 		const rawContent = form.get('content');
 		const expectedUpdatedAtRaw = form.get('expectedUpdatedAt');
+		const intervalPresetId = form.get('intervalPresetId');
 
 		if (
 			typeof title !== 'string' ||
 			typeof rawContent !== 'string' ||
-			typeof expectedUpdatedAtRaw !== 'string'
+			typeof expectedUpdatedAtRaw !== 'string' ||
+			typeof intervalPresetId !== 'string'
 		) {
 			// expectedUpdatedAt が欠落した改ざんリクエストの場合、ここで '' を返すと
 			// テンプレートの `form?.expectedUpdatedAt ?? data.memo.updatedAt...` が
 			// `''`（falsy だが nullish ではない）にフォールバックせず、以後の再送が
 			// 毎回 `new Date('')` で invalid になり続ける。undefined を返して
-			// テンプレート側の `??` によるフォールバックを機能させる。
+			// テンプレート側の `??` によるフォールバックを機能させる。intervalPresetId も
+			// 同じ理由で undefined にフォールバックさせる。
 			return fail(400, {
 				message: INVALID_FORM_SUBMISSION_MESSAGE,
 				title: typeof title === 'string' ? title : '',
 				content: typeof rawContent === 'string' ? rawContent : '',
 				expectedUpdatedAt:
 					typeof expectedUpdatedAtRaw === 'string' ? expectedUpdatedAtRaw : undefined,
+				intervalPresetId: typeof intervalPresetId === 'string' ? intervalPresetId : undefined,
 				conflict: false
 			});
 		}
@@ -65,6 +79,7 @@ export const actions: Actions = {
 				title,
 				content,
 				expectedUpdatedAt: expectedUpdatedAtRaw,
+				intervalPresetId,
 				conflict: false
 			});
 		}
@@ -72,7 +87,8 @@ export const actions: Actions = {
 		try {
 			const memo = await updateMemo(db, user.id, event.params.id, expectedUpdatedAt, {
 				title,
-				content
+				content,
+				intervalPresetId
 			});
 			redirect(303, `/memos/${memo.id}`);
 		} catch (err) {
@@ -82,6 +98,7 @@ export const actions: Actions = {
 					title,
 					content,
 					expectedUpdatedAt: expectedUpdatedAtRaw,
+					intervalPresetId,
 					conflict: false
 				});
 			}
@@ -112,6 +129,7 @@ export const actions: Actions = {
 					title,
 					content,
 					expectedUpdatedAt: expectedUpdatedAtRaw,
+					intervalPresetId,
 					conflict: true
 				});
 			}
