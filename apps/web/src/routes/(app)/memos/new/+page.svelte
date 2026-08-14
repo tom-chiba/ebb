@@ -8,6 +8,7 @@
 
 	let title = $state(form?.title ?? '');
 	let content = $state(form?.content ?? '');
+	let selectedPresetId = $state(form?.intervalPresetId ?? data.defaultPresetId);
 </script>
 
 <form method="POST">
@@ -33,10 +34,7 @@
 		<MarkdownEditor bind:value={content} name="content" maxlength={data.contentMaxLength} />
 	</div>
 
-	<IntervalPresetChips
-		presets={data.presets}
-		selectedId={form?.intervalPresetId ?? data.defaultPresetId}
-	/>
+	<IntervalPresetChips presets={data.presets} bind:selectedId={selectedPresetId} />
 
 	{#if form?.message}
 		<p class="error">{form.message}</p>

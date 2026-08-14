@@ -1,7 +1,7 @@
 <script lang="ts">
 	let {
 		presets,
-		selectedId
+		selectedId = $bindable()
 	}: {
 		presets: { id: string; name: string }[];
 		selectedId: string;
@@ -17,7 +17,7 @@
 				name="intervalPresetId"
 				value={preset.id}
 				id={`preset-${preset.id}`}
-				checked={selectedId === preset.id}
+				bind:group={selectedId}
 				class="chip-input"
 			/>
 			<label for={`preset-${preset.id}`} class="chip">{preset.name}</label>

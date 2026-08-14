@@ -8,17 +8,19 @@
 
 	let title = $state(form?.title ?? data.memo.title);
 	let content = $state(form?.content ?? data.memo.content);
+	let selectedPresetId = $state(form?.intervalPresetId ?? data.memo.intervalPresetId);
 
 	// 409(競合)後の「最新の内容を確認する」リンクは同一ルートへのクライアントサイド
 	// ナビゲーションであり、コンポーネントは再マウントされず $state の初期化式も
 	// 再評価されない。$effect で form/data.memo の変化そのものを追跡し、そのときだけ
-	// title/content を再同期する（自分の入力による title/content 自体の変更では
+	// title/content/selectedPresetId を再同期する（自分の入力によるこれらの変更では
 	// form/data が変わらないため、この effect は再実行されない）。これが無いと、
-	// 本文だけ古いまま hidden の expectedUpdatedAt だけが最新値に更新され、
+	// 古い入力のまま hidden の expectedUpdatedAt だけが最新値に更新され、
 	// 他の変更を無警告で上書きしてしまう（+page.server.ts の ConflictError コメント参照）。
 	$effect(() => {
 		title = form?.title ?? data.memo.title;
 		content = form?.content ?? data.memo.content;
+		selectedPresetId = form?.intervalPresetId ?? data.memo.intervalPresetId;
 	});
 </script>
 
@@ -49,10 +51,7 @@
 		<MarkdownEditor bind:value={content} name="content" maxlength={data.contentMaxLength} />
 	</div>
 
-	<IntervalPresetChips
-		presets={data.presets}
-		selectedId={form?.intervalPresetId ?? data.memo.intervalPresetId}
-	/>
+	<IntervalPresetChips presets={data.presets} bind:selectedId={selectedPresetId} />
 
 	{#if form?.message}
 		<p class="error">{form.message}</p>
