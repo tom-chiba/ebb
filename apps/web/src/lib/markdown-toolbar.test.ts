@@ -37,6 +37,15 @@ describe('applyMarkdownToolbarAction', () => {
 			expect(result).toEqual({ value: 'title', start: 5, end: 5 });
 		});
 
+		it('clamps the cursor to the line start when toggling off with the cursor inside the marker', () => {
+			const result = applyMarkdownToolbarAction('heading', {
+				value: '# title',
+				start: 1,
+				end: 1
+			});
+			expect(result).toEqual({ value: 'title', start: 0, end: 0 });
+		});
+
 		it('does not treat a leading "#" without a following space as a heading marker', () => {
 			const result = applyMarkdownToolbarAction('heading', { value: '#tag', start: 0, end: 0 });
 			expect(result).toEqual({ value: '# #tag', start: 2, end: 2 });
@@ -90,6 +99,15 @@ describe('applyMarkdownToolbarAction', () => {
 				end: 3
 			});
 			expect(result).toEqual({ value: '> quote', start: 3, end: 3 });
+		});
+
+		it('does not treat a leading ">" without a following space as a quote marker', () => {
+			const result = applyMarkdownToolbarAction('quote', {
+				value: '>quote',
+				start: 0,
+				end: 0
+			});
+			expect(result).toEqual({ value: '> >quote', start: 2, end: 2 });
 		});
 	});
 
