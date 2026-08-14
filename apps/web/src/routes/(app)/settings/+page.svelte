@@ -95,20 +95,22 @@
 		refreshSubscriptionState();
 	});
 
-	function permissionStateLabel(state: PermissionState): string {
-		switch (state) {
+	// トグルスイッチ下に表示する状態説明。許可状態の遷移ロジック自体は変えず、
+	// 見た目をボタンからトグルに変えたことに伴う文言の出し分けのみ担う。
+	let notificationDescription = $derived.by(() => {
+		switch (permissionState) {
 			case 'checking':
-				return '確認中';
+				return '確認中…';
 			case 'default':
-				return '未設定';
-			case 'granted':
-				return '許可済み';
+				return '許可すると、復習の期限が来たら届きます';
 			case 'denied':
-				return '拒否';
+				return 'ブロックされています';
+			case 'granted':
+				return subscribed ? '許可済み ・ 復習の期限が来たら届きます' : 'この端末では無効です';
 			case 'unsupported':
-				return '未対応';
+				return '';
 		}
-	}
+	});
 
 	// 許可ダイアログはユーザーがこのボタンを押したときにだけ出す
 	// （ページ表示直後に出すと拒否されやすいため。issue #19 の注意事項）。
@@ -184,45 +186,66 @@
 
 <h1>設定</h1>
 
-<section>
-	<h2>通知</h2>
+<section class="card">
+	<div class="section-label">通知</div>
 	{#if !data.vapidPublicKey}
-		<p>現在この環境では通知を利用できません。</p>
+		<p class="hint">現在この環境では通知を利用できません。</p>
+	{:else if permissionState === 'unsupported'}
+		<p class="hint">このブラウザは通知に対応していません。</p>
 	{:else}
-		<p>通知の許可状態: {permissionStateLabel(permissionState)}</p>
-		{#if permissionState === 'unsupported'}
-			<p>このブラウザは通知に対応していません。</p>
-		{:else if permissionState === 'denied'}
+		<div class="toggle-row">
+			<div class="toggle-text">
+				<span class="toggle-title">この端末で通知を受け取る</span>
+				<span class="toggle-desc">{notificationDescription}</span>
+			</div>
+			<button
+				type="button"
+				class="toggle-switch"
+				class:on={subscribed}
+				role="switch"
+				aria-checked={subscribed}
+				aria-label="この端末で通知を受け取る"
+				disabled={pushBusy || permissionState === 'checking' || permissionState === 'denied'}
+				onclick={() => (subscribed ? disableNotifications() : enableNotifications())}
+			>
+				<span class="toggle-knob"></span>
+			</button>
+		</div>
+		{#if permissionState === 'denied'}
 			<p class="error">
 				通知がブロックされています。ブラウザのサイト設定（アドレスバー付近の鍵アイコンなど）から
 				このサイトの通知を許可に変更し、ページを再読み込みしてください。
 			</p>
-		{:else if subscribed}
-			<p>この端末で通知が有効です。</p>
-			<button onclick={disableNotifications} disabled={pushBusy}>通知を無効にする</button>
-		{:else if permissionState !== 'checking'}
-			<button onclick={enableNotifications} disabled={pushBusy}>通知を有効にする</button>
 		{/if}
 	{/if}
 	{#if pushStatusMessage}
-		<p>{pushStatusMessage}</p>
+		<p class="hint">{pushStatusMessage}</p>
 	{/if}
 </section>
 
-<section>
-	<h2>新規メモの既定プリセット</h2>
-	<form method="POST" action="?/setDefault">
-		<label>
-			既定プリセット
-			<select name="presetId">
-				{#each data.presets as preset (preset.id)}
-					<option value={preset.id} selected={preset.id === data.defaultPresetId}>
-						{preset.name}（{preset.intervalsText}）
-					</option>
-				{/each}
-			</select>
-		</label>
-		<button type="submit">保存</button>
+<section class="card">
+	<div class="section-label">新規メモの既定プリセット</div>
+	<form method="POST" action="?/setDefault" class="option-list">
+		{#each data.presets as preset (preset.id)}
+			<label class="option-row">
+				<input
+					type="radio"
+					name="presetId"
+					value={preset.id}
+					class="option-radio"
+					checked={preset.id === data.defaultPresetId}
+				/>
+				<div class="option-text">
+					<span class="option-name">{preset.name}</span>
+					<span class="option-meta">{preset.intervalsText}</span>
+				</div>
+				<span class="option-dot" aria-hidden="true"></span>
+			</label>
+		{/each}
+		<!-- 選択のたびに自動送信するとキーボードでの矢印キー操作のたびにページ全体が
+		     遷移してしまう（use:enhanceを使っていないため）。選択と保存を分け、
+		     JS無効環境でも同じボタンで完結するようにする。 -->
+		<button type="submit" class="primary-button save-default-button">保存</button>
 	</form>
 	{#if form && form.action === 'setDefault'}
 		{#if 'success' in form && form.success}
@@ -233,17 +256,20 @@
 	{/if}
 </section>
 
-<section>
-	<h2>プリセット一覧</h2>
-	<ul>
+<section class="card">
+	<div class="section-label">プリセット</div>
+	<ul class="preset-list">
 		{#each data.presets as preset (preset.id)}
 			<li>
-				<h3>
-					{preset.name}{#if preset.isSystem}（システム標準）{/if}
-				</h3>
-
 				{#if preset.isSystem}
-					<p>{preset.intervalsText}</p>
+					<div class="preset-row">
+						<div class="option-text">
+							<span class="option-name"
+								>{preset.name}<span class="option-meta">（システム標準）</span></span
+							>
+							<span class="option-meta">{preset.intervalsText} ・ 編集できません</span>
+						</div>
+					</div>
 				{:else}
 					{@const updateForm =
 						form && form.action === 'updatePreset' && form.presetId === preset.id ? form : null}
@@ -251,47 +277,57 @@
 						updateForm !== null &&
 						'previewCount' in updateForm &&
 						!('success' in updateForm && updateForm.success)}
-					<form method="POST" action="?/updatePreset">
-						<input type="hidden" name="presetId" value={preset.id} />
-						<label>
-							間隔（例: 1h, 12h, 2d, 10d。最大{data.maxIntervalCount}件）
-							<input
-								type="text"
-								name="intervals"
-								value={updateForm && 'intervals' in updateForm
-									? updateForm.intervals
-									: preset.intervalsText}
-							/>
-						</label>
+					<div class="preset-row">
+						<div class="option-text">
+							<span class="option-name">{preset.name}</span>
+							<span class="option-meta"
+								>{preset.intervalsText} ・ {preset.inUseCount}件のメモが参照中（アーカイブ済み含む）</span
+							>
+						</div>
+					</div>
+					<div class="preset-detail">
+						<form method="POST" action="?/updatePreset">
+							<input type="hidden" name="presetId" value={preset.id} />
+							<label>
+								間隔（例: 1h, 12h, 2d, 10d。最大{data.maxIntervalCount}件）
+								<input
+									type="text"
+									name="intervals"
+									value={updateForm && 'intervals' in updateForm
+										? updateForm.intervals
+										: preset.intervalsText}
+								/>
+							</label>
 
-						{#if updateForm && 'success' in updateForm && updateForm.success}
-							<p class="flash">{updateForm.updatedReviewsCount}件の予定を更新しました。</p>
-						{:else if previewing && updateForm && 'previewCount' in updateForm}
-							<p class="warning">
-								{updateForm.previewCount}件の予定が更新されます。よろしいですか？
-							</p>
-							<input type="hidden" name="confirmed" value="true" />
-						{:else if updateForm && 'message' in updateForm}
-							<p class="error">{updateForm.message}</p>
+							{#if updateForm && 'success' in updateForm && updateForm.success}
+								<p class="flash">{updateForm.updatedReviewsCount}件の予定を更新しました。</p>
+							{:else if previewing && updateForm && 'previewCount' in updateForm}
+								<p class="warning">
+									{updateForm.previewCount}件の予定が更新されます。よろしいですか？
+								</p>
+								<input type="hidden" name="confirmed" value="true" />
+							{:else if updateForm && 'message' in updateForm}
+								<p class="error">{updateForm.message}</p>
+							{/if}
+
+							{#if previewing}
+								<button type="submit" class="warning-button">確定して更新する</button>
+							{:else}
+								<button type="submit" class="primary-button">更新する</button>
+							{/if}
+						</form>
+
+						<form method="POST" action="?/deletePreset">
+							<input type="hidden" name="presetId" value={preset.id} />
+							<button type="submit" class="destructive-link" disabled={preset.inUse}>削除</button>
+						</form>
+						{#if preset.inUse}
+							<p class="hint">使用中のメモがあるため削除できません。</p>
 						{/if}
-
-						{#if previewing}
-							<button type="submit" class="warning-button">確定して更新する</button>
-						{:else}
-							<button type="submit">更新する</button>
+						{#if form && form.action === 'deletePreset' && form.presetId === preset.id && 'message' in form}
+							<p class="error">{form.message}</p>
 						{/if}
-					</form>
-
-					<form method="POST" action="?/deletePreset">
-						<input type="hidden" name="presetId" value={preset.id} />
-						<button type="submit" disabled={preset.inUse}>削除</button>
-					</form>
-					{#if preset.inUse}
-						<p>使用中のメモがあるため削除できません。</p>
-					{/if}
-					{#if form && form.action === 'deletePreset' && form.presetId === preset.id && 'message' in form}
-						<p class="error">{form.message}</p>
-					{/if}
+					</div>
 				{/if}
 			</li>
 		{/each}
@@ -299,46 +335,52 @@
 	{#if form && form.action === 'deletePreset' && 'success' in form && form.success}
 		<p class="flash">プリセットを削除しました。</p>
 	{/if}
-</section>
-
-<section>
-	<h2>新しいプリセットを作る</h2>
-	<form method="POST" action="?/createPreset">
-		<label>
-			名前
-			<input
-				type="text"
-				name="name"
-				value={form && form.action === 'createPreset' && 'name' in form ? form.name : ''}
-				maxlength={data.presetNameMaxLength}
-				required
-			/>
-		</label>
-		<label>
-			間隔（例: 1h, 12h, 2d, 10d。最大{data.maxIntervalCount}件）
-			<input
-				type="text"
-				name="intervals"
-				value={form && form.action === 'createPreset' && 'intervals' in form ? form.intervals : ''}
-				required
-			/>
-		</label>
-		<button type="submit">作成</button>
-	</form>
-	{#if form && form.action === 'createPreset'}
-		{#if 'success' in form && form.success}
-			<p class="flash">プリセットを作成しました。</p>
-		{:else if 'message' in form}
-			<p class="error">{form.message}</p>
-		{/if}
+	{#if form && form.action === 'createPreset' && 'success' in form && form.success}
+		<p class="flash">プリセットを作成しました。</p>
 	{/if}
+
+	<!-- JSなしでも開閉できるよう、状態管理をせずネイティブの <details> に委ねる
+	     （docs/design-decisions.mdのprogressive enhancement方針）。 -->
+	<details
+		class="create-form"
+		open={form ? form.action === 'createPreset' && !('success' in form && form.success) : undefined}
+	>
+		<summary class="link-button">＋ 追加</summary>
+		<form method="POST" action="?/createPreset" class="preset-detail">
+			<label>
+				名前
+				<input
+					type="text"
+					name="name"
+					value={form && form.action === 'createPreset' && 'name' in form ? form.name : ''}
+					maxlength={data.presetNameMaxLength}
+					required
+				/>
+			</label>
+			<label>
+				間隔（例: 1h, 12h, 2d, 10d。最大{data.maxIntervalCount}件）
+				<input
+					type="text"
+					name="intervals"
+					value={form && form.action === 'createPreset' && 'intervals' in form
+						? form.intervals
+						: ''}
+					required
+				/>
+			</label>
+			<button type="submit" class="primary-button">作成</button>
+			{#if form && form.action === 'createPreset' && 'message' in form}
+				<p class="error">{form.message}</p>
+			{/if}
+		</form>
+	</details>
 </section>
 
-<section>
-	<h2>アカウント</h2>
+<section class="card">
+	<div class="section-label">アカウント</div>
 	<div class="account">
 		<span>{data.user.name}</span>
-		<button onclick={signOut}>ログアウト</button>
+		<button class="destructive-link" onclick={signOut}>ログアウト</button>
 	</div>
 	{#if accountStatusMessage}
 		<p class="error">{accountStatusMessage}</p>
@@ -346,15 +388,34 @@
 </section>
 
 <style>
+	h1 {
+		margin: 0 0 1rem;
+	}
+
 	section {
-		margin-bottom: 2rem;
+		margin-bottom: 1rem;
+	}
+
+	.card {
+		background: var(--color-surface-card);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-card);
+		padding: 1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.section-label {
+		font-size: 0.72rem;
+		letter-spacing: 0.06em;
+		color: var(--color-text-caption);
 	}
 
 	form {
 		display: flex;
 		flex-direction: column;
 		gap: 0.75rem;
-		max-width: 480px;
 	}
 
 	label {
@@ -363,21 +424,221 @@
 		gap: 0.3rem;
 	}
 
-	ul {
-		list-style: none;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
+	.hint {
+		margin: 0;
+		font-size: 0.8125rem;
+		color: var(--color-text-muted);
 	}
 
-	li {
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-md);
-		padding: 0.75rem 1rem;
+	.link-button {
+		border: none;
+		background: none;
+		padding: 0;
+		font-family: var(--font-sans);
+		font-size: 0.8125rem;
+		font-weight: 500;
+		color: var(--color-accent);
+		cursor: pointer;
+	}
+
+	.destructive-link {
+		border: none;
+		background: none;
+		padding: 0;
+		font-family: var(--font-sans);
+		font-size: 0.8125rem;
+		font-weight: 500;
+		color: var(--color-error);
+		cursor: pointer;
+	}
+
+	.destructive-link:disabled {
+		color: var(--color-text-faint);
+		cursor: not-allowed;
+	}
+
+	/* 通知トグル */
+
+	.toggle-row {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 0.875rem;
+	}
+
+	.toggle-text {
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
+		gap: 0.25rem;
+	}
+
+	.toggle-title {
+		font-size: 0.9rem;
+		font-weight: 500;
+		color: var(--color-text);
+	}
+
+	.toggle-desc {
+		font-size: 0.72rem;
+		line-height: 1.6;
+		color: var(--color-text-muted);
+	}
+
+	.toggle-switch {
+		flex: none;
+		position: relative;
+		width: 48px;
+		height: 29px;
+		border: none;
+		border-radius: 15px;
+		background: var(--color-border-strong);
+		padding: 0;
+		cursor: pointer;
+	}
+
+	.toggle-switch.on {
+		background: var(--color-accent);
+	}
+
+	.toggle-switch:disabled {
+		cursor: not-allowed;
+		opacity: 0.6;
+	}
+
+	.toggle-knob {
+		position: absolute;
+		top: 3px;
+		left: 3px;
+		width: 23px;
+		height: 23px;
+		border-radius: 50%;
+		background: var(--color-surface-card);
+		transition: left 0.15s ease;
+	}
+
+	.toggle-switch.on .toggle-knob {
+		left: 22px;
+	}
+
+	/* 既定プリセット・プリセット一覧 共通 */
+
+	.option-list {
+		gap: 0;
+	}
+
+	.save-default-button {
+		margin-top: 0.75rem;
+	}
+
+	.option-row {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.75rem 0;
+		border-bottom: 1px solid var(--color-border-subtle);
+		cursor: pointer;
+	}
+
+	.option-list .option-row:last-child {
+		border-bottom: none;
+	}
+
+	.option-radio {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+	}
+
+	.option-text {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		flex: 1;
+	}
+
+	.option-name {
+		font-size: 0.9rem;
+		color: var(--color-text);
+	}
+
+	.option-meta {
+		font-size: 0.72rem;
+		color: var(--color-text-caption);
+	}
+
+	.option-dot {
+		flex: none;
+		width: 15px;
+		height: 15px;
+		border-radius: 50%;
+		border: 1.5px solid var(--color-border-strong);
+	}
+
+	.option-radio:checked ~ .option-dot {
+		border-color: var(--color-accent);
+		background: var(--color-accent);
+		box-shadow: inset 0 0 0 2.5px var(--color-surface-card);
+	}
+
+	.option-radio:focus-visible ~ .option-dot {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
+	}
+
+	.preset-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+
+	.preset-list li {
+		border-bottom: 1px solid var(--color-border-subtle);
+	}
+
+	.preset-list li:last-child {
+		border-bottom: none;
+	}
+
+	.preset-row {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		width: 100%;
+		padding: 0.75rem 0 0;
+	}
+
+	.preset-detail {
+		padding: 0 0 0.875rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.625rem;
+	}
+
+	.create-form {
+		padding-top: 0.875rem;
+		border-top: 1px solid var(--color-border-subtle);
+	}
+
+	.create-form summary {
+		cursor: pointer;
+		font-size: 0.8125rem;
+		font-weight: 500;
+		color: var(--color-accent);
+		list-style: none;
+	}
+
+	.create-form summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.create-form[open] summary {
+		margin-bottom: 0.625rem;
+	}
+
+	.create-form .preset-detail {
+		padding: 0;
 	}
 
 	.flash {
@@ -385,6 +646,7 @@
 		border: 1px solid var(--color-accent-border);
 		border-radius: var(--radius-md);
 		padding: 0.75rem 1rem;
+		margin: 0;
 	}
 
 	.warning {
@@ -393,23 +655,41 @@
 		border-radius: var(--radius-md);
 		padding: 0.75rem 1rem;
 		color: var(--color-warning-text);
+		margin: 0;
+	}
+
+	.primary-button {
+		align-self: flex-start;
+		background: var(--color-accent);
+		color: var(--color-surface-card);
+		border: none;
+		border-radius: var(--radius-button);
+		font-family: var(--font-sans);
+		font-weight: 700;
+		padding: 0.625rem 1rem;
+		cursor: pointer;
 	}
 
 	.warning-button {
+		align-self: flex-start;
 		background: var(--color-warning-button);
 		color: var(--color-warning-button-text);
+		border: none;
+		border-radius: var(--radius-button);
+		font-family: var(--font-sans);
+		font-weight: 700;
+		padding: 0.625rem 1rem;
+		cursor: pointer;
 	}
 
 	.error {
 		color: var(--color-error);
+		margin: 0;
 	}
 
 	.account {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-card);
-		padding: 0.75rem 1rem;
 	}
 </style>

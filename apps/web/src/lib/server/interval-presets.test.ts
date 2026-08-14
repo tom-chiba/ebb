@@ -108,6 +108,36 @@ describe('listPresetsForUser', () => {
 		const presets = await listPresetsForUser(db, ownerId);
 		expect(presets.find((p) => p.id === systemPresetId)?.inUse).toBe(false);
 	});
+
+	it('counts the number of memos (including archived) referencing the preset', async () => {
+		const before = await listPresetsForUser(db, ownerId);
+		expect(before.find((p) => p.id === ownerPresetId)?.inUseCount).toBe(0);
+
+		const memoA = await createMemo(db, ownerId, {
+			title: 'a',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await createMemo(db, ownerId, { title: 'b', content: 'c', intervalPresetId: ownerPresetId });
+		const afterCreate = await listPresetsForUser(db, ownerId);
+		expect(afterCreate.find((p) => p.id === ownerPresetId)?.inUseCount).toBe(2);
+
+		await archiveMemo(db, ownerId, memoA.id);
+		const afterArchive = await listPresetsForUser(db, ownerId);
+		// アーカイブ済みでも FK は残っているため件数は変わらない（inUse と同じ集計）。
+		expect(afterArchive.find((p) => p.id === ownerPresetId)?.inUseCount).toBe(2);
+	});
+
+	it('does not leak another users usage count of a shared system preset', async () => {
+		await createMemo(db, otherUserId, {
+			title: 'other users memo',
+			content: 'c',
+			intervalPresetId: systemPresetId
+		});
+
+		const presets = await listPresetsForUser(db, ownerId);
+		expect(presets.find((p) => p.id === systemPresetId)?.inUseCount).toBe(0);
+	});
 });
 
 describe('createCustomPreset', () => {

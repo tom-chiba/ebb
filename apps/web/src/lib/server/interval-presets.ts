@@ -1,5 +1,6 @@
 import {
 	and,
+	count,
 	eq,
 	inArray,
 	intervalPresets,
@@ -94,6 +95,9 @@ export interface PresetSummary {
 	// memos.interval_preset_id の FK は onDelete: 'no action' のため、アーカイブ済み
 	// メモが参照している間はプリセット自体を削除できない）。削除ボタンの無効化に使う。
 	inUse: boolean;
+	// このプリセットを使っている memo の件数（アーカイブ済みも含む。inUse と同じ集計の
+	// 件数版。設定画面のプリセット一覧（#62）で「使用中メモ件数」として表示する）。
+	inUseCount: number;
 }
 
 // システム標準プリセット + このユーザー自身のカスタムプリセットの一覧。
@@ -109,28 +113,31 @@ export async function listPresetsForUser(db: Db, userId: string): Promise<Preset
 		.where(or(isNull(intervalPresets.userId), eq(intervalPresets.userId, userId)))
 		.all();
 
-	// 対象プリセットごとに使用中の memo が存在するかを1クエリでまとめて調べる
-	// （プリセットごとに問い合わせない）。userId で絞らないと、システム標準プリセット
-	// （全ユーザー共有）の inUse が「自分が使っているか」ではなく「他ユーザーも含め
-	// 誰かが使っているか」になってしまい、他ユーザーの存在に関する情報が
-	// （UI上は未使用でも、ページの data には含まれる形で）漏れる
-	// （正確性レビューで指摘）。
+	// 対象プリセットごとの使用中 memo 件数を1クエリでまとめて調べる（プリセットごとに
+	// 問い合わせない）。userId で絞らないと、システム標準プリセット（全ユーザー共有）の
+	// 件数が「自分が使っている件数」ではなく「他ユーザーも含め誰かが使っている件数」に
+	// なってしまい、他ユーザーの存在に関する情報が（ページの data に含まれる形で）漏れる
+	// （#18 の inUse 判定に対する正確性レビュー指摘と同じ理由）。
 	const usageRows = await db
-		.select({ intervalPresetId: memos.intervalPresetId })
+		.select({ intervalPresetId: memos.intervalPresetId, count: count() })
 		.from(memos)
 		.where(eq(memos.userId, userId))
 		.groupBy(memos.intervalPresetId)
 		.all();
-	const usedPresetIds = new Set(usageRows.map((row) => row.intervalPresetId));
+	const usageCounts = new Map(usageRows.map((row) => [row.intervalPresetId, row.count]));
 
 	return presetRows
-		.map((preset) => ({
-			id: preset.id,
-			name: preset.name,
-			intervals: preset.intervals,
-			isSystem: preset.userId === null,
-			inUse: usedPresetIds.has(preset.id)
-		}))
+		.map((preset) => {
+			const inUseCount = usageCounts.get(preset.id) ?? 0;
+			return {
+				id: preset.id,
+				name: preset.name,
+				intervals: preset.intervals,
+				isSystem: preset.userId === null,
+				inUse: inUseCount > 0,
+				inUseCount
+			};
+		})
 		.sort((a, b) => {
 			if (a.isSystem !== b.isSystem) return a.isSystem ? -1 : 1;
 			return a.name.localeCompare(b.name, 'ja');
