@@ -1,4 +1,15 @@
-import { and, count, desc, eq, isNull, intervalPresets, memos, reviews, type Db } from '@ebb/db';
+import {
+	and,
+	count,
+	desc,
+	eq,
+	isNull,
+	intervalPresets,
+	memos,
+	reviews,
+	sql,
+	type Db
+} from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
 import {
 	ConflictError,
@@ -8,6 +19,7 @@ import {
 } from './errors';
 import { getAccessiblePreset } from './interval-presets';
 import { clamp, normalizeOffset, type PaginationOptions } from './pagination';
+import { minPendingScheduledAtSubquery } from './reviews';
 
 export const TITLE_MAX_LENGTH = 200;
 export const CONTENT_MAX_LENGTH = 50_000;
@@ -67,6 +79,82 @@ export async function listMemos(db: Db, userId: string, options: ListOptions = {
 	]);
 
 	return { items: items.map(toMemoResponse), total: totalRows[0]?.total ?? 0, limit, offset };
+}
+
+// LIKE の特殊文字（\ % _）が検索語にそのまま含まれていると、意図しないワイルドカード
+// 一致になる（例: "50%" というタイトルを検索したのに任意文字扱いされる）。バック
+// スラッシュでエスケープし、ESCAPE 句で明示する。
+function likePattern(q: string): string {
+	return `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+}
+
+export interface MemoBrowseItem {
+	id: string;
+	title: string;
+	content: string;
+	presetName: string;
+	// このメモの未完了 reviews の中で最も早い scheduledAt（次回予定）。
+	// 未完了 reviews が1件も無い（全ステップ完了済み）場合は null。
+	nextScheduledAt: Date | null;
+}
+
+export interface ListMemosForBrowseOptions extends PaginationOptions {
+	// メモ一覧のタイトル検索（#60）。空文字列・未指定は検索条件なし扱い。
+	q?: string;
+}
+
+// メモ一覧画面（apps/web/src/routes/(app)/memos）専用。listMemos（/api/memos が使う
+// 既存の契約）はそのまま維持し、この関数は画面表示に必要な追加フィールド（プリセット名・
+// 次回予定）とタイトル検索を持つ別関数として用意する（設計判断: API のレスポンス形状を
+// 変えないため）。
+export async function listMemosForBrowse(
+	db: Db,
+	userId: string,
+	options: ListMemosForBrowseOptions = {}
+): Promise<{ items: MemoBrowseItem[]; total: number; limit: number; offset: number }> {
+	const limit = clamp(options.limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT);
+	const offset = normalizeOffset(options.offset);
+	const trimmedQuery = options.q?.trim();
+	const where = and(
+		eq(memos.userId, userId),
+		isNull(memos.archivedAt),
+		trimmedQuery ? sql`${memos.title} LIKE ${likePattern(trimmedQuery)} ESCAPE '\\'` : undefined
+	);
+
+	const minPendingScheduledAt = minPendingScheduledAtSubquery(db);
+
+	const [rows, totalRows] = await Promise.all([
+		db
+			.select({
+				id: memos.id,
+				title: memos.title,
+				content: memos.content,
+				presetName: intervalPresets.name,
+				nextScheduledAt: minPendingScheduledAt.minScheduledAt
+			})
+			.from(memos)
+			.innerJoin(intervalPresets, eq(memos.intervalPresetId, intervalPresets.id))
+			.leftJoin(minPendingScheduledAt, eq(minPendingScheduledAt.memoId, memos.id))
+			.where(where)
+			.orderBy(desc(memos.createdAt), desc(memos.id))
+			.limit(limit)
+			.offset(offset)
+			.all(),
+		db.select({ total: count() }).from(memos).where(where).all()
+	]);
+
+	return {
+		items: rows.map((row) => ({
+			id: row.id,
+			title: row.title,
+			content: row.content,
+			presetName: row.presetName,
+			nextScheduledAt: row.nextScheduledAt === null ? null : new Date(row.nextScheduledAt)
+		})),
+		total: totalRows[0]?.total ?? 0,
+		limit,
+		offset
+	};
 }
 
 export async function getMemo(db: Db, userId: string, id: string) {

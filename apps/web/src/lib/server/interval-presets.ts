@@ -64,6 +64,27 @@ export async function getAccessiblePreset(db: Db, userId: string, intervalPreset
 	return preset;
 }
 
+export interface PresetNameAndIntervals {
+	name: string;
+	intervals: number[];
+}
+
+// メモ詳細画面（#60）向け。メモが参照する intervalPresetId は所有者チェック済みの
+// FK 値であり、getAccessiblePreset のような userId 一致/システム標準の判定は不要
+// （メモ自体の所有権は呼び出し元の getMemo が既に検証している）。
+export async function getPresetNameAndIntervals(
+	db: Db,
+	presetId: string
+): Promise<PresetNameAndIntervals | undefined> {
+	const rows = await db
+		.select({ name: intervalPresets.name, intervals: intervalPresets.intervals })
+		.from(intervalPresets)
+		.where(eq(intervalPresets.id, presetId))
+		.limit(1)
+		.all();
+	return rows[0];
+}
+
 export interface PresetSummary {
 	id: string;
 	name: string;

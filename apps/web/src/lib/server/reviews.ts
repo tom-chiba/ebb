@@ -84,6 +84,47 @@ function minPendingStepSubquery(db: Db) {
 		.as('min_pending_step');
 }
 
+// メモ一覧（apps/web/src/lib/server/memos.ts の listMemosForBrowse）向け。
+// 「次回予定時刻」はメモの現在ステップの scheduledAt そのものであり、
+// 全ステップ完了済み（未完了行が1件も無い）メモはこのサブクエリに現れず、
+// LEFT JOIN 側で null になることで「復習完了」と判定できる。
+//
+// ここでは未完了行を min(step) ではなく min(scheduledAt) で選んでいる（一覧の
+// JOIN で1行に絞り込む都合上、step ではなく時刻を直接引く方が JOIN 条件が単純に
+// なるため）。メモ詳細側（apps/web/src/routes/(app)/memos/[id]/+page.server.ts の
+// nextStep 判定、schedule.find(row => row.completedAt === null)）は min(step) で
+// 同じ行を求めており、通常は intervals が常に厳密昇順である（@ebb/core の
+// parseIntervals が全てのプリセット作成・更新経路で検証し、SYSTEM_INTERVAL_PRESETS
+// も昇順で定義されている）ため scheduledAt が step に対して単調増加し、両者は
+// 一致する（設計レビューで指摘）。
+//
+// ただし intervals が昇順であっても一致しないケースが存在する: メモの
+// intervalPresetId が作成後に別プリセットへ変更され（updateMemo は reviews を
+// 再生成しない。#18 のスコープ）、その後 completeReview が未完了ステップを
+// 新プリセットの intervals で再アンカリングする際、新 intervals の範囲外に
+// なった step は再アンカリングされず古い scheduledAt が残る（completeReview の
+// reanchorUpdates 節を参照）。この場合、古い scheduledAt を持つ後続 step が
+// 新しく再アンカリングされた前段の step より早い時刻になり得るため、
+// min(scheduledAt) と min(step) が異なる行を指すことがある（正確性レビューで
+// 指摘）。この不整合自体は #18 のスコープであり#60では解消しない。現状の Web UI
+// （memos/[id]/edit）は既存メモの intervalPresetId 変更を提供していないため、
+// この経路は API を直接叩いた場合にのみ到達する。
+export function minPendingScheduledAtSubquery(db: Db) {
+	return db
+		.select({
+			memoId: reviews.memoId,
+			// reviews.scheduledAt は integer(mode: 'timestamp_ms') 列だが、min() を通した
+			// raw sql 式は drizzle の timestamp デコードを経由しないため、ここでは素の
+			// エポックミリ秒（number）として扱う。呼び出し側（listMemosForBrowse）で
+			// Date へ変換する。
+			minScheduledAt: sql<number>`min(${reviews.scheduledAt})`.as('min_scheduled_at')
+		})
+		.from(reviews)
+		.where(isNull(reviews.completedAt))
+		.groupBy(reviews.memoId)
+		.as('min_pending_scheduled_at');
+}
+
 export async function listDueReviews(db: Db, userId: string, options: ListOptions = {}) {
 	const limit = clamp(options.limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT);
 	const offset = normalizeOffset(options.offset);
@@ -414,6 +455,29 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 		completedAt,
 		nextScheduledAt
 	};
+}
+
+export interface ReviewScheduleStep {
+	step: number;
+	scheduledAt: Date;
+	completedAt: Date | null;
+}
+
+// メモ詳細画面（apps/web/src/routes/(app)/memos/[id]）向け。そのメモの reviews 行を
+// 完了済み・未完了の両方まとめて step 昇順で返す。getDueReviewDetail は「現在の1
+// ステップ」の詳細を返す専用ロジック（assertIsCurrentStep 等）を含み、全ステップの
+// 一覧という別の要求には合わないため、独立した関数として用意する。
+export async function listReviewSchedule(db: Db, memoId: string): Promise<ReviewScheduleStep[]> {
+	return db
+		.select({
+			step: reviews.step,
+			scheduledAt: reviews.scheduledAt,
+			completedAt: reviews.completedAt
+		})
+		.from(reviews)
+		.where(eq(reviews.memoId, memoId))
+		.orderBy(asc(reviews.step))
+		.all();
 }
 
 export interface ReviewRecalculationPlan {

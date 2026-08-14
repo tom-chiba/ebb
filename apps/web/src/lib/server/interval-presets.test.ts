@@ -7,6 +7,7 @@ import {
 	deleteCustomPreset,
 	DEFAULT_INTERVAL_PRESET_ID,
 	getDefaultPresetId,
+	getPresetNameAndIntervals,
 	listPresetsForUser,
 	MAX_BATCH_STATEMENTS,
 	PRESET_NAME_MAX_LENGTH,
@@ -47,6 +48,18 @@ beforeEach(async () => {
 	systemPresetId = systemPreset.id;
 	ownerPresetId = ownerPreset.id;
 	otherUserPresetId = otherPreset.id;
+});
+
+describe('getPresetNameAndIntervals', () => {
+	it('returns the name and intervals for an existing preset', async () => {
+		const result = await getPresetNameAndIntervals(db, ownerPresetId);
+		expect(result).toEqual({ name: 'owner preset', intervals: [1, 24, 72] });
+	});
+
+	it('returns undefined for a non-existent preset id', async () => {
+		const result = await getPresetNameAndIntervals(db, crypto.randomUUID());
+		expect(result).toBeUndefined();
+	});
 });
 
 describe('listPresetsForUser', () => {
