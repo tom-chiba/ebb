@@ -5,6 +5,7 @@
 
 	let { data, form }: PageProps = $props();
 
+	let title = $state(form?.title ?? '');
 	let content = $state(form?.content ?? '');
 </script>
 
@@ -22,7 +23,7 @@
 			type="text"
 			name="title"
 			class="title"
-			value={form?.title ?? ''}
+			bind:value={title}
 			maxlength={data.titleMaxLength}
 			placeholder="タイトル"
 			required
