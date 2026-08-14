@@ -75,6 +75,84 @@ export function formatIntervals(intervals: readonly Hours[]): string {
 	return intervals.map((hours) => (hours % 24 === 0 ? `${hours / 24}d` : `${hours}h`)).join(', ');
 }
 
+export type IntervalDiffStatus = 'unchanged' | 'changed' | 'added' | 'removed';
+
+// status ごとに oldHours/newHours の有無が一意に決まる（unchanged/changed は両方必須、
+// added は newHours のみ、removed は oldHours のみ）ため判別共用体にする。単一の
+// interface で両方を `Hours | undefined` にすると、diffIntervals にバグがあり例えば
+// changed エントリの newHours が欠けても型・実行時のどちらでも検知できず、消費側
+// （表示コンポーネント）が `?? 0`（＝0時間後）のような不正なフォールバックを
+// 書かざるを得なくなる。
+export type IntervalDiffEntry =
+	| { readonly status: 'unchanged'; readonly oldHours: Hours; readonly newHours: Hours }
+	| { readonly status: 'changed'; readonly oldHours: Hours; readonly newHours: Hours }
+	| { readonly status: 'added'; readonly newHours: Hours }
+	| { readonly status: 'removed'; readonly oldHours: Hours };
+
+// 既存プリセットの間隔編集で「変更前後の差分」を表示するための比較（#63）。
+// 単純にインデックスどうしを比較すると、途中の1ステップを削除しただけで
+// それ以降の全ステップが「値が変わった（changed）」と誤認識されてしまう
+// （例: [1,24,72] → [1,72] は「24日後を削除した」だけなのに、末尾までの
+// インデックスをずらして比較すると 24→72 の changed に見えてしまう）。
+// intervals は常に厳密昇順・重複なし（parseIntervals が保証）なので、
+// 両者に共通して現れる値（ソート済み配列の二分探索的な二本指走査で求まる、
+// 最長共通部分列に相当するアンカー）を「動いていないステップ」の目印にし、
+// アンカーとアンカーの間（＝どちらか一方にしか値がない区間）だけを
+// 個別に処理する。区間内で削除候補・追加候補が両方あれば、同じ区間内での
+// 「置き換え」とみなして先頭から順にペアリングし changed とする（ペアリング
+// し切れず片方だけ余れば、その分だけ純粋な removed/added にする）。
+export function diffIntervals(
+	oldIntervals: readonly Hours[],
+	newIntervals: readonly Hours[]
+): IntervalDiffEntry[] {
+	const entries: IntervalDiffEntry[] = [];
+
+	// segment は「直前のアンカーから次のアンカー（またはどちらかの末尾）まで」の
+	// 区間を、old側だけに残る値・new側だけに残る値の2本の配列として受け取る。
+	function pushSegment(oldOnly: readonly Hours[], newOnly: readonly Hours[]): void {
+		const pairCount = Math.min(oldOnly.length, newOnly.length);
+		for (let i = 0; i < pairCount; i++) {
+			entries.push({ status: 'changed', oldHours: oldOnly[i]!, newHours: newOnly[i]! });
+		}
+		for (let i = pairCount; i < oldOnly.length; i++) {
+			entries.push({ status: 'removed', oldHours: oldOnly[i]! });
+		}
+		for (let i = pairCount; i < newOnly.length; i++) {
+			entries.push({ status: 'added', newHours: newOnly[i]! });
+		}
+	}
+
+	let oldIndex = 0;
+	let newIndex = 0;
+	let segmentOldStart = 0;
+	let segmentNewStart = 0;
+	// 両方とも厳密昇順なので、通常の二方向マージと同じ要領で共通値（アンカー）を
+	// 見つけられる（一般の最長共通部分列のような総当たりは不要）。
+	while (oldIndex < oldIntervals.length && newIndex < newIntervals.length) {
+		const oldHours = oldIntervals[oldIndex];
+		const newHours = newIntervals[newIndex];
+		if (oldHours === newHours) {
+			pushSegment(
+				oldIntervals.slice(segmentOldStart, oldIndex),
+				newIntervals.slice(segmentNewStart, newIndex)
+			);
+			// while 条件（oldIndex/newIndex とも各配列の長さ未満）で存在が保証されている。
+			entries.push({ status: 'unchanged', oldHours: oldHours!, newHours: newHours! });
+			oldIndex++;
+			newIndex++;
+			segmentOldStart = oldIndex;
+			segmentNewStart = newIndex;
+		} else if (oldHours! < newHours!) {
+			oldIndex++;
+		} else {
+			newIndex++;
+		}
+	}
+	pushSegment(oldIntervals.slice(segmentOldStart), newIntervals.slice(segmentNewStart));
+
+	return entries;
+}
+
 // システム標準プリセット。固定 slug の id で管理する（crypto.randomUUID() のような
 // ランダム id だと環境ごとに id がずれ、アプリ側が安定して参照できない。
 // docs/schema.md の interval_presets 節を参照）。
