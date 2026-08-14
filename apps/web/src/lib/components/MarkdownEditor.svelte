@@ -39,6 +39,8 @@
 
 <textarea bind:this={textareaEl} bind:value {name} {maxlength} rows="10"></textarea>
 
+<div class="counter">{value.length} / {maxlength}</div>
+
 <div class="toolbar">
 	{#each TOOLBAR_BUTTONS as button (button.action)}
 		<button
@@ -64,6 +66,12 @@
 		color: var(--color-text-secondary);
 		padding: 0;
 		box-sizing: border-box;
+	}
+
+	.counter {
+		font-size: 0.6875rem;
+		color: var(--color-text-faint);
+		text-align: right;
 	}
 
 	.toolbar {

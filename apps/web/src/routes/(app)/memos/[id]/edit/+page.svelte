@@ -7,6 +7,18 @@
 
 	let title = $state(form?.title ?? data.memo.title);
 	let content = $state(form?.content ?? data.memo.content);
+
+	// 409(競合)後の「最新の内容を確認する」リンクは同一ルートへのクライアントサイド
+	// ナビゲーションであり、コンポーネントは再マウントされず $state の初期化式も
+	// 再評価されない。$effect で form/data.memo の変化そのものを追跡し、そのときだけ
+	// title/content を再同期する（自分の入力による title/content 自体の変更では
+	// form/data が変わらないため、この effect は再実行されない）。これが無いと、
+	// 本文だけ古いまま hidden の expectedUpdatedAt だけが最新値に更新され、
+	// 他の変更を無警告で上書きしてしまう（+page.server.ts の ConflictError コメント参照）。
+	$effect(() => {
+		title = form?.title ?? data.memo.title;
+		content = form?.content ?? data.memo.content;
+	});
 </script>
 
 <form method="POST">
@@ -34,8 +46,6 @@
 		/>
 
 		<MarkdownEditor bind:value={content} name="content" maxlength={data.contentMaxLength} />
-
-		<div class="counter">{content.length} / {data.contentMaxLength}</div>
 	</div>
 
 	<div class="presets">
@@ -116,12 +126,6 @@
 		font-size: 1.375rem;
 		color: var(--color-text);
 		padding: 0;
-	}
-
-	.counter {
-		font-size: 0.6875rem;
-		color: var(--color-text-faint);
-		text-align: right;
 	}
 
 	.presets {

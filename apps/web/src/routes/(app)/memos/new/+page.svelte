@@ -30,8 +30,6 @@
 		/>
 
 		<MarkdownEditor bind:value={content} name="content" maxlength={data.contentMaxLength} />
-
-		<div class="counter">{content.length} / {data.contentMaxLength}</div>
 	</div>
 
 	<div class="presets">
@@ -109,12 +107,6 @@
 		font-size: 1.375rem;
 		color: var(--color-text);
 		padding: 0;
-	}
-
-	.counter {
-		font-size: 0.6875rem;
-		color: var(--color-text-faint);
-		text-align: right;
 	}
 
 	.presets {

@@ -7,6 +7,10 @@ export interface TextSelection {
 export type MarkdownToolbarAction = 'heading' | 'bullet' | 'quote' | 'bold' | 'code';
 
 function lineStart(value: string, pos: number): number {
+	// pos === 0 を素通しせず lastIndexOf(value, -1) を呼ぶと、String#lastIndexOf の
+	// 仕様で負の fromIndex が 0 にクランプされ、value[0] が '\n' の場合に誤って
+	// それを「直前の改行」として検出してしまう（先頭が空行の本文で2行目を誤検出する）。
+	if (pos <= 0) return 0;
 	const idx = value.lastIndexOf('\n', pos - 1);
 	return idx === -1 ? 0 : idx + 1;
 }

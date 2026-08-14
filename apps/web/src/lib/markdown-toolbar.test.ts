@@ -27,6 +27,29 @@ describe('applyMarkdownToolbarAction', () => {
 			});
 			expect(result.value).toBe('first\n# second');
 		});
+
+		it('toggles off a multi-level heading marker (##)', () => {
+			const result = applyMarkdownToolbarAction('heading', {
+				value: '## title',
+				start: 8,
+				end: 8
+			});
+			expect(result).toEqual({ value: 'title', start: 5, end: 5 });
+		});
+
+		it('does not treat a leading "#" without a following space as a heading marker', () => {
+			const result = applyMarkdownToolbarAction('heading', { value: '#tag', start: 0, end: 0 });
+			expect(result).toEqual({ value: '# #tag', start: 2, end: 2 });
+		});
+
+		it('targets the first (empty) line when the cursor is at position 0 and the text starts with a newline', () => {
+			const result = applyMarkdownToolbarAction('heading', {
+				value: '\nworld',
+				start: 0,
+				end: 0
+			});
+			expect(result).toEqual({ value: '# \nworld', start: 2, end: 2 });
+		});
 	});
 
 	describe('bullet', () => {
@@ -42,6 +65,15 @@ describe('applyMarkdownToolbarAction', () => {
 				end: 3
 			});
 			expect(result).toEqual({ value: '- item', start: 3, end: 3 });
+		});
+
+		it('does not treat a leading "-" without a following space as a bullet marker', () => {
+			const result = applyMarkdownToolbarAction('bullet', {
+				value: '-item',
+				start: 0,
+				end: 0
+			});
+			expect(result).toEqual({ value: '- -item', start: 2, end: 2 });
 		});
 	});
 
@@ -61,6 +93,22 @@ describe('applyMarkdownToolbarAction', () => {
 		});
 	});
 
+	describe('multi-line selection', () => {
+		it('applies a line-prefix action only to the line containing selectionStart, even when the selection spans multiple lines', () => {
+			const value = 'first\nsecond\nthird';
+			const start = value.indexOf('second');
+			const end = value.indexOf('third') + 'third'.length;
+			const result = applyMarkdownToolbarAction('bullet', { value, start, end });
+			expect(result.value).toBe('first\n- second\nthird');
+		});
+
+		it('wraps a multi-line selection with bold markers around the whole range', () => {
+			const value = 'first\nsecond';
+			const result = applyMarkdownToolbarAction('bold', { value, start: 0, end: value.length });
+			expect(result.value).toBe('**first\nsecond**');
+		});
+	});
+
 	describe('bold', () => {
 		it('wraps the selection', () => {
 			const result = applyMarkdownToolbarAction('bold', {
@@ -74,6 +122,11 @@ describe('applyMarkdownToolbarAction', () => {
 		it('inserts an empty pair with the caret centered when there is no selection', () => {
 			const result = applyMarkdownToolbarAction('bold', { value: 'hello ', start: 6, end: 6 });
 			expect(result).toEqual({ value: 'hello ****', start: 8, end: 8 });
+		});
+
+		it('inserts an empty pair into an empty document', () => {
+			const result = applyMarkdownToolbarAction('bold', { value: '', start: 0, end: 0 });
+			expect(result).toEqual({ value: '****', start: 2, end: 2 });
 		});
 	});
 

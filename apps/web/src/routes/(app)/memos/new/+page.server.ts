@@ -11,11 +11,9 @@ import { normalizeLineEndings } from '$lib/server/text';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async (event) => {
-	// このページ自体は DB もユーザー固有データも読まないが、他の load/action と
-	// 同じく個別に認可チェックを通しておく（このリポジトリの規約。#11: layout の
-	// 保護はページの load のみが対象で action には及ばない）。将来このページの
-	// load がユーザー固有の値を返すよう変更されても、認可チェックの追加を
-	// 忘れる余地をなくす。
+	// このページの load は間隔プリセット一覧・既定プリセットというユーザー固有データを
+	// 読むため、他の load/action と同じく個別に認可チェックを通す（このリポジトリの
+	// 規約。#11: layout の保護はページの load のみが対象で action には及ばない）。
 	const { user, db } = requireAuthedDb(event);
 
 	// bfcache 経由でこのページに戻ると、直前の送信で使ったのと同じ draftId・
