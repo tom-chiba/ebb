@@ -44,7 +44,8 @@
 
 <style>
 	main {
-		padding-bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom) + 4.5rem);
+		padding: 0 var(--space-page)
+			calc(var(--bottom-nav-height) + env(safe-area-inset-bottom) + 4.5rem);
 	}
 
 	.bottom-nav {
@@ -54,7 +55,7 @@
 		bottom: 0;
 		display: flex;
 		padding-bottom: env(safe-area-inset-bottom);
-		background: var(--color-bg);
+		background: var(--color-surface-raised);
 		border-top: 1px solid var(--color-border);
 	}
 
@@ -65,7 +66,7 @@
 		justify-content: center;
 		min-height: var(--bottom-nav-height);
 		text-align: center;
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-caption);
 		text-decoration: none;
 	}

@@ -1,6 +1,10 @@
 <script lang="ts">
 	import { formatIntervals, parseIntervals } from '@ebb/core';
 	import { resolve } from '$app/paths';
+	import Button from '$lib/components/Button.svelte';
+	import DangerZone from '$lib/components/DangerZone.svelte';
+	import Flash from '$lib/components/Flash.svelte';
+	import FormHeader from '$lib/components/FormHeader.svelte';
 	import IntervalStepEditor from '$lib/components/IntervalStepEditor.svelte';
 	import { formatIntervalStep } from '$lib/format-interval-step';
 	import type { PageProps } from './$types';
@@ -50,25 +54,23 @@
 <form method="POST" action="?/update">
 	<input type="hidden" name="intervals" value={formatIntervals(steps)} />
 
-	<div class="header">
-		<a href={resolve('/settings')}>キャンセル</a>
-		<div class="header-label">{data.preset.name}</div>
+	<FormHeader cancelHref={resolve('/settings')} label={data.preset.name}>
 		{#if preview}
-			<button type="button" class="save-button" disabled>保存</button>
+			<Button variant="compact" type="button" disabled>保存</Button>
 		{:else}
-			<button
+			<Button
+				variant="compact"
 				type="submit"
-				class="save-button"
 				name="confirmed"
 				value="false"
-				disabled={steps.length === 0 || unchanged}>保存</button
+				disabled={steps.length === 0 || unchanged}>保存</Button
 			>
 		{/if}
-	</div>
+	</FormHeader>
 
 	<div class="fields">
 		{#if updateSuccess}
-			<p class="flash">{updateSuccess.updatedReviewsCount}件の予定を更新しました。</p>
+			<Flash>{updateSuccess.updatedReviewsCount}件の予定を更新しました。</Flash>
 			<a href={resolve('/settings')}>設定に戻る</a>
 		{:else}
 			{#if preview}
@@ -136,58 +138,25 @@
 		{/if}
 	</div>
 
-	<form method="POST" action="?/delete" class="delete-form">
-		<button type="submit" class="destructive-link" disabled={data.usedMemos.length > 0}
-			>プリセットを削除</button
-		>
-	</form>
-	{#if data.usedMemos.length > 0}
-		<p class="hint">使用中のメモがあるため削除できません。</p>
-	{/if}
-	{#if deleteError}
-		<p class="error">{deleteError}</p>
-	{/if}
+	<DangerZone>
+		<form method="POST" action="?/delete" class="delete-form">
+			<Button variant="quiet" type="submit" disabled={data.usedMemos.length > 0}
+				>プリセットを削除</Button
+			>
+		</form>
+		{#if data.usedMemos.length > 0}
+			<p class="hint">使用中のメモがあるため削除できません。</p>
+		{/if}
+		{#if deleteError}
+			<p class="error">{deleteError}</p>
+		{/if}
+	</DangerZone>
 </div>
 
 <style>
 	form {
 		display: flex;
 		flex-direction: column;
-	}
-
-	.header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.75rem 0;
-		border-bottom: 1px solid var(--color-border-subtle);
-	}
-
-	.header a {
-		font-size: 0.84rem;
-		color: var(--color-text-muted);
-	}
-
-	.header-label {
-		font-size: 0.78rem;
-		color: var(--color-text-caption);
-	}
-
-	.save-button {
-		border: none;
-		background: var(--color-accent);
-		color: var(--color-surface-card);
-		font-family: var(--font-sans);
-		font-size: 0.8125rem;
-		font-weight: 700;
-		border-radius: var(--radius-button);
-		padding: 0.5rem 1rem;
-		cursor: pointer;
-	}
-
-	.save-button:disabled {
-		background: var(--color-border-strong);
-		cursor: not-allowed;
 	}
 
 	.fields {
@@ -210,27 +179,32 @@
 	.impact-title {
 		font-family: var(--font-heading);
 		font-weight: 600;
-		font-size: 1rem;
+		font-size: var(--text-title);
 		color: var(--color-warning-text);
 	}
 
 	.impact-desc {
 		margin: 0;
-		font-size: 0.78rem;
+		font-size: var(--text-small);
 		line-height: 1.85;
 		color: var(--color-warning-text);
 	}
 
 	.confirm-button {
-		height: 2.875rem;
+		height: var(--control-h-field);
 		border: none;
-		border-radius: var(--radius-button);
+		border-radius: var(--radius-pill);
 		background: var(--color-warning-button);
 		color: var(--color-warning-button-text);
 		font-family: var(--font-sans);
-		font-size: 0.875rem;
+		font-size: var(--text-body);
 		font-weight: 700;
 		cursor: pointer;
+	}
+
+	.confirm-button:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
 	}
 
 	.section {
@@ -240,7 +214,7 @@
 	}
 
 	.section-label {
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		letter-spacing: 0.06em;
 		color: var(--color-text-caption);
 	}
@@ -249,8 +223,8 @@
 	.memo-list {
 		list-style: none;
 		margin: 0;
-		padding: 0 0.875rem;
-		background: var(--color-surface-input);
+		padding: 0 16px;
+		background: var(--color-surface-card);
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-card);
 	}
@@ -260,9 +234,9 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.75rem;
-		padding: 0.6875rem 0;
+		padding: 12px 0;
 		border-bottom: 1px solid var(--color-border-subtle);
-		font-size: 0.875rem;
+		font-size: var(--text-body);
 		color: var(--color-text);
 	}
 
@@ -276,14 +250,14 @@
 	}
 
 	.diff-status {
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-caption);
 	}
 
 	.memo-list li {
-		padding: 0.6875rem 0;
+		padding: 12px 0;
 		border-bottom: 1px solid var(--color-border-subtle);
-		font-size: 0.875rem;
+		font-size: var(--text-body);
 		color: var(--color-text);
 	}
 
@@ -293,7 +267,7 @@
 
 	.hint {
 		margin: 0;
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-caption);
 	}
 
@@ -301,32 +275,8 @@
 		display: block;
 	}
 
-	.destructive-link {
-		border: none;
-		background: none;
-		padding: 0;
-		font-family: var(--font-sans);
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--color-error);
-		cursor: pointer;
-	}
-
-	.destructive-link:disabled {
-		color: var(--color-text-faint);
-		cursor: not-allowed;
-	}
-
 	.error {
 		color: var(--color-error);
-		margin: 0;
-	}
-
-	.flash {
-		background: var(--color-accent-bg);
-		border: 1px solid var(--color-accent-border);
-		border-radius: var(--radius-md);
-		padding: 0.75rem 1rem;
 		margin: 0;
 	}
 </style>

@@ -1,10 +1,16 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import BottomBar from '$lib/components/BottomBar.svelte';
+	import Button from '$lib/components/Button.svelte';
+	import Card from '$lib/components/Card.svelte';
+	import DangerZone from '$lib/components/DangerZone.svelte';
 	import MarkdownBody from '$lib/components/MarkdownBody.svelte';
 	import { formatShortDateTime } from '$lib/format-date-time';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
+
+	let completedCount = $derived(data.schedule.filter((item) => item.completedAt).length);
 
 	function confirmDelete(event: SubmitEvent) {
 		if (!confirm('このメモを削除しますか？元に戻せません。')) {
@@ -14,16 +20,11 @@
 </script>
 
 <div class="header">
-	<a href={resolve('/memos')}>← メモ</a>
-	<div class="links">
-		<a href={resolve('/(app)/memos/[id]/edit', { id: data.memo.id })}>編集</a>
-		<form method="POST" action="?/delete" onsubmit={confirmDelete}>
-			<button type="submit" class="destructive">削除</button>
-		</form>
-	</div>
+	<a href={resolve('/memos')}>‹ メモ</a>
+	<span class="progress">{completedCount} / {data.schedule.length} 回 完了</span>
 </div>
 
-<article>
+<article class="content">
 	<h1>{data.memo.title}</h1>
 
 	<div class="chips">
@@ -37,64 +38,72 @@
 
 	<MarkdownBody content={data.renderedContent} />
 
-	<div class="schedule">
-		<div class="schedule-label">復習スケジュール</div>
-		{#each data.schedule as item (item.step)}
-			<div class="schedule-row" class:next={item.isNext}>
-				<span>{item.label}</span>
-				{#if item.completedAt}
-					<span class="schedule-status">完了 {formatShortDateTime(item.completedAt)}</span>
-				{:else}
-					<span class="schedule-status">{formatShortDateTime(item.scheduledAt)} 予定</span>
-				{/if}
-			</div>
-		{/each}
-	</div>
+	<Card>
+		<div class="schedule">
+			<div class="schedule-label">復習スケジュール</div>
+			{#each data.schedule as item (item.step)}
+				<div class="schedule-row" class:next={item.isNext}>
+					<span>{item.label}</span>
+					{#if item.completedAt}
+						<span class="schedule-status">完了 {formatShortDateTime(item.completedAt)}</span>
+					{:else}
+						<span class="schedule-status">{formatShortDateTime(item.scheduledAt)} 予定</span>
+					{/if}
+				</div>
+			{/each}
+		</div>
+	</Card>
+
+	<DangerZone>
+		<form method="POST" action="?/delete" onsubmit={confirmDelete}>
+			<Button variant="quiet" type="submit">このメモを削除</Button>
+		</form>
+	</DangerZone>
 </article>
+
+<BottomBar>
+	<Button variant="primary" href={resolve('/(app)/memos/[id]/edit', { id: data.memo.id })}
+		>編集する</Button
+	>
+</BottomBar>
 
 <style>
 	.header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		margin-bottom: 1rem;
+		margin-top: 20px;
+		margin-bottom: 20px;
 	}
 
-	.links {
+	.header a {
+		font-size: var(--text-small);
+		color: var(--color-text-muted);
+	}
+
+	.progress {
+		font-size: var(--text-caption);
+		color: var(--color-text-caption);
+	}
+
+	.content {
 		display: flex;
-		gap: 1.125rem;
-		align-items: center;
-	}
-
-	.links form {
-		margin: 0;
-	}
-
-	.links button {
-		border: none;
-		background: none;
-		padding: 0;
-		font-family: var(--font-sans);
-		font-size: 0.85rem;
-		cursor: pointer;
-		color: var(--color-accent);
-	}
-
-	.links button.destructive {
-		color: var(--color-error);
+		flex-direction: column;
+		gap: 1rem;
+		margin-bottom: calc(var(--bottom-bar-height, 96px) + 16px);
 	}
 
 	.chips {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.5rem;
-		margin: 0.75rem 0 1rem;
+		margin: 0;
 	}
 
 	.chip {
-		font-size: 0.72rem;
-		border-radius: var(--radius-chip);
-		padding: 0.25rem 0.625rem;
+		font-size: var(--text-caption);
+		border-radius: var(--radius-card);
+		padding: 4px 10px;
 	}
 
 	.chip-accent {
@@ -105,21 +114,18 @@
 
 	.chip-muted {
 		color: var(--color-text-muted);
-		background: var(--color-border-subtle);
+		background: var(--color-surface-raised);
 		border: 1px solid var(--color-border);
 	}
 
 	.schedule {
-		margin-top: 1.5rem;
-		padding-top: 1rem;
-		border-top: 1px solid var(--color-border-subtle);
 		display: flex;
 		flex-direction: column;
 		gap: 0.5rem;
 	}
 
 	.schedule-label {
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		letter-spacing: 0.06em;
 		color: var(--color-text-caption);
 	}
@@ -127,7 +133,7 @@
 	.schedule-row {
 		display: flex;
 		justify-content: space-between;
-		font-size: 0.8125rem;
+		font-size: var(--text-small);
 		color: var(--color-text-muted);
 	}
 

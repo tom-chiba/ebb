@@ -30,13 +30,13 @@
 		display: flex;
 		align-items: center;
 		gap: 0.625rem;
-		padding: 0.625rem 0;
+		padding: 14px 0;
 		border-top: 1px solid var(--color-border-subtle);
 	}
 
 	.presets-label {
-		font-size: 0.72rem;
-		color: var(--color-text-muted);
+		font-size: var(--text-caption);
+		color: var(--color-text-caption);
 		flex-shrink: 0;
 	}
 
@@ -56,18 +56,18 @@
 
 	.chip {
 		display: inline-block;
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-secondary);
 		background: var(--color-surface-input);
 		border: 1px solid var(--color-border);
-		border-radius: var(--radius-chip);
-		padding: 0.3125rem 0.6875rem;
+		border-radius: var(--radius-card);
+		padding: 5px 12px;
 		cursor: pointer;
 		white-space: nowrap;
 	}
 
 	.chip-input:checked + .chip {
-		color: var(--color-surface-card);
+		color: var(--color-surface-input);
 		background: var(--color-accent);
 		border-color: var(--color-accent);
 		font-weight: 500;

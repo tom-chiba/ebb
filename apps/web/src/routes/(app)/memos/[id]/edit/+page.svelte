@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import Button from '$lib/components/Button.svelte';
+	import FormHeader from '$lib/components/FormHeader.svelte';
 	import IntervalPresetChips from '$lib/components/IntervalPresetChips.svelte';
 	import MarkdownEditor from '$lib/components/MarkdownEditor.svelte';
 	import type { PageProps } from './$types';
@@ -31,11 +33,9 @@
 		value={form?.expectedUpdatedAt ?? data.memo.updatedAt.toISOString()}
 	/>
 
-	<div class="header">
-		<a href={resolve('/(app)/memos/[id]', { id: data.memo.id })}>キャンセル</a>
-		<div class="header-label">メモを編集</div>
-		<button type="submit">保存</button>
-	</div>
+	<FormHeader cancelHref={resolve('/(app)/memos/[id]', { id: data.memo.id })} label="メモを編集">
+		<Button variant="compact" type="submit">保存</Button>
+	</FormHeader>
 
 	<div class="fields">
 		<input
@@ -67,36 +67,6 @@
 		flex-direction: column;
 	}
 
-	.header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.75rem 0;
-		border-bottom: 1px solid var(--color-border-subtle);
-	}
-
-	.header a {
-		font-size: 0.84rem;
-		color: var(--color-text-muted);
-	}
-
-	.header-label {
-		font-size: 0.78rem;
-		color: var(--color-text-caption);
-	}
-
-	.header button {
-		border: none;
-		background: var(--color-accent);
-		color: var(--color-surface-card);
-		font-family: var(--font-sans);
-		font-size: 0.8125rem;
-		font-weight: 700;
-		border-radius: var(--radius-button);
-		padding: 0.5rem 1rem;
-		cursor: pointer;
-	}
-
 	.fields {
 		display: flex;
 		flex-direction: column;
@@ -111,7 +81,7 @@
 		background: transparent;
 		font-family: var(--font-heading);
 		font-weight: 600;
-		font-size: 1.375rem;
+		font-size: 22px;
 		color: var(--color-text);
 		padding: 0;
 	}
