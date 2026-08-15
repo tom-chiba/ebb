@@ -72,15 +72,54 @@
 	{:else if platform.isIOSLike && !platform.isStandalone}
 		<div class="guide">
 			<p class="guide-title">iPhone・iPad では、ホーム画面に追加すると通知を受け取れます</p>
-			<ol>
-				<li>画面下（または上）の共有アイコンをタップ</li>
-				<li>「ホーム画面に追加」を選ぶ</li>
-				<li>追加されたアイコンから開き直す</li>
+			<ol class="steps">
+				<li>
+					<svg class="step-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+						<rect x="3" y="9" width="18" height="12" rx="2" stroke="currentColor" stroke-width="1.6" />
+						<path
+							d="M12 15V3m0 0-4 4m4-4 4 4"
+							stroke="currentColor"
+							stroke-width="1.6"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						/>
+					</svg>
+					<span>画面下（または上）の共有アイコンをタップ</span>
+				</li>
+				<li>
+					<svg class="step-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+						<rect x="3" y="3" width="18" height="18" rx="4" stroke="currentColor" stroke-width="1.6" />
+						<path
+							d="M12 8v8M8 12h8"
+							stroke="currentColor"
+							stroke-width="1.6"
+							stroke-linecap="round"
+						/>
+					</svg>
+					<span>「ホーム画面に追加」を選ぶ</span>
+				</li>
+				<li>
+					<svg class="step-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+						<rect
+							x="4"
+							y="4"
+							width="16"
+							height="16"
+							rx="4"
+							fill="var(--color-accent)"
+							opacity="0.15"
+						/>
+						<rect x="4" y="4" width="16" height="16" rx="4" stroke="currentColor" stroke-width="1.6" />
+					</svg>
+					<span>追加されたアイコンから開き直す</span>
+				</li>
 			</ol>
 			<p class="hint">開き直すと、このページに通知を有効にするボタンが表示されます。</p>
 		</div>
 	{:else if !platform.pushCapable}
 		<p class="hint">このブラウザは通知に対応していません。あとで設定画面から確認できます。</p>
+	{:else if !data.vapidPublicKey}
+		<p class="hint">現在この環境では通知を利用できません。あとで設定画面から確認できます。</p>
 	{:else}
 		<div class="guide">
 			{#if platform.isAndroid && !platform.isStandalone}
@@ -162,12 +201,29 @@
 		margin: 0;
 	}
 
-	.guide ol {
+	.steps {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
 		margin: 0;
-		padding-left: 1.25rem;
+		padding: 0;
+		list-style: none;
 		font-size: var(--text-small);
-		line-height: 1.9;
+		line-height: 1.6;
 		color: var(--color-text-muted);
+	}
+
+	.steps li {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+	}
+
+	.step-icon {
+		flex: none;
+		width: 28px;
+		height: 28px;
+		color: var(--color-text-caption);
 	}
 
 	.hint {
