@@ -6,6 +6,7 @@
 	import PageHeading from '$lib/components/PageHeading.svelte';
 	import Button from '$lib/components/Button.svelte';
 	import { formatShortDateTime } from '$lib/format-date-time';
+	import type { ResolvedPathname } from '$app/types';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -15,10 +16,10 @@
 	let prevOffset = $derived(Math.max(0, data.offset - data.limit));
 	let nextOffset = $derived(data.offset + data.limit);
 
-	function paramsFor(offset: number): string {
+	function pageHref(offset: number): ResolvedPathname {
 		const params = new SvelteURLSearchParams({ offset: String(offset) });
 		if (data.q) params.set('q', data.q);
-		return params.toString();
+		return `${resolve('/memos')}?${params.toString()}` as ResolvedPathname;
 	}
 </script>
 
@@ -62,14 +63,10 @@
 
 <nav>
 	{#if hasPrev}
-		<Button variant="compact" tone="neutral" href="{resolve('/memos')}?{paramsFor(prevOffset)}"
-			>‹ 前へ</Button
-		>
+		<Button variant="compact" tone="neutral" href={pageHref(prevOffset)}>‹ 前へ</Button>
 	{/if}
 	{#if hasNext}
-		<Button variant="compact" tone="neutral" href="{resolve('/memos')}?{paramsFor(nextOffset)}"
-			>次へ ›</Button
-		>
+		<Button variant="compact" tone="neutral" href={pageHref(nextOffset)}>次へ ›</Button>
 	{/if}
 </nav>
 

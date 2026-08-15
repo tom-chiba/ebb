@@ -6,6 +6,7 @@
 	import PageHeading from '$lib/components/PageHeading.svelte';
 	import Button from '$lib/components/Button.svelte';
 	import { formatDateTime, formatTime } from '$lib/format-date-time';
+	import type { ResolvedPathname } from '$app/types';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -16,6 +17,10 @@
 	let hasNext = $derived(data.offset + data.items.length < data.total);
 	let prevOffset = $derived(Math.max(0, data.offset - data.limit));
 	let nextOffset = $derived(data.offset + data.limit);
+
+	function pageHref(offset: number): ResolvedPathname {
+		return `${resolve('/reviews')}?offset=${offset}` as ResolvedPathname;
+	}
 
 	function isSameDay(a: Date, b: Date) {
 		return (
@@ -69,14 +74,10 @@
 
 <nav>
 	{#if hasPrev}
-		<Button variant="compact" tone="neutral" href="{resolve('/reviews')}?offset={prevOffset}"
-			>‹ 前へ</Button
-		>
+		<Button variant="compact" tone="neutral" href={pageHref(prevOffset)}>‹ 前へ</Button>
 	{/if}
 	{#if hasNext}
-		<Button variant="compact" tone="neutral" href="{resolve('/reviews')}?offset={nextOffset}"
-			>次へ ›</Button
-		>
+		<Button variant="compact" tone="neutral" href={pageHref(nextOffset)}>次へ ›</Button>
 	{/if}
 </nav>
 

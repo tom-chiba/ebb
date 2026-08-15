@@ -5,6 +5,7 @@
 	import Flash from '$lib/components/Flash.svelte';
 	import PageHeading from '$lib/components/PageHeading.svelte';
 	import { formatDateTime, formatTime } from '$lib/format-date-time';
+	import type { ResolvedPathname } from '$app/types';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -14,6 +15,13 @@
 	const baseTime = new Date();
 
 	let hasMore = $derived(data.total > data.items.length);
+
+	// resolve() が返す型付きパスにクエリを追加した結果は plain string になるが、
+	// resolve() 自体を通しているため実体は内部リンクとして安全（Card の href 型
+	// との整合のためのキャスト）。
+	function reviewHref(id: string): ResolvedPathname {
+		return `${resolve('/(app)/reviews/[id]', { id })}?from=home` as ResolvedPathname;
+	}
 
 	function isSameDay(a: Date, b: Date) {
 		return (
@@ -48,7 +56,7 @@
 	<ul>
 		{#each data.items as review (review.id)}
 			<li>
-				<Card href="{resolve('/(app)/reviews/[id]', { id: review.id })}?from=home">
+				<Card href={reviewHref(review.id)}>
 					<div class="due">
 						<span class="dot" class:overdue={!isSameDay(review.scheduledAt, baseTime)}></span>
 						<span class="due-time">{formatTime(review.scheduledAt)} 期限</span>

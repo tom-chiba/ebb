@@ -15,7 +15,7 @@
 	}: {
 		variant: 'primary' | 'compact' | 'quiet';
 		tone?: 'accent' | 'neutral';
-		href?: ResolvedPathname | string;
+		href?: ResolvedPathname;
 		type?: 'button' | 'submit';
 		name?: string;
 		value?: string;

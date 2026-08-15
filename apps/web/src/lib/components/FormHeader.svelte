@@ -7,7 +7,7 @@
 		label,
 		children
 	}: {
-		cancelHref: ResolvedPathname | string;
+		cancelHref: ResolvedPathname;
 		label: string;
 		children: Snippet;
 	} = $props();

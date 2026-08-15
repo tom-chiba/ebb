@@ -6,7 +6,7 @@
 		href,
 		children
 	}: {
-		href?: ResolvedPathname | string;
+		href?: ResolvedPathname;
 		children: Snippet;
 	} = $props();
 </script>
