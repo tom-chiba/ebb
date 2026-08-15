@@ -137,7 +137,11 @@ export const userSettings = sqliteTable('user_settings', {
 		.references(() => user.id, { onDelete: 'cascade' }),
 	defaultIntervalPresetId: text('default_interval_preset_id').references(() => intervalPresets.id, {
 		onDelete: 'set null'
-	})
+	}),
+	// オンボーディングを最後まで見た（完了・スキップいずれか）か、または既存ユーザーとして
+	// 移行時に不要と判定されたか。「完了した」ではなく「もう自動表示しなくてよい」という
+	// 意味のため、completed ではなく seen と命名する（#24）。
+	onboardingSeenAt: timestampMs('onboarding_seen_at')
 });
 
 export const intervalPresetsRelations = relations(intervalPresets, ({ one, many }) => ({
