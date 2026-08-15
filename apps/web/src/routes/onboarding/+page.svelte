@@ -75,7 +75,15 @@
 			<ol class="steps">
 				<li>
 					<svg class="step-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-						<rect x="3" y="9" width="18" height="12" rx="2" stroke="currentColor" stroke-width="1.6" />
+						<rect
+							x="3"
+							y="9"
+							width="18"
+							height="12"
+							rx="2"
+							stroke="currentColor"
+							stroke-width="1.6"
+						/>
 						<path
 							d="M12 15V3m0 0-4 4m4-4 4 4"
 							stroke="currentColor"
@@ -88,7 +96,15 @@
 				</li>
 				<li>
 					<svg class="step-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-						<rect x="3" y="3" width="18" height="18" rx="4" stroke="currentColor" stroke-width="1.6" />
+						<rect
+							x="3"
+							y="3"
+							width="18"
+							height="18"
+							rx="4"
+							stroke="currentColor"
+							stroke-width="1.6"
+						/>
 						<path
 							d="M12 8v8M8 12h8"
 							stroke="currentColor"
@@ -109,7 +125,15 @@
 							fill="var(--color-accent)"
 							opacity="0.15"
 						/>
-						<rect x="4" y="4" width="16" height="16" rx="4" stroke="currentColor" stroke-width="1.6" />
+						<rect
+							x="4"
+							y="4"
+							width="16"
+							height="16"
+							rx="4"
+							stroke="currentColor"
+							stroke-width="1.6"
+						/>
 					</svg>
 					<span>追加されたアイコンから開き直す</span>
 				</li>

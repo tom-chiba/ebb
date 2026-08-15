@@ -46,11 +46,7 @@ describe('markOnboardingSeen', () => {
 
 		await markOnboardingSeen(db, userId);
 
-		const rows = await db
-			.select()
-			.from(userSettings)
-			.where(eq(userSettings.userId, userId))
-			.all();
+		const rows = await db.select().from(userSettings).where(eq(userSettings.userId, userId)).all();
 		expect(rows[0]?.onboardingSeenAt).toBeInstanceOf(Date);
 	});
 
@@ -58,11 +54,7 @@ describe('markOnboardingSeen', () => {
 		await markOnboardingSeen(db, userId);
 		await markOnboardingSeen(db, userId);
 
-		const rows = await db
-			.select()
-			.from(userSettings)
-			.where(eq(userSettings.userId, userId))
-			.all();
+		const rows = await db.select().from(userSettings).where(eq(userSettings.userId, userId)).all();
 		expect(rows).toHaveLength(1);
 	});
 });
