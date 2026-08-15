@@ -192,133 +192,133 @@
 <PageHeading title="設定" />
 
 <div class="cards">
-<Card>
-	<div class="section">
-		<div class="section-label">通知</div>
-		{#if !data.vapidPublicKey}
-			<p class="hint">現在この環境では通知を利用できません。</p>
-		{:else if permissionState === 'unsupported'}
-			<p class="hint">このブラウザは通知に対応していません。</p>
-		{:else}
-			<div class="toggle-row">
-				<div class="toggle-text">
-					<span class="toggle-title">この端末で通知を受け取る</span>
-					<span class="toggle-desc">{notificationDescription}</span>
-				</div>
-				<button
-					type="button"
-					class="toggle-switch"
-					class:on={subscribed}
-					role="switch"
-					aria-checked={subscribed}
-					aria-label="この端末で通知を受け取る"
-					disabled={pushBusy || permissionState === 'checking' || permissionState === 'denied'}
-					onclick={() => (subscribed ? disableNotifications() : enableNotifications())}
-				>
-					<span class="toggle-knob"></span>
-				</button>
-			</div>
-			{#if permissionState === 'denied'}
-				<p class="error">
-					通知がブロックされています。ブラウザのサイト設定（アドレスバー付近の鍵アイコンなど）から
-					このサイトの通知を許可に変更し、ページを再読み込みしてください。
-				</p>
-			{/if}
-		{/if}
-		{#if pushStatusMessage}
-			<p class="hint">{pushStatusMessage}</p>
-		{/if}
-	</div>
-</Card>
-
-<Card>
-	<div class="section">
-		<div class="section-label">新規メモの既定プリセット</div>
-		<form method="POST" action="?/setDefault" class="option-list">
-			{#each data.presets as preset (preset.id)}
-				<label class="option-row">
-					<input
-						type="radio"
-						name="presetId"
-						value={preset.id}
-						class="option-radio"
-						checked={preset.id === data.defaultPresetId}
-					/>
-					<div class="option-text">
-						<span class="option-name">{preset.name}</span>
-						<span class="option-meta">{preset.intervalsText}</span>
+	<Card>
+		<div class="section">
+			<div class="section-label">通知</div>
+			{#if !data.vapidPublicKey}
+				<p class="hint">現在この環境では通知を利用できません。</p>
+			{:else if permissionState === 'unsupported'}
+				<p class="hint">このブラウザは通知に対応していません。</p>
+			{:else}
+				<div class="toggle-row">
+					<div class="toggle-text">
+						<span class="toggle-title">この端末で通知を受け取る</span>
+						<span class="toggle-desc">{notificationDescription}</span>
 					</div>
-					<span class="option-dot" aria-hidden="true"></span>
-				</label>
-			{/each}
-			<!-- 選択のたびに自動送信するとキーボードでの矢印キー操作のたびにページ全体が
+					<button
+						type="button"
+						class="toggle-switch"
+						class:on={subscribed}
+						role="switch"
+						aria-checked={subscribed}
+						aria-label="この端末で通知を受け取る"
+						disabled={pushBusy || permissionState === 'checking' || permissionState === 'denied'}
+						onclick={() => (subscribed ? disableNotifications() : enableNotifications())}
+					>
+						<span class="toggle-knob"></span>
+					</button>
+				</div>
+				{#if permissionState === 'denied'}
+					<p class="error">
+						通知がブロックされています。ブラウザのサイト設定（アドレスバー付近の鍵アイコンなど）から
+						このサイトの通知を許可に変更し、ページを再読み込みしてください。
+					</p>
+				{/if}
+			{/if}
+			{#if pushStatusMessage}
+				<p class="hint">{pushStatusMessage}</p>
+			{/if}
+		</div>
+	</Card>
+
+	<Card>
+		<div class="section">
+			<div class="section-label">新規メモの既定プリセット</div>
+			<form method="POST" action="?/setDefault" class="option-list">
+				{#each data.presets as preset (preset.id)}
+					<label class="option-row">
+						<input
+							type="radio"
+							name="presetId"
+							value={preset.id}
+							class="option-radio"
+							checked={preset.id === data.defaultPresetId}
+						/>
+						<div class="option-text">
+							<span class="option-name">{preset.name}</span>
+							<span class="option-meta">{preset.intervalsText}</span>
+						</div>
+						<span class="option-dot" aria-hidden="true"></span>
+					</label>
+				{/each}
+				<!-- 選択のたびに自動送信するとキーボードでの矢印キー操作のたびにページ全体が
 			     遷移してしまう（use:enhanceを使っていないため）。選択と保存を分け、
 			     JS無効環境でも同じボタンで完結するようにする。 -->
-			<div class="save-default-row">
-				<Button variant="compact" type="submit">保存</Button>
-			</div>
-		</form>
-		{#if form && form.action === 'setDefault'}
-			{#if 'success' in form && form.success}
-				<Flash>既定プリセットを更新しました。</Flash>
-			{:else if 'message' in form}
-				<p class="error">{form.message}</p>
+				<div class="save-default-row">
+					<Button variant="compact" type="submit">保存</Button>
+				</div>
+			</form>
+			{#if form && form.action === 'setDefault'}
+				{#if 'success' in form && form.success}
+					<Flash>既定プリセットを更新しました。</Flash>
+				{:else if 'message' in form}
+					<p class="error">{form.message}</p>
+				{/if}
 			{/if}
-		{/if}
-	</div>
-</Card>
-
-<Card>
-	<div class="section">
-		<div class="section-header">
-			<div class="section-label">プリセット</div>
-			<Button variant="compact" tone="neutral" href={resolve('/settings/presets/new')}
-				>＋ 追加</Button
-			>
 		</div>
-		<ul class="preset-list">
-			{#each data.presets as preset (preset.id)}
-				<li>
-					{#if preset.isSystem}
-						<div class="preset-row">
-							<div class="option-text">
-								<span class="option-name">{preset.name}</span>
-								<span class="option-meta">{preset.intervalsText} ・ 編集できません</span>
-							</div>
-							<span class="badge">標準搭載</span>
-						</div>
-					{:else}
-						<a
-							href={resolve('/(app)/settings/presets/[id]/edit', { id: preset.id })}
-							class="preset-row preset-row-link"
-						>
-							<div class="option-text">
-								<span class="option-name">{preset.name}</span>
-								<span class="option-meta"
-									>{preset.intervalsText} ・ {preset.inUseCount}件のメモが参照中（アーカイブ済み含む）</span
-								>
-							</div>
-							<span class="option-chevron" aria-hidden="true">›</span>
-						</a>
-					{/if}
-				</li>
-			{/each}
-		</ul>
-	</div>
-</Card>
+	</Card>
 
-<Card>
-	<div class="section">
-		<div class="section-label">アカウント</div>
-		<div class="account">
-			<span>{data.user.name}</span>
-			<Button variant="quiet" onclick={signOut}>ログアウト</Button>
+	<Card>
+		<div class="section">
+			<div class="section-header">
+				<div class="section-label">プリセット</div>
+				<Button variant="compact" tone="neutral" href={resolve('/settings/presets/new')}
+					>＋ 追加</Button
+				>
+			</div>
+			<ul class="preset-list">
+				{#each data.presets as preset (preset.id)}
+					<li>
+						{#if preset.isSystem}
+							<div class="preset-row">
+								<div class="option-text">
+									<span class="option-name">{preset.name}</span>
+									<span class="option-meta">{preset.intervalsText} ・ 編集できません</span>
+								</div>
+								<span class="badge">標準搭載</span>
+							</div>
+						{:else}
+							<a
+								href={resolve('/(app)/settings/presets/[id]/edit', { id: preset.id })}
+								class="preset-row preset-row-link"
+							>
+								<div class="option-text">
+									<span class="option-name">{preset.name}</span>
+									<span class="option-meta"
+										>{preset.intervalsText} ・ {preset.inUseCount}件のメモが参照中（アーカイブ済み含む）</span
+									>
+								</div>
+								<span class="option-chevron" aria-hidden="true">›</span>
+							</a>
+						{/if}
+					</li>
+				{/each}
+			</ul>
 		</div>
-		{#if accountStatusMessage}
-			<p class="error">{accountStatusMessage}</p>
-		{/if}
-	</div>
-</Card>
+	</Card>
+
+	<Card>
+		<div class="section">
+			<div class="section-label">アカウント</div>
+			<div class="account">
+				<span>{data.user.name}</span>
+				<Button variant="quiet" onclick={signOut}>ログアウト</Button>
+			</div>
+			{#if accountStatusMessage}
+				<p class="error">{accountStatusMessage}</p>
+			{/if}
+		</div>
+	</Card>
 </div>
 
 <style>

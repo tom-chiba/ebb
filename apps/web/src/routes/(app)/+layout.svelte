@@ -44,7 +44,8 @@
 
 <style>
 	main {
-		padding: 0 var(--space-page) calc(var(--bottom-nav-height) + env(safe-area-inset-bottom) + 4.5rem);
+		padding: 0 var(--space-page)
+			calc(var(--bottom-nav-height) + env(safe-area-inset-bottom) + 4.5rem);
 	}
 
 	.bottom-nav {
