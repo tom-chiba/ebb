@@ -9,11 +9,11 @@
 <style>
 	.fab {
 		position: fixed;
-		right: 1.25rem;
-		bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom) + 1rem);
+		right: var(--space-page);
+		bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom) + 16px);
 		width: 56px;
 		height: 56px;
-		border-radius: 28px;
+		border-radius: var(--radius-pill);
 		background: var(--color-accent);
 		color: var(--color-surface-card);
 		font-size: 26px;

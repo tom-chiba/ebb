@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import Button from '$lib/components/Button.svelte';
 	import IntervalPresetChips from '$lib/components/IntervalPresetChips.svelte';
 	import MarkdownEditor from '$lib/components/MarkdownEditor.svelte';
 	import type { PageProps } from './$types';
@@ -17,7 +18,7 @@
 	<div class="header">
 		<a href={resolve('/memos')}>キャンセル</a>
 		<div class="header-label">新規メモ</div>
-		<button type="submit">保存</button>
+		<Button variant="compact" type="submit">保存</Button>
 	</div>
 
 	<div class="fields">
@@ -51,30 +52,21 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 0.75rem 0;
+		height: 56px;
+		box-sizing: border-box;
+		padding: 0 var(--space-page);
+		margin: 0 calc(var(--space-page) * -1);
 		border-bottom: 1px solid var(--color-border-subtle);
 	}
 
 	.header a {
-		font-size: 0.84rem;
+		font-size: var(--text-small);
 		color: var(--color-text-muted);
 	}
 
 	.header-label {
-		font-size: 0.78rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-caption);
-	}
-
-	.header button {
-		border: none;
-		background: var(--color-accent);
-		color: var(--color-surface-card);
-		font-family: var(--font-sans);
-		font-size: 0.8125rem;
-		font-weight: 700;
-		border-radius: var(--radius-button);
-		padding: 0.5rem 1rem;
-		cursor: pointer;
 	}
 
 	.fields {
@@ -91,7 +83,7 @@
 		background: transparent;
 		font-family: var(--font-heading);
 		font-weight: 600;
-		font-size: 1.375rem;
+		font-size: 22px;
 		color: var(--color-text);
 		padding: 0;
 	}

@@ -4,6 +4,10 @@
 	import { resolve } from '$app/paths';
 	import { authClient } from '$lib/auth-client';
 	import { urlBase64ToUint8Array } from '$lib/push-subscribe';
+	import Button from '$lib/components/Button.svelte';
+	import Card from '$lib/components/Card.svelte';
+	import Flash from '$lib/components/Flash.svelte';
+	import PageHeading from '$lib/components/PageHeading.svelte';
 	import type { PageProps } from './$types';
 
 	let { data, form }: PageProps = $props();
@@ -185,146 +189,153 @@
 	}
 </script>
 
-<h1>設定</h1>
+<PageHeading title="設定" />
 
-<section class="card">
-	<div class="section-label">通知</div>
-	{#if !data.vapidPublicKey}
-		<p class="hint">現在この環境では通知を利用できません。</p>
-	{:else if permissionState === 'unsupported'}
-		<p class="hint">このブラウザは通知に対応していません。</p>
-	{:else}
-		<div class="toggle-row">
-			<div class="toggle-text">
-				<span class="toggle-title">この端末で通知を受け取る</span>
-				<span class="toggle-desc">{notificationDescription}</span>
-			</div>
-			<button
-				type="button"
-				class="toggle-switch"
-				class:on={subscribed}
-				role="switch"
-				aria-checked={subscribed}
-				aria-label="この端末で通知を受け取る"
-				disabled={pushBusy || permissionState === 'checking' || permissionState === 'denied'}
-				onclick={() => (subscribed ? disableNotifications() : enableNotifications())}
-			>
-				<span class="toggle-knob"></span>
-			</button>
-		</div>
-		{#if permissionState === 'denied'}
-			<p class="error">
-				通知がブロックされています。ブラウザのサイト設定（アドレスバー付近の鍵アイコンなど）から
-				このサイトの通知を許可に変更し、ページを再読み込みしてください。
-			</p>
-		{/if}
-	{/if}
-	{#if pushStatusMessage}
-		<p class="hint">{pushStatusMessage}</p>
-	{/if}
-</section>
-
-<section class="card">
-	<div class="section-label">新規メモの既定プリセット</div>
-	<form method="POST" action="?/setDefault" class="option-list">
-		{#each data.presets as preset (preset.id)}
-			<label class="option-row">
-				<input
-					type="radio"
-					name="presetId"
-					value={preset.id}
-					class="option-radio"
-					checked={preset.id === data.defaultPresetId}
-				/>
-				<div class="option-text">
-					<span class="option-name">{preset.name}</span>
-					<span class="option-meta">{preset.intervalsText}</span>
+<div class="cards">
+<Card>
+	<div class="section">
+		<div class="section-label">通知</div>
+		{#if !data.vapidPublicKey}
+			<p class="hint">現在この環境では通知を利用できません。</p>
+		{:else if permissionState === 'unsupported'}
+			<p class="hint">このブラウザは通知に対応していません。</p>
+		{:else}
+			<div class="toggle-row">
+				<div class="toggle-text">
+					<span class="toggle-title">この端末で通知を受け取る</span>
+					<span class="toggle-desc">{notificationDescription}</span>
 				</div>
-				<span class="option-dot" aria-hidden="true"></span>
-			</label>
-		{/each}
-		<!-- 選択のたびに自動送信するとキーボードでの矢印キー操作のたびにページ全体が
-		     遷移してしまう（use:enhanceを使っていないため）。選択と保存を分け、
-		     JS無効環境でも同じボタンで完結するようにする。 -->
-		<button type="submit" class="primary-button save-default-button">保存</button>
-	</form>
-	{#if form && form.action === 'setDefault'}
-		{#if 'success' in form && form.success}
-			<p class="flash">既定プリセットを更新しました。</p>
-		{:else if 'message' in form}
-			<p class="error">{form.message}</p>
+				<button
+					type="button"
+					class="toggle-switch"
+					class:on={subscribed}
+					role="switch"
+					aria-checked={subscribed}
+					aria-label="この端末で通知を受け取る"
+					disabled={pushBusy || permissionState === 'checking' || permissionState === 'denied'}
+					onclick={() => (subscribed ? disableNotifications() : enableNotifications())}
+				>
+					<span class="toggle-knob"></span>
+				</button>
+			</div>
+			{#if permissionState === 'denied'}
+				<p class="error">
+					通知がブロックされています。ブラウザのサイト設定（アドレスバー付近の鍵アイコンなど）から
+					このサイトの通知を許可に変更し、ページを再読み込みしてください。
+				</p>
+			{/if}
 		{/if}
-	{/if}
-</section>
-
-<section class="card">
-	<div class="section-header">
-		<div class="section-label">プリセット</div>
-		<a href={resolve('/settings/presets/new')} class="link-button">＋ 追加</a>
+		{#if pushStatusMessage}
+			<p class="hint">{pushStatusMessage}</p>
+		{/if}
 	</div>
-	<ul class="preset-list">
-		{#each data.presets as preset (preset.id)}
-			<li>
-				{#if preset.isSystem}
-					<div class="preset-row">
-						<div class="option-text">
-							<span class="option-name"
-								>{preset.name}<span class="option-meta">（システム標準）</span></span
-							>
-							<span class="option-meta">{preset.intervalsText} ・ 編集できません</span>
-						</div>
+</Card>
+
+<Card>
+	<div class="section">
+		<div class="section-label">新規メモの既定プリセット</div>
+		<form method="POST" action="?/setDefault" class="option-list">
+			{#each data.presets as preset (preset.id)}
+				<label class="option-row">
+					<input
+						type="radio"
+						name="presetId"
+						value={preset.id}
+						class="option-radio"
+						checked={preset.id === data.defaultPresetId}
+					/>
+					<div class="option-text">
+						<span class="option-name">{preset.name}</span>
+						<span class="option-meta">{preset.intervalsText}</span>
 					</div>
-				{:else}
-					<a
-						href={resolve('/(app)/settings/presets/[id]/edit', { id: preset.id })}
-						class="preset-row preset-row-link"
-					>
-						<div class="option-text">
-							<span class="option-name">{preset.name}</span>
-							<span class="option-meta"
-								>{preset.intervalsText} ・ {preset.inUseCount}件のメモが参照中（アーカイブ済み含む）</span
-							>
-						</div>
-						<span class="option-chevron" aria-hidden="true">›</span>
-					</a>
-				{/if}
-			</li>
-		{/each}
-	</ul>
-</section>
-
-<section class="card">
-	<div class="section-label">アカウント</div>
-	<div class="account">
-		<span>{data.user.name}</span>
-		<button class="destructive-link" onclick={signOut}>ログアウト</button>
+					<span class="option-dot" aria-hidden="true"></span>
+				</label>
+			{/each}
+			<!-- 選択のたびに自動送信するとキーボードでの矢印キー操作のたびにページ全体が
+			     遷移してしまう（use:enhanceを使っていないため）。選択と保存を分け、
+			     JS無効環境でも同じボタンで完結するようにする。 -->
+			<div class="save-default-row">
+				<Button variant="compact" type="submit">保存</Button>
+			</div>
+		</form>
+		{#if form && form.action === 'setDefault'}
+			{#if 'success' in form && form.success}
+				<Flash>既定プリセットを更新しました。</Flash>
+			{:else if 'message' in form}
+				<p class="error">{form.message}</p>
+			{/if}
+		{/if}
 	</div>
-	{#if accountStatusMessage}
-		<p class="error">{accountStatusMessage}</p>
-	{/if}
-</section>
+</Card>
+
+<Card>
+	<div class="section">
+		<div class="section-header">
+			<div class="section-label">プリセット</div>
+			<Button variant="compact" tone="neutral" href={resolve('/settings/presets/new')}
+				>＋ 追加</Button
+			>
+		</div>
+		<ul class="preset-list">
+			{#each data.presets as preset (preset.id)}
+				<li>
+					{#if preset.isSystem}
+						<div class="preset-row">
+							<div class="option-text">
+								<span class="option-name">{preset.name}</span>
+								<span class="option-meta">{preset.intervalsText} ・ 編集できません</span>
+							</div>
+							<span class="badge">標準搭載</span>
+						</div>
+					{:else}
+						<a
+							href={resolve('/(app)/settings/presets/[id]/edit', { id: preset.id })}
+							class="preset-row preset-row-link"
+						>
+							<div class="option-text">
+								<span class="option-name">{preset.name}</span>
+								<span class="option-meta"
+									>{preset.intervalsText} ・ {preset.inUseCount}件のメモが参照中（アーカイブ済み含む）</span
+								>
+							</div>
+							<span class="option-chevron" aria-hidden="true">›</span>
+						</a>
+					{/if}
+				</li>
+			{/each}
+		</ul>
+	</div>
+</Card>
+
+<Card>
+	<div class="section">
+		<div class="section-label">アカウント</div>
+		<div class="account">
+			<span>{data.user.name}</span>
+			<Button variant="quiet" onclick={signOut}>ログアウト</Button>
+		</div>
+		{#if accountStatusMessage}
+			<p class="error">{accountStatusMessage}</p>
+		{/if}
+	</div>
+</Card>
+</div>
 
 <style>
-	h1 {
-		margin: 0 0 1rem;
-	}
-
-	section {
-		margin-bottom: 1rem;
-	}
-
-	.card {
-		background: var(--color-surface-card);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-card);
-		padding: 1rem;
+	.cards {
 		display: flex;
 		flex-direction: column;
-		gap: 0.75rem;
+		gap: var(--space-stack);
+	}
+
+	.section {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
 	}
 
 	.section-label {
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		letter-spacing: 0.06em;
 		color: var(--color-text-caption);
 	}
@@ -349,36 +360,8 @@
 
 	.hint {
 		margin: 0;
-		font-size: 0.8125rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-muted);
-	}
-
-	.link-button {
-		border: none;
-		background: none;
-		padding: 0;
-		font-family: var(--font-sans);
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--color-accent);
-		text-decoration: none;
-		cursor: pointer;
-	}
-
-	.destructive-link {
-		border: none;
-		background: none;
-		padding: 0;
-		font-family: var(--font-sans);
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--color-error);
-		cursor: pointer;
-	}
-
-	.destructive-link:disabled {
-		color: var(--color-text-faint);
-		cursor: not-allowed;
 	}
 
 	/* 通知トグル */
@@ -397,13 +380,13 @@
 	}
 
 	.toggle-title {
-		font-size: 0.9rem;
+		font-size: var(--text-body);
 		font-weight: 500;
 		color: var(--color-text);
 	}
 
 	.toggle-desc {
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		line-height: 1.6;
 		color: var(--color-text-muted);
 	}
@@ -429,6 +412,11 @@
 		opacity: 0.6;
 	}
 
+	.toggle-switch:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
+	}
+
 	.toggle-knob {
 		position: absolute;
 		top: 3px;
@@ -450,7 +438,7 @@
 		gap: 0;
 	}
 
-	.save-default-button {
+	.save-default-row {
 		margin-top: 0.75rem;
 	}
 
@@ -458,6 +446,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.75rem;
+		min-height: var(--control-h-field);
 		padding: 0.75rem 0;
 		border-bottom: 1px solid var(--color-border-subtle);
 		cursor: pointer;
@@ -483,12 +472,12 @@
 	}
 
 	.option-name {
-		font-size: 0.9rem;
+		font-size: var(--text-body);
 		color: var(--color-text);
 	}
 
 	.option-meta {
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-caption);
 	}
 
@@ -530,6 +519,7 @@
 		align-items: center;
 		gap: 0.75rem;
 		width: 100%;
+		min-height: var(--control-h-field);
 		padding: 0.75rem 0;
 	}
 
@@ -539,30 +529,25 @@
 		cursor: pointer;
 	}
 
+	.preset-row-link:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
+	}
+
 	.option-chevron {
 		flex: none;
-		font-size: 0.8125rem;
+		font-size: var(--text-small);
 		color: var(--color-text-faint);
 	}
 
-	.flash {
-		background: var(--color-accent-bg);
-		border: 1px solid var(--color-accent-border);
-		border-radius: var(--radius-md);
-		padding: 0.75rem 1rem;
-		margin: 0;
-	}
-
-	.primary-button {
-		align-self: flex-start;
-		background: var(--color-accent);
-		color: var(--color-surface-card);
-		border: none;
-		border-radius: var(--radius-button);
-		font-family: var(--font-sans);
-		font-weight: 700;
-		padding: 0.625rem 1rem;
-		cursor: pointer;
+	.badge {
+		flex: none;
+		font-size: var(--text-caption);
+		color: var(--color-text-muted);
+		background: var(--color-surface-raised);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-card);
+		padding: 4px 10px;
 	}
 
 	.error {

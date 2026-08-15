@@ -61,15 +61,15 @@
 		background: transparent;
 		resize: vertical;
 		font-family: var(--font-sans);
-		font-size: 14.5px;
-		line-height: 2;
+		font-size: var(--text-body);
+		line-height: 1.9;
 		color: var(--color-text-secondary);
 		padding: 0;
 		box-sizing: border-box;
 	}
 
 	.counter {
-		font-size: 0.6875rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-faint);
 		text-align: right;
 	}
@@ -80,21 +80,25 @@
 		right: 0;
 		bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom));
 		display: flex;
-		gap: 1px;
-		background: var(--color-border-strong);
-		padding: 6px;
-		border-top: 1px solid var(--color-border-strong);
+		gap: 8px;
+		background: var(--color-surface-raised);
+		padding: 10px var(--space-page);
 	}
 
 	.toolbar button {
 		flex: 1;
 		height: 38px;
-		border: none;
-		border-radius: var(--radius-sm);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
 		background: var(--color-surface-input);
 		color: var(--color-text-muted);
 		font-family: var(--font-mono);
-		font-size: 13px;
+		font-size: var(--text-small);
 		cursor: pointer;
+	}
+
+	.toolbar button:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
 	}
 </style>

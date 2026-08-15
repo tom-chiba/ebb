@@ -62,6 +62,7 @@
 
 	.brand h1 {
 		font-size: 2.125rem;
+		line-height: normal;
 		letter-spacing: 0.01em;
 		margin: 0;
 	}
@@ -77,7 +78,7 @@
 		height: 52px;
 		width: 100%;
 		border: 1px solid var(--color-border-strong);
-		border-radius: var(--radius-button);
+		border-radius: var(--radius-pill);
 		background: var(--color-surface-input);
 		color: var(--color-text);
 		font-family: var(--font-sans);

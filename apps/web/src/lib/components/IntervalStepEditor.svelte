@@ -195,21 +195,21 @@
 	}
 
 	.step-editor-label {
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		letter-spacing: 0.06em;
 		color: var(--color-text-caption);
 	}
 
 	.step-editor-count {
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-faint);
 	}
 
 	.step-list {
 		list-style: none;
 		margin: 0;
-		padding: 0 0.875rem;
-		background: var(--color-surface-input);
+		padding: 0 16px;
+		background: var(--color-surface-card);
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-card);
 	}
@@ -219,7 +219,7 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.75rem;
-		padding: 0.6875rem 0;
+		padding: 12px 0;
 		border-bottom: 1px solid var(--color-border-subtle);
 	}
 
@@ -234,14 +234,14 @@
 	}
 
 	.step-index {
-		width: 0.875rem;
-		font-size: 0.6875rem;
+		width: 14px;
+		font-size: var(--text-caption);
 		color: var(--color-text-faint);
 	}
 
 	.step-label {
 		font-family: var(--font-heading);
-		font-size: 1.0625rem;
+		font-size: var(--text-title);
 		color: var(--color-text);
 	}
 
@@ -252,7 +252,7 @@
 	}
 
 	.step-preview {
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-caption);
 	}
 
@@ -260,24 +260,24 @@
 		border: none;
 		background: none;
 		padding: 0;
-		font-size: 0.875rem;
+		font-size: 14px;
 		line-height: 1;
 		color: var(--color-text-faint);
 		cursor: pointer;
 	}
 
 	.add-step {
-		background: var(--color-bg);
-		border: 1px dashed var(--color-border-strong);
+		background: var(--color-surface-raised);
+		border: 1px solid var(--color-border);
 		border-radius: var(--radius-card);
-		padding: 0.875rem;
+		padding: 14px;
 		display: flex;
 		flex-direction: column;
 		gap: 0.75rem;
 	}
 
 	.add-step-label {
-		font-size: 0.75rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-muted);
 	}
 
@@ -295,7 +295,7 @@
 		background: var(--color-surface-input);
 		border: 1px solid var(--color-border-strong);
 		border-radius: var(--radius-card);
-		height: 2.875rem;
+		height: var(--control-h-field);
 		padding: 0 0.375rem;
 	}
 
@@ -303,8 +303,8 @@
 		width: 2.125rem;
 		height: 2.125rem;
 		border-radius: 50%;
-		border: none;
-		background: var(--color-border-subtle);
+		border: 1px solid var(--color-border);
+		background: var(--color-surface-card);
 		color: var(--color-text-muted);
 		font-size: 1rem;
 		display: flex;
@@ -315,12 +315,21 @@
 
 	.stepper-button-add {
 		background: var(--color-accent-bg);
+		border-color: var(--color-accent-border);
 		color: var(--color-accent-hover);
 	}
 
 	.stepper-button:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+
+	.stepper-button:focus-visible,
+	.unit-button:focus-visible,
+	.add-button:focus-visible,
+	.step-remove:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
 	}
 
 	.stepper-value {
@@ -341,10 +350,10 @@
 		border: 1px solid transparent;
 		background: none;
 		font-family: var(--font-sans);
-		font-size: 0.78rem;
+		font-size: var(--text-small);
 		color: var(--color-text-muted);
 		padding: 0.5rem 0.75rem;
-		border-radius: 9px;
+		border-radius: 11px;
 		cursor: pointer;
 		white-space: nowrap;
 	}
@@ -365,20 +374,21 @@
 
 	.hint {
 		margin: 0;
-		font-size: 0.72rem;
+		font-size: var(--text-caption);
 		color: var(--color-text-caption);
 	}
 
 	.add-button {
 		flex: none;
+		height: var(--control-h-compact);
 		border: 1px solid var(--color-accent-border);
 		background: var(--color-accent-bg);
 		color: var(--color-accent-hover);
 		font-family: var(--font-sans);
-		font-size: 0.78rem;
+		font-size: var(--text-small);
 		font-weight: 700;
-		border-radius: var(--radius-card);
-		padding: 0.5rem 0.875rem;
+		border-radius: var(--radius-pill);
+		padding: 0 16px;
 		cursor: pointer;
 	}
 
