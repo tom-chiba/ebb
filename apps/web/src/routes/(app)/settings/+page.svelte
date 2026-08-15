@@ -3,7 +3,7 @@
 	import { deserialize } from '$app/forms';
 	import { resolve } from '$app/paths';
 	import { authClient } from '$lib/auth-client';
-	import { urlBase64ToUint8Array } from '$lib/push-subscribe';
+	import { requestPushSubscription } from '$lib/push-subscribe';
 	import Button from '$lib/components/Button.svelte';
 	import Card from '$lib/components/Card.svelte';
 	import Flash from '$lib/components/Flash.svelte';
@@ -127,21 +127,13 @@
 		pushBusy = true;
 		pushStatusMessage = '';
 		try {
-			const permission = await Notification.requestPermission();
-			permissionState = permission;
-			if (permission !== 'granted') {
+			const subscription = await requestPushSubscription(data.vapidPublicKey);
+			permissionState = Notification.permission;
+			if (!subscription) {
 				pushStatusMessage = '通知が許可されませんでした。';
 				return;
 			}
 
-			// SvelteKit がページ読み込み時に自動で Service Worker を登録するため、
-			// ここでは登録済みのものを待つだけでよい（自前で register() は呼ばない。
-			// docs/design-decisions.md の #9 節を参照）。
-			const registration = await navigator.serviceWorker.ready;
-			const subscription = await registration.pushManager.subscribe({
-				userVisibleOnly: true,
-				applicationServerKey: urlBase64ToUint8Array(data.vapidPublicKey)
-			});
 			if (await submitSubscription(subscription)) {
 				subscribed = true;
 				pushStatusMessage = '通知を有効にしました。';
@@ -228,6 +220,9 @@
 			{#if pushStatusMessage}
 				<p class="hint">{pushStatusMessage}</p>
 			{/if}
+			<p class="onboarding-link">
+				<a href={resolve('/onboarding')}>使い方・ホーム画面への追加案内をもう一度見る</a>
+			</p>
 		</div>
 	</Card>
 
@@ -553,6 +548,15 @@
 	.error {
 		color: var(--color-error);
 		margin: 0;
+	}
+
+	.onboarding-link {
+		margin: 0;
+		font-size: var(--text-caption);
+	}
+
+	.onboarding-link a {
+		color: var(--color-accent);
 	}
 
 	.account {

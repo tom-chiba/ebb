@@ -28,7 +28,7 @@
 		</p>
 	</div>
 	<button type="button" class="google-button" onclick={signInWithGoogle}>Google でログイン</button>
-	<p class="helper">通知の許可はログイン後、設定から行います。</p>
+	<p class="helper">ログイン後の案内に沿って、通知を有効にできます。</p>
 	{#if statusMessage}
 		<p class="status">{statusMessage}</p>
 	{/if}
