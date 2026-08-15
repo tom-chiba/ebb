@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import Button from '$lib/components/Button.svelte';
+	import FormHeader from '$lib/components/FormHeader.svelte';
 	import IntervalPresetChips from '$lib/components/IntervalPresetChips.svelte';
 	import MarkdownEditor from '$lib/components/MarkdownEditor.svelte';
 	import type { PageProps } from './$types';
@@ -32,11 +33,9 @@
 		value={form?.expectedUpdatedAt ?? data.memo.updatedAt.toISOString()}
 	/>
 
-	<div class="header">
-		<a href={resolve('/(app)/memos/[id]', { id: data.memo.id })}>キャンセル</a>
-		<div class="header-label">メモを編集</div>
+	<FormHeader cancelHref={resolve('/(app)/memos/[id]', { id: data.memo.id })} label="メモを編集">
 		<Button variant="compact" type="submit">保存</Button>
-	</div>
+	</FormHeader>
 
 	<div class="fields">
 		<input
@@ -66,27 +65,6 @@
 	form {
 		display: flex;
 		flex-direction: column;
-	}
-
-	.header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		height: 56px;
-		box-sizing: border-box;
-		padding: 0 var(--space-page);
-		margin: 0 calc(var(--space-page) * -1);
-		border-bottom: 1px solid var(--color-border-subtle);
-	}
-
-	.header a {
-		font-size: var(--text-small);
-		color: var(--color-text-muted);
-	}
-
-	.header-label {
-		font-size: var(--text-caption);
-		color: var(--color-text-caption);
 	}
 
 	.fields {

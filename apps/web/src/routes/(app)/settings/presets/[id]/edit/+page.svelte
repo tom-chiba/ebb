@@ -4,6 +4,7 @@
 	import Button from '$lib/components/Button.svelte';
 	import DangerZone from '$lib/components/DangerZone.svelte';
 	import Flash from '$lib/components/Flash.svelte';
+	import FormHeader from '$lib/components/FormHeader.svelte';
 	import IntervalStepEditor from '$lib/components/IntervalStepEditor.svelte';
 	import { formatIntervalStep } from '$lib/format-interval-step';
 	import type { PageProps } from './$types';
@@ -53,9 +54,7 @@
 <form method="POST" action="?/update">
 	<input type="hidden" name="intervals" value={formatIntervals(steps)} />
 
-	<div class="header">
-		<a href={resolve('/settings')}>キャンセル</a>
-		<div class="header-label">{data.preset.name}</div>
+	<FormHeader cancelHref={resolve('/settings')} label={data.preset.name}>
 		{#if preview}
 			<Button variant="compact" type="button" disabled>保存</Button>
 		{:else}
@@ -67,7 +66,7 @@
 				disabled={steps.length === 0 || unchanged}>保存</Button
 			>
 		{/if}
-	</div>
+	</FormHeader>
 
 	<div class="fields">
 		{#if updateSuccess}
@@ -158,27 +157,6 @@
 	form {
 		display: flex;
 		flex-direction: column;
-	}
-
-	.header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		height: 56px;
-		box-sizing: border-box;
-		padding: 0 var(--space-page);
-		margin: 0 calc(var(--space-page) * -1);
-		border-bottom: 1px solid var(--color-border-subtle);
-	}
-
-	.header a {
-		font-size: var(--text-small);
-		color: var(--color-text-muted);
-	}
-
-	.header-label {
-		font-size: var(--text-caption);
-		color: var(--color-text-caption);
 	}
 
 	.fields {

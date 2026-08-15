@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import Button from '$lib/components/Button.svelte';
+	import FormHeader from '$lib/components/FormHeader.svelte';
 	import IntervalPresetChips from '$lib/components/IntervalPresetChips.svelte';
 	import MarkdownEditor from '$lib/components/MarkdownEditor.svelte';
 	import type { PageProps } from './$types';
@@ -15,11 +16,9 @@
 <form method="POST">
 	<input type="hidden" name="id" value={data.draftId} />
 
-	<div class="header">
-		<a href={resolve('/memos')}>キャンセル</a>
-		<div class="header-label">新規メモ</div>
+	<FormHeader cancelHref={resolve('/memos')} label="新規メモ">
 		<Button variant="compact" type="submit">保存</Button>
-	</div>
+	</FormHeader>
 
 	<div class="fields">
 		<input
@@ -46,27 +45,6 @@
 	form {
 		display: flex;
 		flex-direction: column;
-	}
-
-	.header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		height: 56px;
-		box-sizing: border-box;
-		padding: 0 var(--space-page);
-		margin: 0 calc(var(--space-page) * -1);
-		border-bottom: 1px solid var(--color-border-subtle);
-	}
-
-	.header a {
-		font-size: var(--text-small);
-		color: var(--color-text-muted);
-	}
-
-	.header-label {
-		font-size: var(--text-caption);
-		color: var(--color-text-caption);
 	}
 
 	.fields {

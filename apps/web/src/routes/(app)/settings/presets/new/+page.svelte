@@ -2,6 +2,7 @@
 	import { formatIntervals, parseIntervals } from '@ebb/core';
 	import { resolve } from '$app/paths';
 	import Button from '$lib/components/Button.svelte';
+	import FormHeader from '$lib/components/FormHeader.svelte';
 	import IntervalStepEditor from '$lib/components/IntervalStepEditor.svelte';
 	import { formatDateTime } from '$lib/format-date-time';
 	import type { PageProps } from './$types';
@@ -32,11 +33,9 @@
 <form method="POST">
 	<input type="hidden" name="intervals" value={formatIntervals(steps)} />
 
-	<div class="header">
-		<a href={resolve('/settings')}>キャンセル</a>
-		<div class="header-label">プリセットを追加</div>
+	<FormHeader cancelHref={resolve('/settings')} label="プリセットを追加">
 		<Button variant="compact" type="submit" disabled={steps.length === 0}>保存</Button>
-	</div>
+	</FormHeader>
 
 	<div class="fields">
 		<label class="name-field">
@@ -67,27 +66,6 @@
 	form {
 		display: flex;
 		flex-direction: column;
-	}
-
-	.header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		height: 56px;
-		box-sizing: border-box;
-		padding: 0 var(--space-page);
-		margin: 0 calc(var(--space-page) * -1);
-		border-bottom: 1px solid var(--color-border-subtle);
-	}
-
-	.header a {
-		font-size: var(--text-small);
-		color: var(--color-text-muted);
-	}
-
-	.header-label {
-		font-size: var(--text-caption);
-		color: var(--color-text-caption);
 	}
 
 	.fields {

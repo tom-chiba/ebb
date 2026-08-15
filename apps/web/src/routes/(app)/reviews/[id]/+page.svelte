@@ -55,6 +55,9 @@
 	}
 
 	.content {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
 		margin-bottom: calc(var(--bottom-bar-height, 128px) + 16px);
 	}
 

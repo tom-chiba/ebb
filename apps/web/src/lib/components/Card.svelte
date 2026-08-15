@@ -12,7 +12,7 @@
 </script>
 
 {#if href}
-	<a {href} class="card">
+	<a {href} class="card card-link">
 		{@render children()}
 	</a>
 {:else}
@@ -30,5 +30,14 @@
 		padding: var(--space-card-pad);
 		color: inherit;
 		text-decoration: none;
+	}
+
+	.card-link:hover {
+		border-color: var(--color-border-strong);
+	}
+
+	.card-link:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 2px;
 	}
 </style>
