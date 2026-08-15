@@ -41,6 +41,9 @@ export async function requestPushSubscription(
 // （所有権の再確認はユーザーが実際に有効化ボタンを押したときにのみ行う、既存方針と同じ）。
 export async function needsPushReminder(): Promise<boolean> {
 	if (typeof Notification === 'undefined') return false;
+	// Firefox のプライベートウィンドウ等、Notification は存在するが serviceWorker が
+	// 使えない環境で `navigator.serviceWorker.ready` を呼ぶと例外になる。
+	if (!('serviceWorker' in navigator) || !('PushManager' in window)) return false;
 	if (Notification.permission === 'denied') return false;
 	if (Notification.permission !== 'granted') return true;
 	const registration = await navigator.serviceWorker.ready;
