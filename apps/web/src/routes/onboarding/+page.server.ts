@@ -32,6 +32,10 @@ export const actions: Actions = {
 		} catch (err) {
 			return formActionFail(err, 'subscribePush', {});
 		}
+		// 通知を有効化できた時点で、以後「はじめる」を押さずタブを閉じても
+		// 次回ホームアクセス時にオンボーディングへ戻されないようにする
+		// （正確性レビューで指摘。finish だけに頼ると購読直後の離脱で再表示されていた）。
+		await markOnboardingSeen(db, user.id);
 		return { action: 'subscribePush', success: true };
 	},
 
