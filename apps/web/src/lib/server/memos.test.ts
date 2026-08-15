@@ -521,6 +521,63 @@ describe('listMemosForBrowse', () => {
 		expect(result.total).toBe(1);
 	});
 
+	// #28 でタイトルのみの検索（#60）から本文も対象に拡張した。
+	it('matches memos whose content (not title) contains the query', async () => {
+		await createMemo(db, ownerId, {
+			title: '無関係なタイトル',
+			content: '本文には特定のキーワードを書く',
+			intervalPresetId: ownerPresetId
+		});
+		await createMemo(db, ownerId, {
+			title: '別のメモ',
+			content: '一致しない本文',
+			intervalPresetId: ownerPresetId
+		});
+
+		const result = await listMemosForBrowse(db, ownerId, { q: '特定のキーワード' });
+		expect(result.items.map((m) => m.title)).toEqual(['無関係なタイトル']);
+	});
+
+	it('does not duplicate a memo whose title and content both match the query', async () => {
+		await createMemo(db, ownerId, {
+			title: 'メモ機能のメモ',
+			content: 'メモについてのメモ',
+			intervalPresetId: ownerPresetId
+		});
+
+		const result = await listMemosForBrowse(db, ownerId, { q: 'メモ' });
+		expect(result.items).toHaveLength(1);
+		expect(result.total).toBe(1);
+	});
+
+	// 2文字の日本語クエリでも一致すること（LIKE はトークナイザに依存しないため、
+	// FTS5/trigram + MATCH で起こり得る「3文字未満は常に0件」問題はそもそも
+	// 発生しない。docs/design-decisions.md 参照）。
+	it('matches with a 2-character Japanese query', async () => {
+		await createMemo(db, ownerId, {
+			title: 'タグ機能の実装メモ',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const result = await listMemosForBrowse(db, ownerId, { q: 'タグ' });
+		expect(result.items.map((m) => m.title)).toEqual(['タグ機能の実装メモ']);
+	});
+
+	it('matches with a 1-character query', async () => {
+		await createMemo(db, ownerId, {
+			title: '確認用タイトル',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await createMemo(db, ownerId, {
+			title: '無関係なメモ',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const result = await listMemosForBrowse(db, ownerId, { q: '確' });
+		expect(result.items.map((m) => m.title)).toEqual(['確認用タイトル']);
+	});
+
 	it('returns no items when the query matches nothing', async () => {
 		await createMemo(db, ownerId, {
 			title: 'title',
@@ -615,6 +672,23 @@ describe('listMemosForBrowse', () => {
 		expect(result.total).toBe(0);
 	});
 
+	// 上のテストはタイトル一致経由でのアーカイブ除外しか確認しておらず、
+	// memoSearchCondition の or(title LIKE, content LIKE) の括弧付けが崩れて
+	// content 側の条件が and チェーンの外に漏れても検出できない。本文一致でも
+	// 同じ不変条件が保たれることを別途確認する。
+	it('excludes archived memos even when their content matches the query', async () => {
+		const archived = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'archived content match',
+			intervalPresetId: ownerPresetId
+		});
+		await archiveMemo(db, ownerId, archived.id);
+
+		const result = await listMemosForBrowse(db, ownerId, { q: 'archived content match' });
+		expect(result.items).toEqual([]);
+		expect(result.total).toBe(0);
+	});
+
 	// LIKE の % / _ はワイルドカードだが、検索語としてそのまま入力された場合は
 	// リテラルな1文字として扱われるべき（設計判断、apps/web/src/lib/server/memos.ts の
 	// likePattern を参照）。
@@ -637,6 +711,25 @@ describe('listMemosForBrowse', () => {
 		expect(underscoreQuery.items).toEqual([]);
 	});
 
+	// 上のテストはタイトル側の ESCAPE のみを確認しており、memoSearchCondition
+	// は title と content で別々の LIKE ... ESCAPE '\\' 節を持つ（memos.ts 参照）ため、
+	// 本文側でも同様にリテラル % が正しくエスケープされることを別途確認する。
+	it('treats literal % as a literal character in the content column too', async () => {
+		await createMemo(db, ownerId, {
+			title: 'キャンペーン情報',
+			content: '割引は50%です',
+			intervalPresetId: ownerPresetId
+		});
+		await createMemo(db, ownerId, {
+			title: '別のメモ',
+			content: '割引は50Xです',
+			intervalPresetId: ownerPresetId
+		});
+
+		const result = await listMemosForBrowse(db, ownerId, { q: '50%' });
+		expect(result.items.map((m) => m.title)).toEqual(['キャンペーン情報']);
+	});
+
 	it('does not match another user memo, even with a matching title', async () => {
 		await createMemo(db, otherUserId, {
 			title: 'shared title',
@@ -644,6 +737,19 @@ describe('listMemosForBrowse', () => {
 			intervalPresetId: otherUserPresetId
 		});
 		const result = await listMemosForBrowse(db, ownerId, { q: 'shared' });
+		expect(result.items).toEqual([]);
+	});
+
+	// タイトル一致だけでなく、本文一致経由でも他ユーザーのメモが漏れないことを
+	// 確認する（上のテストと同じ理由。memoSearchCondition の or() の括弧付けが
+	// 崩れた場合、content 側でのみ顕在化しうる）。
+	it('does not match another user memo, even with matching content', async () => {
+		await createMemo(db, otherUserId, {
+			title: 'title',
+			content: 'shared content',
+			intervalPresetId: otherUserPresetId
+		});
+		const result = await listMemosForBrowse(db, ownerId, { q: 'shared content' });
 		expect(result.items).toEqual([]);
 	});
 

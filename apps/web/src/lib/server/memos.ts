@@ -6,6 +6,7 @@ import {
 	isNull,
 	intervalPresets,
 	memos,
+	or,
 	reviews,
 	sql,
 	type Db
@@ -88,6 +89,17 @@ function likePattern(q: string): string {
 	return `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
 }
 
+function likeContains(column: typeof memos.title | typeof memos.content, pattern: string) {
+	return sql`${column} LIKE ${pattern} ESCAPE '\\'`;
+}
+
+// タイトル・本文検索（#28）。FTS5/trigram は検討したが不要と判断した
+// （docs/design-decisions.md の「タイトル・本文の全文検索 (#28)」節を参照）。
+function memoSearchCondition(q: string) {
+	const pattern = likePattern(q);
+	return or(likeContains(memos.title, pattern), likeContains(memos.content, pattern));
+}
+
 export interface MemoBrowseItem {
 	id: string;
 	title: string;
@@ -99,7 +111,8 @@ export interface MemoBrowseItem {
 }
 
 export interface ListMemosForBrowseOptions extends PaginationOptions {
-	// メモ一覧のタイトル検索（#60）。空文字列・未指定は検索条件なし扱い。
+	// メモ一覧のタイトル・本文検索（#60 でタイトルのみ導入、#28 で本文も対象に拡張）。
+	// 空文字列・未指定は検索条件なし扱い。
 	q?: string;
 }
 
@@ -118,7 +131,7 @@ export async function listMemosForBrowse(
 	const where = and(
 		eq(memos.userId, userId),
 		isNull(memos.archivedAt),
-		trimmedQuery ? sql`${memos.title} LIKE ${likePattern(trimmedQuery)} ESCAPE '\\'` : undefined
+		trimmedQuery ? memoSearchCondition(trimmedQuery) : undefined
 	);
 
 	const minPendingScheduledAt = minPendingScheduledAtSubquery(db);

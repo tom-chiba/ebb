@@ -27,7 +27,7 @@
 </div>
 
 <form class="search" method="GET">
-	<input type="search" name="q" value={data.q} placeholder="タイトルで検索" />
+	<input type="search" name="q" value={data.q} placeholder="タイトル・本文で検索" />
 </form>
 
 {#if data.items.length === 0}
