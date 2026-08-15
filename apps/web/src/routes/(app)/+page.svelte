@@ -1,10 +1,12 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { resolve } from '$app/paths';
 	import Fab from '$lib/components/Fab.svelte';
 	import Card from '$lib/components/Card.svelte';
 	import Flash from '$lib/components/Flash.svelte';
 	import PageHeading from '$lib/components/PageHeading.svelte';
 	import { formatDateTime, formatTime } from '$lib/format-date-time';
+	import { needsPushReminder } from '$lib/push-subscribe';
 	import type { ResolvedPathname } from '$app/types';
 	import type { PageProps } from './$types';
 
@@ -13,6 +15,29 @@
 	// 表示のたびの基準時刻。Workers ランタイムの既定タイムゾーンは UTC のため、
 	// 表示用の時刻・暦日判定はいずれもここ（ブラウザ）で行う。
 	const baseTime = new Date();
+
+	// 通知が無効なまま使っているユーザーへの控えめなリマインド（#24）。
+	// 一度「あとで」を押したら、しつこくならないよう数日は再表示しない。
+	const REMINDER_DISMISS_KEY = 'ebb:push-reminder-dismissed-at';
+	const REMINDER_DISMISS_DAYS = 3;
+
+	let showReminder = $state(false);
+
+	function isReminderDismissed(): boolean {
+		const dismissedAt = Number(localStorage.getItem(REMINDER_DISMISS_KEY));
+		if (!dismissedAt) return false;
+		return Date.now() - dismissedAt < REMINDER_DISMISS_DAYS * 24 * 60 * 60 * 1000;
+	}
+
+	function dismissReminder() {
+		localStorage.setItem(REMINDER_DISMISS_KEY, String(Date.now()));
+		showReminder = false;
+	}
+
+	onMount(async () => {
+		if (!data.vapidPublicKey || isReminderDismissed()) return;
+		showReminder = await needsPushReminder();
+	});
 
 	let hasMore = $derived(data.total > data.items.length);
 
@@ -37,6 +62,16 @@
 	caption="期限が来た順 ・ {formatTime(baseTime)} 時点"
 	count={data.items.length > 0 ? `${data.total} 件` : undefined}
 />
+
+{#if showReminder}
+	<div class="push-reminder">
+		<span>復習の通知がまだ有効になっていません。</span>
+		<div class="push-reminder-actions">
+			<a href={resolve('/settings')}>設定で有効にする</a>
+			<button type="button" onclick={dismissReminder}>あとで</button>
+		</div>
+	</div>
+{/if}
 
 {#if data.completedTitle}
 	{@const nextScheduledAt = data.nextScheduledAt}
@@ -77,6 +112,43 @@
 <style>
 	.empty {
 		color: var(--color-text-muted);
+	}
+
+	.push-reminder {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+		background: var(--color-surface-raised);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-card);
+		padding: 12px 16px;
+		font-size: var(--text-small);
+		color: var(--color-text-muted);
+		margin-bottom: var(--space-stack);
+	}
+
+	.push-reminder-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.875rem;
+		flex: none;
+	}
+
+	.push-reminder-actions a {
+		color: var(--color-accent);
+		font-weight: 500;
+	}
+
+	.push-reminder-actions button {
+		font-family: var(--font-sans);
+		font-size: var(--text-small);
+		color: var(--color-text-faint);
+		background: none;
+		border: none;
+		padding: 0;
+		cursor: pointer;
 	}
 
 	ul {

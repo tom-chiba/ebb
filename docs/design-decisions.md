@@ -1987,3 +1987,70 @@ VAPID_PRIVATE_KEY` が必要**（ユーザーが実行する必要がある。#1
 - **検索結果一覧のスニペット表示（一致箇所のハイライト）は対象外**。一覧の抜粋
   （`excerptOf`）は本文冒頭 80 文字程度を返す既存仕様のままで、本文の途中一致は
   一覧上で視認できない。この非対応は今回意図的な範囲外であり、見落としではない
+
+## オンボーディング（iOS のホーム画面追加案内を含む） (#24)
+
+- **iOS Safari 向けの案内文言は、実機を持っていないため公開情報の記録に留めた**
+  （`docs/pwa-notification-receive.md` の #9 節と同じ制約・同じ運用）。iOS/iPadOS
+  16.4 で Web Push がホーム画面追加済みの Web App にのみ対応する形で追加されて
+  いる、という WebKit 公式ブログの記述を根拠に「ホーム画面未追加の iOS Safari
+  では常に案内を出す」という単純なルールにした。ホーム画面未追加時に実際に
+  `PushManager`/`Notification` がどう見える（API 自体が存在しないのか、
+  存在するが `subscribe()` が例外を投げるのか）かは実機で確認していないため、
+  iOS の判定はプラットフォーム判定（UA・`navigator.standalone`）を主に使い、
+  「push 機能自体が使えるか」の判定（`serviceWorker`/`PushManager`/
+  `Notification` の有無）はその他のブラウザ（非対応の旧ブラウザ等）向けの
+  フォールバックとしてのみ使う（`$lib/platform-detect.ts` の `detectPlatform`）
+- **iPadOS 13+ の Safari は UA が "Macintosh" になり iPhone/iPad と判別できない**
+  ため、`navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1`
+  （タッチ対応の Mac）を iPad とみなすフォールバック判定を追加した。デスクトップ
+  Chrome（`--persistent` プロファイル）では `maxTouchPoints` が 0 のため
+  誤判定しないことを確認済み
+- **ユーザーが普段使うのは Android のため（`docs/pwa-notification-receive.md`
+  参照）、Android は「案内なしで通知ボタンのみ」にはせず、ホーム画面追加を
+  促す控えめな一文（アプリのように使えるという案内。必須ではない旨を明記）を
+  併記する**。Chrome for Android は `beforeinstallprompt`/インストールなしの
+  通常タブでも Web Push が機能するため、iOS のような「未対応なら通知ボタン自体
+  を隠す」対応は行わず、通知ボタンは常に表示する
+- **オンボーディング表示要否の判定（`user_settings.onboarding_seen_at`）は
+  `(app)/+page.server.ts`（ホームの load）でのみ行い、`(app)/+layout.server.ts`
+  には入れなかった**。理由: (1) レイアウトに入れるとクライアント側遷移のたびに
+  D1 への SELECT が挟まり、Free プランの CPU 10ms/リクエスト制約に無関係な
+  負荷を足す。(2) 通知クリック等の深いリンク（`/reviews/{id}`）から来た
+  ユーザーの遷移先をオンボーディングが奪ってしまう。ホームの load でのみ
+  判定することで両方を避けたが、副作用として「ログイン後に一度もホームへ
+  行かず別ページへ直接アクセスしたユーザー」にはオンボーディングが表示され
+  ない（ログイン成功後の既定リダイレクト先は `/` のため、通常はこの経路を通る）
+- **列名は `onboarding_completed_at` ではなく `onboarding_seen_at` にした**。
+  「スキップ」と「完了（購読まで済ませた）」を区別する必要はなく、どちらも
+  「以後は自動表示しない」という同じ効果を持つ。`completed` は前者を暗に
+  「未完了」のように読ませてしまうため、実態に合わせて `seen` にした
+- **既存ユーザーは移行マイグレーション（`0011_chubby_victor_mancha.sql`）内で
+  一括バックフィル（`onboarding_seen_at` に移行時刻を設定）した**。この機能の
+  リリース前から使っているユーザーを、次回アクセス時に一律オンボーディングへ
+  送るのは体験として不適切と判断した。新規ユーザー（移行後に作成される行）は
+  バックフィル対象にならないため、通常どおりオンボーディングが表示される
+- **通知が無効なまま使っているユーザーへの控えめなリマインド（ホーム画面上部の
+  バナー）は、`Notification.permission` に加えてブラウザ側の実購読の有無
+  （`pushManager.getSubscription()`）まで見て判定する**。`permission ===
+'granted'` だけで「有効」とみなすと、購読の 410 Gone 削除（要注意点9）で
+  サーバー側の行が消えたのに端末側は「許可済み」のまま気づけないケースを
+  見落とす。一方、サーバー側の `push_subscriptions` レコードがこの端末の
+  ものと一致するかまでは確認しない（所有権の再確認は、設定画面と同じく
+  ユーザーが実際に有効化ボタンを押したときにのみ行う既存方針を踏襲した）。
+  リマインドは `denied` のときは出さない（設定画面に既にブロック時の案内が
+  あり重複するため）。「あとで」を押すと `localStorage` に記録し、3日間は
+  再表示しない
+- **設定画面の通知有効化ロジック（許可ダイアログ→`serviceWorker.ready`→
+  `subscribe()`）を `$lib/push-subscribe.ts` の `requestPushSubscription`
+  に切り出し、オンボーディング画面と共有した**。ブラウザ API の呼び出し順序
+  という間違えると壊れやすい部分だけを共通化し、状態表示・エラーメッセージ・
+  保存先アクション（ルートごとにパスが異なる `?/subscribePush`）は
+  各ページに残した
+- **`playwright-cli run-code` の `page.addInitScript` で `navigator.userAgent`/
+  `navigator.standalone` を上書きし、iOS（ホーム画面未追加・追加済みの両方）・
+  Android の各分岐を実際のブラウザで確認した**（実機は用意できないため、
+  UA 偽装による近似検証）。`display-mode: standalone` は `--persistent`
+  プロファイルの実 Chrome でも `matchMedia` は素通しで確認でき、iOS の
+  `navigator.standalone` 偽装と合わせて「ホーム画面から起動した場合は案内が
+  出ない」受け入れ条件を確認した
