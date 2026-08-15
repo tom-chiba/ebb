@@ -99,16 +99,17 @@ function minPendingStepSubquery(db: Db) {
 // 一致する（設計レビューで指摘）。
 //
 // ただし intervals が昇順であっても一致しないケースが存在する: メモの
-// intervalPresetId が作成後に別プリセットへ変更され（updateMemo は reviews を
-// 再生成しない。#18 のスコープ）、その後 completeReview が未完了ステップを
+// intervalPresetId が変更され、その後 completeReview が未完了ステップを
 // 新プリセットの intervals で再アンカリングする際、新 intervals の範囲外に
 // なった step は再アンカリングされず古い scheduledAt が残る（completeReview の
 // reanchorUpdates 節を参照）。この場合、古い scheduledAt を持つ後続 step が
 // 新しく再アンカリングされた前段の step より早い時刻になり得るため、
 // min(scheduledAt) と min(step) が異なる行を指すことがある（正確性レビューで
-// 指摘）。この不整合自体は #18 のスコープであり#60では解消しない。現状の Web UI
-// （memos/[id]/edit）は既存メモの intervalPresetId 変更を提供していないため、
-// この経路は API を直接叩いた場合にのみ到達する。
+// 指摘）。#82 以降、intervalPresetId の変更は changeMemoPreset が同じ
+// db.batch() で reviews を新プリセット基準に作り直すため、この経路には
+// 通常到達しない。到達しうるのは #82 のデプロイより前に古い updateMemo で
+// intervalPresetId を変更され、reviews が古いプリセットのまま残っている
+// 既存メモのみ。
 export function minPendingScheduledAtSubquery(db: Db) {
 	return db
 		.select({
@@ -276,11 +277,13 @@ export async function getDueReviewDetail(
 	const intervals = await getPresetIntervals(db, row.intervalPresetId);
 
 	// 「全 m 回」は現在のプリセットの intervals ではなく、このメモの reviews 行の総数
-	// （完了済み + 未完了）で数える。updateMemo（#13）は intervalPresetId を変更しても
-	// 既存の reviews 行を作り直さないため（#18 のスコープ、reviews.ts の completeReview
-	// 節にある既存コメントと同じ前提）、プリセット変更後は intervals.length と実際の
-	// reviews 行数がずれ得る。ヘッダーの「n 回目 / 全 m 回」は実際に画面遷移できる
-	// ステップ数と一致させる必要があるため、reviews 側の実数を正とする。
+	// （完了済み + 未完了）で数える。#82 以降 changeMemoPreset は intervalPresetId の
+	// 変更と reviews の作り直しを同じ db.batch() で行うため通常は一致するが、#82 の
+	// デプロイより前に古い updateMemo でプリセットだけが変更され reviews が
+	// 作り直されていない既存メモでは、intervals.length と実際の reviews 行数が
+	// ずれ得る（completeReview 節の既存コメントと同じ前提）。ヘッダーの
+	// 「n 回目 / 全 m 回」は実際に画面遷移できるステップ数と一致させる必要があるため、
+	// reviews 側の実数を正とする。
 	const totalRows = await db
 		.select({ total: count() })
 		.from(reviews)
@@ -386,13 +389,15 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 			.where(and(eq(reviews.id, id), eq(reviews.completedAt, completedAt)))
 	);
 
-	// intervalPresetId は updateMemo（#13）でこの reviews の生成後に変更されている
-	// ことがあり、reviews 側のステップ数との整合性は検証されない（#18 のスコープ）。
-	// 現在のプリセットの intervals が短くなっていて、残りステップの一部・全部を
-	// 再計算できない（nextReviewAt が undefined を返す）場合、そのステップの
-	// 再アンカリングだけをスキップする（scheduledAt はプリセット変更前の値のまま残る）。
-	// この状態自体の解消は #18 の責務だが、#17 としては「対象ステップの完了」を
-	// この不整合を理由に失敗させない。
+	// #82 以降 changeMemoPreset は intervalPresetId の変更と reviews の作り直しを
+	// 同じ db.batch() で行うため、通常この reviews のステップ数は現在のプリセットの
+	// intervals と整合している。しかし #82 のデプロイより前に古い updateMemo で
+	// プリセットだけが変更され reviews が作り直されていない既存メモでは、現在の
+	// プリセットの intervals が当時より短くなっていることがあり、残りステップの
+	// 一部・全部を再計算できない（nextReviewAt が undefined を返す）場合がある。
+	// そのステップの再アンカリングだけをスキップする（scheduledAt は変更前の値の
+	// まま残る）。この既存メモの不整合自体をここで解消することはしないが、
+	// 「対象ステップの完了」をこの不整合を理由に失敗させない。
 	const reanchorUpdates = remaining
 		.map((row) => {
 			const scheduledAt = nextReviewAt(completedAt, intervals, row.step);

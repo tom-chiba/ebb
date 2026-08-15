@@ -6,7 +6,7 @@ import {
 } from '$lib/server/form-messages';
 import { ConflictError, handleDomainError, ValidationError } from '$lib/server/errors';
 import { listPresetsForUser } from '$lib/server/interval-presets';
-import { CONTENT_MAX_LENGTH, getMemo, TITLE_MAX_LENGTH, updateMemo } from '$lib/server/memos';
+import { changeMemoPreset, CONTENT_MAX_LENGTH, getMemo, TITLE_MAX_LENGTH } from '$lib/server/memos';
 import { normalizeLineEndings } from '$lib/server/text';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -85,7 +85,10 @@ export const actions: Actions = {
 		}
 
 		try {
-			const memo = await updateMemo(db, user.id, event.params.id, expectedUpdatedAt, {
+			// このフォームは常に intervalPresetId を送ってくる（selectedPresetId が
+			// 必ず埋まっている）ため、実際に変更があったかどうかは changeMemoPreset
+			// 側で判定させる（#82）。
+			const memo = await changeMemoPreset(db, user.id, event.params.id, expectedUpdatedAt, {
 				title,
 				content,
 				intervalPresetId
