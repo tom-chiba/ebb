@@ -11,7 +11,6 @@ import {
 	memos,
 	reviews,
 	sql,
-	type BatchItem,
 	type Db
 } from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
@@ -19,6 +18,7 @@ import { ConflictError, NotFoundError } from './errors';
 import { createMemo } from './memos';
 import {
 	completeReview,
+	commitReviewRecalculation,
 	computeReviewRecalculation,
 	getCurrentPendingReview,
 	getDueReviewDetail,
@@ -991,7 +991,7 @@ describe('planReviewRecalculation', () => {
 			.all();
 
 		const plan = await planReviewRecalculation(db, memo.id, [1, 6, 24]);
-		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+		await commitReviewRecalculation(db, memo.id, plan);
 
 		const after = await db
 			.select()
@@ -1010,7 +1010,7 @@ describe('planReviewRecalculation', () => {
 		});
 
 		const plan = await planReviewRecalculation(db, memo.id, [2, 5]);
-		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+		await commitReviewRecalculation(db, memo.id, plan);
 
 		const rows = await db
 			.select()
@@ -1028,7 +1028,7 @@ describe('planReviewRecalculation', () => {
 		const completed = await completeReview(db, ownerId, due.id);
 
 		const plan = await planReviewRecalculation(db, memo.id, [1, 6, 24]);
-		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+		await commitReviewRecalculation(db, memo.id, plan);
 
 		const rows = await db
 			.select()
@@ -1052,7 +1052,7 @@ describe('planReviewRecalculation', () => {
 
 		const plan = await planReviewRecalculation(db, memo.id, [1, 6, 24]);
 		expect(plan.affectedCount).toBe(3); // 元の3ステップ全てが未完了・期限到来済み
-		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+		await commitReviewRecalculation(db, memo.id, plan);
 
 		const rows = await db
 			.select()
@@ -1071,7 +1071,7 @@ describe('planReviewRecalculation', () => {
 
 		// 新プリセットは1ステップのみ（既に完了済みの1ステップ以下）。
 		const plan = await planReviewRecalculation(db, memo.id, [1]);
-		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+		await commitReviewRecalculation(db, memo.id, plan);
 
 		const rows = await db.select().from(reviews).where(eq(reviews.memoId, memo.id)).all();
 		expect(rows).toHaveLength(1);
@@ -1084,10 +1084,10 @@ describe('planReviewRecalculation', () => {
 		await completeReview(db, ownerId, due.id);
 
 		const shrink = await planReviewRecalculation(db, memo.id, [1]);
-		await db.batch(shrink.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+		await commitReviewRecalculation(db, memo.id, shrink);
 
 		const grow = await planReviewRecalculation(db, memo.id, [1, 6, 24]);
-		await db.batch(grow.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+		await commitReviewRecalculation(db, memo.id, grow);
 
 		const rows = await db
 			.select()

@@ -7,7 +7,8 @@
 // ではない点に注意（#18 の設計レビューで指摘）。このヘルパーを使う各クエリは
 // inArray 1つだけで他に bind を持たないため一致しているが、条件を追加する際は
 // チャンクサイズも見直すこと。同様に、reviews への1回の INSERT 文
-// （$lib/server/reviews.ts の buildReviewRecalculationStatements）が使う bind 数は
+// （$lib/server/reviews.ts の commitReviewRecalculation・updateCustomPresetIntervals が
+// 積む INSERT）が使う bind 数は
 // 「新 intervals の要素数（@ebb/core の MAX_INTERVAL_COUNT が上限）× 1行あたりの
 // カラム数」であり、この上限（queryInChunks のチャンク分割）とは別の bind 数上限
 // なので、MAX_INTERVAL_COUNT を将来引き上げる場合はこちらとの関係も見直す必要がある。

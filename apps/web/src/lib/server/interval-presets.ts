@@ -7,6 +7,7 @@ import {
 	isNull,
 	memos,
 	or,
+	reviews,
 	userSettings,
 	type BatchItem,
 	type Db
@@ -20,7 +21,7 @@ import {
 	ValidationError
 } from './errors';
 import {
-	buildReviewRecalculationStatements,
+	buildReviewScheduleClaimStatements,
 	computeReviewRecalculation,
 	loadReviewRecalculationInputs
 } from './reviews';
@@ -217,12 +218,14 @@ async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[
 	return rows.map((row) => row.id);
 }
 
-// buildReviewRecalculationStatements（$lib/server/reviews.ts）が1メモあたりに積む
-// 文数の上限（DELETE 1 + INSERT 1）。実際の文数はこれより少ないことがある（新
-// intervals の残りステップが0件で INSERT 不要、等）が、プレビューと確定操作を
-// 同じ条件で早期拒否するため、両方とも実際の文数ではなく、この上限値を使った
-// 悲観的見積もりで判定する。
-const MAX_STATEMENTS_PER_MEMO = 2;
+// 1メモあたりに積む文数の上限: claim（buildReviewScheduleClaimStatements、
+// DELETE 1 + review_schedules の version bump 1）+ INSERT 1（Issue #85 で
+// DELETE/INSERT だけの2文から3文に増えた。claim の bump が version の CAS を兼ね、
+// INSERT だけを別 db.batch() に切り出す必要があるため）。実際の文数はこれより
+// 少ないことがある（新 intervals の残りステップが0件で INSERT 不要、等）が、
+// プレビューと確定操作を同じ条件で早期拒否するため、両方とも実際の文数ではなく、
+// この上限値を使った悲観的見積もりで判定する。
+const MAX_STATEMENTS_PER_MEMO = 3;
 
 // プレビュー・確定共通のバッチ上限超過エラー。報告の仕方（メッセージ文言・
 // 例外の種類）は1箇所にまとめ、片方だけ文言を直し忘れる事故を避ける。
@@ -244,11 +247,12 @@ function estimateWorstCaseBatchStatementCount(memoCount: number): number {
 
 // queryInChunks（./db-chunk）のチャンク分割は、D1 の1クエリあたり bind パラメータ数
 // 上限（ローカル実測でちょうど100件、101件から `too many SQL variables`）に対する
-// 対処。MAX_BATCH_STATEMENTS（500）が許容する最大メモ数（悲観的見積もりで最大249件）
-// はこれを容易に超えるため、updateCustomPresetIntervals 内のアーカイブ再確認・
-// $lib/server/reviews.ts の loadReviewRecalculationInputs（#84 で一括取得に変更した
-// 際に追加）の両方がこのヘルパー経由でチャンク分割する（#18 の正確性レビューで
-// 指摘。実際に251件規模のテストで生の D1 エラーを再現して確認した）。
+// 対処。MAX_BATCH_STATEMENTS（500）が許容する最大メモ数（悲観的見積もりで最大166件、
+// Issue #85 で MAX_STATEMENTS_PER_MEMO が 2→3 になったことに伴い #84 時点の249件から
+// 変わった）はこれを容易に超えるため、$lib/server/reviews.ts の
+// loadReviewRecalculationInputs（#84 で一括取得に変更した際に追加）がこのヘルパー
+// 経由でチャンク分割する（#18 の正確性レビューで指摘。実際に251件規模のテストで
+// 生の D1 エラーを再現して確認した）。
 
 // プリセット編集画面（#63）の「このプリセットを使っているメモ」一覧・削除ボタンの
 // 活性判定に使う。deleteCustomPreset の使用中判定と同じく、アーカイブ済みメモも
@@ -338,69 +342,104 @@ export async function updateCustomPresetIntervals(
 		.map((memoId) => {
 			const input = inputs.get(memoId);
 			// loadReviewRecalculationInputs のコメントの通り理屈上は起こらないが、
-			// 起きた場合は後段の stillActiveMemoIds ガードと同じく対象から除外する。
+			// 起きた場合は claim（下記）と同じく対象から除外する。
 			if (!input) return undefined;
-			return { memoId, plan: computeReviewRecalculation(memoId, input, intervals) };
+			return {
+				memoId,
+				expectedVersion: input.version,
+				plan: computeReviewRecalculation(memoId, input, intervals)
+			};
 		})
 		.filter(
-			(entry): entry is { memoId: string; plan: ReturnType<typeof computeReviewRecalculation> } =>
-				entry !== undefined
+			(
+				entry
+			): entry is {
+				memoId: string;
+				expectedVersion: number;
+				plan: ReturnType<typeof computeReviewRecalculation>;
+			} => entry !== undefined
 		);
 
-	// collectAffectedMemoIds の SELECT から db.batch() 確定までの間に、対象メモの
-	// いずれかが別リクエストの archiveMemo によりアーカイブされていた場合、そのメモの
-	// 再計算（特に INSERT）を実行すると「アーカイブ済みメモに未完了 reviews が残らない」
-	// 不変条件を静かに破ってしまう（archiveMemo 自体は同期的に未完了行を削除するが、
-	// この db.batch() の INSERT はそれを知らずに新しい未完了行を作ってしまうため）。
-	// batch 実行の直前にもう一度だけアーカイブ状態を確認し、この時点までにアーカイブ
-	// された memoId を対象から外すことで競合の窓を大幅に狭める（#17 の completeReview
-	// が持つ同種の SELECT-then-write ハザードと同じ性質の残存レースであり、完全な排除
-	// ではないことは docs/design-decisions.md の #18 節に記録済み。正確性レビューで指摘）。
-	const stillActiveMemoIds = new Set(
-		(
-			await queryInChunks(memoIds, (ids) =>
-				db
-					.select({ id: memos.id })
-					.from(memos)
-					.where(and(inArray(memos.id, ids), isNull(memos.archivedAt)))
-					.all()
-			)
-		).map((row) => row.id)
-	);
-	const activePlans = memoPlans.filter(({ memoId }) => stillActiveMemoIds.has(memoId));
-	const activeStatements = activePlans.flatMap(({ memoId, plan }) =>
-		buildReviewRecalculationStatements(db, memoId, plan.newRows)
-	);
+	// Issue #85: 各メモの claim（DELETE + review_schedules.version bump）を1つの
+	// db.batch() にまとめて実行する。version が読み取り時（loadReviewRecalculationInputs）
+	// のまま変わっていない（別リクエストの completeReview・別のプリセット変更が
+	// 割り込んでいない）memo のみが「勝つ」。claim 自身のガードが対象メモの
+	// archivedAt を直接見るため、旧実装が別クエリで行っていた「batch 実行直前の
+	// アーカイブ再確認」（stillActiveMemoIds）は不要になった（advisor 指摘）。
+	// bump 文の .returning() で勝敗を判定するため、DELETE 側の結果は使わない。
+	const claimPairs = memoPlans.map(({ memoId, expectedVersion }) => ({
+		memoId,
+		...buildReviewScheduleClaimStatements(db, memoId, expectedVersion)
+	}));
+	const wonMemoIds = new Set<string>();
+	if (claimPairs.length > 0) {
+		const claimStatements = claimPairs.flatMap(({ deleteStatement, bumpStatement }) => [
+			deleteStatement,
+			bumpStatement
+		]);
+		// db.batch は静的に非空とわかるタプル型を要求する（#17 の completeReview と同じ
+		// 理由）。claimPairs.length > 0 のガードにより実行時には常に1件以上になるが、
+		// flatMap の戻り値は配列型のままでタプル型と直接オーバーラップしないため、
+		// unknown 経由でキャストする。
+		const claimResults = await db.batch(
+			claimStatements as unknown as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]
+		);
+		claimPairs.forEach(({ memoId }, i) => {
+			const bumpResult = claimResults[i * 2 + 1];
+			if (Array.isArray(bumpResult) && bumpResult.length > 0) wonMemoIds.add(memoId);
+		});
+	}
+	const wonPlans = memoPlans.filter(({ memoId }) => wonMemoIds.has(memoId));
+
+	// Issue #85: updatePresetStatement（下記）はメモ単位のガードを持てず、勝敗に関わらず
+	// このプリセットを使う全メモに適用される。そのため、負けたメモ（claim の
+	// 対象外・version 不一致）のうち「アーカイブされたから対象外」以外の理由で
+	// 負けたメモが1件でもあれば、この操作全体を 409 として拒否し、batch B
+	// （プリセットの UPDATE・勝った memo 分の INSERT）を一切実行しない。実行してしまうと、
+	// プリセットの intervals だけが更新され、負けたメモの reviews は古い intervals の
+	// ままという恒久的な不整合が「成功」として返ってしまう（advisor 指摘）。
+	// アーカイブによる除外は既存の不変条件（アーカイブ済みメモに未完了 reviews は
+	// 残らない）の範囲内であり、このプリセットの対象外として静かに除外してよい。
+	const loserMemoIds = memoPlans.map(({ memoId }) => memoId).filter((memoId) => !wonMemoIds.has(memoId));
+	if (loserMemoIds.length > 0) {
+		const stillActiveLoserRows = await queryInChunks(loserMemoIds, (ids) =>
+			db
+				.select({ id: memos.id })
+				.from(memos)
+				.where(and(inArray(memos.id, ids), isNull(memos.archivedAt)))
+				.all()
+		);
+		if (stillActiveLoserRows.length > 0) {
+			throw new ConflictError(
+				'このプリセットを使っているメモの復習予定が同時に更新されました。もう一度お試しください。'
+			);
+		}
+	}
 
 	const updatePresetStatement = db
 		.update(intervalPresets)
 		.set({ intervals })
 		.where(eq(intervalPresets.id, presetId));
+	const insertStatements = wonPlans
+		.filter(({ plan }) => plan.newRows.length > 0)
+		.map(({ plan }) => db.insert(reviews).values(plan.newRows));
 
 	// db.batch は静的に非空とわかるタプル型を要求する（#17 の completeReview と同じ理由）。
 	// updatePresetStatement は常に配列先頭にあるため実行時には常に1件以上になる。
-	// 1メモあたり最大 MAX_STATEMENTS_PER_MEMO 文、かつ冒頭の
-	// assertWithinBatchStatementLimit(estimateWorstCaseBatchStatementCount(...)) が
-	// 既に memoIds.length を上限内に収めているため、activeStatements（memoIds の
-	// 部分集合である activePlans 由来）の文数がこれを超えることはあり得ない。
-	// 実測値による重複チェックは書かない（起こり得ないシナリオへの防御的検証）。
 	const statements: [typeof updatePresetStatement, ...BatchItem<'sqlite'>[]] = [
 		updatePresetStatement,
-		...activeStatements
+		...insertStatements
 	];
 
 	try {
 		await db.batch(statements);
 	} catch (err) {
-		// loadReviewRecalculationInputs の一括 SELECT（completedCount・未完了件数の読み取り）と
-		// この db.batch() 実行の間に、対象メモのいずれかで別リクエストの completeReview
-		// が割り込むと、そこで計算した完了済みステップ数が古くなり、新しい INSERT が
-		// 既に完了済みの step 番号と衝突して reviews_memoId_step_unique に違反しうる
-		// （#17 の completeReview が同種の SELECT-then-write ハザードに対し
-		// wonThisCompletion ガードで対処しているのと同じ根本原因。正確性レビューで
-		// 指摘）。D1 の batch は単一の暗黙トランザクションのため、この違反時は
-		// プリセット自体の UPDATE も含めてロールバックされる。生の DB エラーとして
-		// 500 になるのではなく、ユーザーにリトライを促す 409 として扱う。
+		// claim に勝った直後・この db.batch() 実行前のごく狭い窓に、別の書き込みが
+		// 同じ memoId に対して先に同じ step 番号を使ってしまった場合の backstop
+		// （#82 節が記録する残存レースと同種、完全な排除はできない）。version の
+		// CAS が主たる検出手段になったことで、この分岐に到達する経路は大幅に狭まったが、
+		// 生の DB エラーとして 500 になるのではなく、ユーザーにリトライを促す
+		// 409 として扱う点は変えない。
 		if (isUniqueConstraintViolation(err, 'reviews.step')) {
 			throw new ConflictError(
 				'このプリセットを使っているメモの復習予定が同時に更新されました。もう一度お試しください。'
@@ -410,11 +449,11 @@ export async function updateCustomPresetIntervals(
 	}
 
 	// hidden field 等でクライアントから渡された件数を信用せず、実行直前に読み直した
-	// 実数の合計を返す（#17 のバナー件数ズレと同型の罠を避けるため）。直前にアーカイブ
-	// されて対象から外れたメモ（activePlans に含まれない）分は実際には再計算していない
-	// ため、ここでも含めない。
+	// 実数の合計を返す（#17 のバナー件数ズレと同型の罠を避けるため）。claim に負けた
+	// メモ（version 不一致・アーカイブ済み）分は実際には再計算していないため、ここでも
+	// 含めない。
 	return {
-		updatedReviewsCount: activePlans.reduce((sum, { plan }) => sum + plan.affectedCount, 0)
+		updatedReviewsCount: wonPlans.reduce((sum, { plan }) => sum + plan.affectedCount, 0)
 	};
 }
 

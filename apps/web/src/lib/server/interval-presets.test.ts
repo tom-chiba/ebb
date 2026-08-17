@@ -246,7 +246,7 @@ describe('previewPresetIntervalsUpdate', () => {
 		// 実行系（updateCustomPresetIntervals）と同じメモ数を使い、プレビューが
 		// 「N件の予定が更新されます」と成功を返した直後に確定操作だけが拒否される
 		// 非対称（正確性レビューで指摘）が起きないことを確認する。
-		const memoCount = Math.ceil((MAX_BATCH_STATEMENTS - 1) / 2) + 1;
+		const memoCount = Math.ceil((MAX_BATCH_STATEMENTS - 1) / 3) + 1;
 		for (let i = 0; i < memoCount; i++) {
 			await createMemo(db, ownerId, {
 				title: `memo-${i}`,
@@ -265,7 +265,9 @@ describe('previewPresetIntervalsUpdate', () => {
 		// 101件から `too many SQL variables` になる）、loadReviewRecalculationInputs
 		// （$lib/server/reviews.ts、#84 で一括取得に変更）が memoId をチャンク分割せずに
 		// inArray へまとめて渡すと、MAX_BATCH_STATEMENTS（500）が許容する規模
-		// （悲観的見積もりで最大249メモ）の範囲内でも生の D1 エラーになりうる
+		// （悲観的見積もりで最大166メモ、Issue #85 で MAX_STATEMENTS_PER_MEMO が
+		// 2→3 になったことに伴い #84 時点の249件から変わった）の範囲内でも
+		// 生の D1 エラーになりうる
 		// （#18 の正確性レビューで指摘、実測で確認した回帰）。ここでは
 		// MAX_BATCH_STATEMENTS には抵触しないが100件は超えるメモ数で実行し、
 		// チャンク分割が正しく機能して例外を投げないことを確認する。
@@ -449,10 +451,11 @@ describe('updateCustomPresetIntervals', () => {
 			// estimateWorstCaseBatchStatementCount による悲観的見積もりで早期リジェクトする
 			// ようになった（設計レビューで指摘。以前は実測の statements.length のみで
 			// 判定しており、大量メモに対する確定操作が高コストな処理を全て実行してから
-			// 拒否していた）。この見積もりは1メモあたり最大2文という前提のため、
-			// 実際の文数によらず memoCount 単体で「1 + memoCount*2 <= 500」となる
-			// 249メモまでは必ず成功する。
-			const memoCount = Math.floor((MAX_BATCH_STATEMENTS - 1) / 2);
+			// 拒否していた）。この見積もりは1メモあたり最大3文（claim の DELETE +
+			// version bump + INSERT、Issue #85 で2→3に変わった）という前提のため、
+			// 実際の文数によらず memoCount 単体で「1 + memoCount*3 <= 500」となる
+			// 166メモまでは必ず成功する。
+			const memoCount = Math.floor((MAX_BATCH_STATEMENTS - 1) / 3);
 			for (let i = 0; i < memoCount; i++) {
 				await createMemo(db, ownerId, {
 					title: `memo-${i}`,
@@ -478,7 +481,7 @@ describe('updateCustomPresetIntervals', () => {
 			// previewPresetIntervalsUpdate と同じ悲観的見積もりを実行系の入口でも使う
 			// ようになったため、対象メモ数だけで即座にリジェクトされ、実際の統計文数
 			// （completedCount 次第でもっと少ない可能性がある）には依存しない。
-			const memoCount = Math.ceil((MAX_BATCH_STATEMENTS - 1) / 2) + 1;
+			const memoCount = Math.ceil((MAX_BATCH_STATEMENTS - 1) / 3) + 1;
 			for (let i = 0; i < memoCount; i++) {
 				await createMemo(db, ownerId, {
 					title: `memo-${i}`,
