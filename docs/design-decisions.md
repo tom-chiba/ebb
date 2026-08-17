@@ -2218,3 +2218,74 @@ Date()` という各呼び出し固有の値を使うのに対し、ユーザー
   `minPendingStepSubquery` 直前にあった「apps/scheduler/src/notify-due-reviews.ts
   もこの条件を変更するときは両方確認すること」という注記）は、実装が1箇所に
   統合されたことで削除した。
+
+## プリセット更新時の review 再計算を一括取得方式にする (#84)
+
+- **背景**: `updateCustomPresetIntervals`（プリセット確定操作）・
+  `previewPresetIntervalsUpdate`（プレビュー）は、対象メモ1件につき
+  `planReviewRecalculation` を呼び、1メモあたり3 SELECT（memo作成日時・最新の
+  完了済み step・未完了件数）を発行していた。対象メモ数に比例してクエリ数が
+  増えるため、Cloudflare Workers / D1 の CPU・クエリ負荷が対象メモ数に応じて
+  線形に増加していた。
+
+- **`$lib/server/reviews.ts` を「DB アクセスなしの純粋関数」「1件ずつ取得する
+  経路」「一括取得する経路」の3つに分離した**:
+  - `computeReviewRecalculation(memoId, input, intervals)`: #18 の再計算レシピ
+    （baseTime の決定・新しい未完了行の生成）を DB アクセスなしで計算する純粋
+    関数。入力（`MemoRecalcInputs`: `createdAt`・`latestCompleted`・
+    `incompleteCount`）をどう取得したか（1件ずつ／一括）に依らず同じ結果を返す。
+  - `buildReviewRecalculationStatements(db, memoId, newRows)`: 純粋関数が返す
+    `newRows` から実際に `db.batch()` へ積む DELETE/INSERT 文を組み立てる
+    （メモ1件あたり最大2文という既存の上限は変えていない）。
+  - `planReviewRecalculation(db, memoId, intervals)`: `changeMemoPreset`
+    （#82、常に対象メモ1件）向けに残した、従来どおり1件分の SELECT を発行してから
+    上記2つを呼ぶ経路。挙動・シグネチャは変更していない。
+  - `loadReviewRecalculationInputs(db, memoIds)`: `updateCustomPresetIntervals`・
+    `previewPresetIntervalsUpdate`（#84 で追加）向けの新しい一括取得経路。対象
+    メモ数に依らず常に3クエリ集合（`memos` の作成日時・完了済み `reviews`・
+    未完了件数の GROUP BY、いずれもチャンク分割込み）で完了する。`Map<memoId,
+    MemoRecalcInputs>` を返し、見つからなかった memoId は含めない（後述）。
+
+- **プレビューと確定処理が同じ集計・計画生成ロジックを共有する**（受入条件）。
+  両者とも `collectAffectedMemoIds` → `assertWithinBatchStatementLimit`
+  （悲観的見積もりによる早期拒否、#18 で導入した順序を維持） →
+  `loadReviewRecalculationInputs` → `computeReviewRecalculation` という同じ経路を
+  通る。異なるのはその先で、プレビューは `affectedCount` を合計するだけ、確定
+  操作は `buildReviewRecalculationStatements` で文を組み立てて `db.batch()` を
+  実行する。プレビュー側で `newRows`（Drizzle の insert/delete ビルダーではなく
+  ただのプレーンオブジェクトの配列）は計算するが、確定操作に必要な Drizzle
+  文自体は組み立てない（advisor 指摘。件数だけが必要なリクエストで最大249件分の
+  未使用ビルダーを作らないため）。
+
+- **`loadReviewRecalculationInputs` の完了済み行の集約は、SQL の
+  `max(step)`/`max(completedAt)` の別々の集約ではなく、JS 側で「同じ行から
+  取った」ことを保証する**（advisor 指摘）。「最新の完了済みステップの
+  `completedAt`」が常に「同じ行の `completedAt`」であることは、step と
+  completedAt が単調に対応するという #17 の不変条件に依存した前提であり、
+  別々の集約はこの前提を検証せず、#82 より前の不整合な既存データ
+  （`changeMemoPreset` のコメントが記録している既知の不整合）に対して誤った
+  baseTime を返しうる。
+
+- **`loadReviewRecalculationInputs` が対象 memoId の一部しか返さない場合、
+  呼び出し側は静かにスキップする**。この実装に memo のハード削除機能は無く、
+  対象は必ず `collectAffectedMemoIds` が直前に返した非アーカイブメモの id で
+  あるため理屈上は常に全件見つかるが、見つからなかった場合は
+  `stillActiveMemoIds` ガード（#18、途中でアーカイブされたメモの除外）と同じ
+  「対象から除外する」扱いにした。エラーにしない。
+
+- **`queryInChunks`／`chunk`／`D1_MAX_BIND_PARAMS`（#18 で `interval-presets.ts`
+  に追加したチャンク分割ヘルパー）を `$lib/server/db-chunk.ts` へ切り出した**。
+  `reviews.ts` の `loadReviewRecalculationInputs` も同じチャンク分割が必要になり、
+  `interval-presets.ts` から `reviews.ts` を import する既存の依存方向を保ったまま
+  両方から使うには、どちらのファイルにも属さない共有モジュールが必要だった。
+
+- **既存のプリセット更新テストが通ることを確認した上で、`updateCustomPresetIntervals`
+  内部の関数呼び出しを横取りしていた1テストだけ再フック先を変えた**。
+  「対象メモの列挙後・アーカイブ再確認前にアーカイブが割り込む」回帰テスト
+  （`interval-presets.test.ts`）は、対象メモごとに1回ずつ呼ばれていた
+  `planReviewRecalculation` を横取りして内部で `archiveMemo` を呼ぶことで
+  タイミングを再現していたが、確定操作はもう `planReviewRecalculation` を
+  呼ばないため、代わりに一括取得を行う `loadReviewRecalculationInputs`
+  （呼び出し回数は対象メモ数に依らず1回）を横取りする形に変更した。検証内容
+  （アーカイブされたメモの reviews が0件のまま・他のメモは正しく再計算される）
+  自体は変えていない。
