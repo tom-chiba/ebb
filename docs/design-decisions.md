@@ -2149,7 +2149,72 @@ Date()` という各呼び出し固有の値を使うのに対し、ユーザー
   という正しい前提に更新した。これに合わせて、`reviews.test.ts` の該当テストは
   `changeMemoPreset` ではなく直接 `db.update(memos)` でこの不整合状態を再現する
   よう変更した（`changeMemoPreset` 経由ではこの状態を作れないため）。
+  （`minPendingScheduledAtSubquery` 自体は #83 で `isCurrentPendingReview` に
+  統合され削除された。）
 - **`updateMemo`・`changeMemoPreset` に一字一句同じ形で重複していた「0行
   だった理由（対象消失 vs バージョン競合）の判別」ロジックを `resolveUpdateResult`
   として共通化し、`ChangeMemoPresetInput` を `UpdateMemoInput` を拡張する形に
   変更した**（設計レビューで指摘）。
+
+## 現在の未完了 review の定義を一元化する (#83)
+
+- **「各メモで最小 step の未完了 review」という同じ業務ルールが、Web一覧
+  （`min(step)` の groupBy サブクエリ＋JOIN）・メモ一覧（`min(scheduledAt)` の
+  groupBy サブクエリ＋JOIN）・メモ詳細（step 昇順配列への `find()`）・
+  `assertIsCurrentStep`（`min(step)` を返す独立したスカラー select）・
+  scheduler（相関 `NOT EXISTS`）という5通りの別実装で存在していたことへの
+  対応**。#82 のリファクタで「`min(scheduledAt)` と `min(step)` が異なる行を
+  指しうる」不整合（プリセット変更後、再アンカリング未実施の古いステップが
+  残るケース）が発見されており、その解消も兼ねる。
+- **`packages/db/src/current-reviews.ts` に `isCurrentPendingReview(db)` という
+  共有述語（相関 `NOT EXISTS` を使う Drizzle の SQL 条件）を新設し、5箇所すべてを
+  これに置き換えた**。schema.ts が持つ `reviews(memoId, step)` の unique 制約により、
+  この述語が真になる行はメモごとに高々1件である。
+  - **配置先は `packages/db`**（`apps/web` と `apps/scheduler` の双方が依存できる
+    唯一のパッケージであるため）。DB view にする案も検討したが、Issue の
+    受入条件「due・通知済み・アーカイブ状態・所有者など用途固有の条件は
+    利用側で追加する」を満たすには、呼び出し側が自由に `and()` で条件を
+    追加できる「WHERE/JOIN 条件としてANDできる述語」の形の方が合う（view だと
+    用途ごとに view 自体を分けるか、view の外でさらに絞り込む形になり、
+    どちらも「中核実装が一か所」という条件と相性が悪い）ため見送った。
+  - **`min(step)` の groupBy＋JOIN ではなく相関 `NOT EXISTS` を正とした**。
+    groupBy 方式は「メモごとの最小 step」を1行だけ持つサブクエリを作り、
+    本体クエリと `(memoId, step)` の両方一致で INNER JOIN する必要があるが、
+    NOT EXISTS 方式は他の WHERE 条件と同じ粒度で `and()` に混ぜられる
+    boolean 条件になり、`listMemosForBrowse` のように LEFT JOIN の結合条件へ
+    直接組み込む用途にも自然に使える。
+  - **due 判定（`scheduledAt <= now`）はこの述語の外で行う**という不変条件
+    （advisor 指摘、#17 由来）は、述語を再利用可能にしたことでより壊れやすく
+    なる（将来の呼び出し側が誤って述語の内側に due 条件を混ぜると、期限前の
+    若い step を飛ばして期限切れの後続 step を current 扱いしてしまう）ため、
+    その注意書きを `isCurrentPendingReview` 自体のコメントに移した。この不変条件の
+    回帰テストは `apps/web` 側（`reviews.test.ts` の「does not surface a later step
+    even if it is also due while an earlier step remains incomplete」、#83以前から
+    存在）にはあったが scheduler 側には無かったため、同じ形（期限前の step0・
+    期限到来済みの step1）のテストを `notify-due-reviews.test.ts` にも追加した
+    （テスト網羅性レビューで指摘）。
+  - **相関先は alias されていない `reviews` テーブル固定**。呼び出し側が
+    outer query で `reviews` を alias している場合はこの述語を使えない
+    （現状そのような呼び出しは無い）。
+- **`apps/web/src/lib/server/reviews.ts` に `getCurrentPendingReview(db, memoId)`
+  を新設し、メモ詳細画面の `nextStep`/`isNext` 判定と `assertIsCurrentStep`
+  の両方から使う**。メモ詳細画面は従来 `listReviewSchedule` が返す step 昇順
+  配列に対する `schedule.find((row) => row.completedAt === null)` という
+  TypeScript 側の実装を持っていたが、これは「中核実装が一か所になる」という
+  受入条件に反するため、共有述語を使う SQL クエリに置き換えた。
+- **`listMemosForBrowse` の `nextScheduledAt` は、旧 `min(scheduledAt)`
+  サブクエリではなく `isCurrentPendingReview` を結合条件にした `reviews` への
+  LEFT JOIN から取る**よう変更した。これにより `reviews.scheduledAt`
+  （timestamp 型）をそのまま返せるようになり、旧実装が必要としていた
+  「raw SQL の `min()` はエポックミリ秒で返るため呼び出し側で `Date` に変換する」
+  という手動デコードが不要になった。
+  - **挙動変化がある**: プリセット変更後に再アンカリングされていない古い
+    reviews が残るメモでは、`nextScheduledAt` が「一番早い未完了 scheduledAt」
+    ではなく「最小の未完了 step の scheduledAt」に変わる（Issue の受入条件
+    「後続 step の scheduledAt が早くても前の step を追い越さない」）。
+    回帰テストは `memos.test.ts`・`reviews.test.ts` の両方に、`scheduledAt` の
+    大小関係を意図的に逆転させたフィクスチャで追加した。
+- **重複実装の同期を求めていた既存コメント**（`reviews.ts` の
+  `minPendingStepSubquery` 直前にあった「apps/scheduler/src/notify-due-reviews.ts
+  もこの条件を変更するときは両方確認すること」という注記）は、実装が1箇所に
+  統合されたことで削除した。
