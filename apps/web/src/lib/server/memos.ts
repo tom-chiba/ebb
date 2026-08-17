@@ -3,6 +3,7 @@ import {
 	count,
 	desc,
 	eq,
+	isCurrentPendingReview,
 	isNull,
 	intervalPresets,
 	memos,
@@ -21,7 +22,7 @@ import {
 } from './errors';
 import { getAccessiblePreset } from './interval-presets';
 import { clamp, normalizeOffset, type PaginationOptions } from './pagination';
-import { minPendingScheduledAtSubquery, planReviewRecalculation } from './reviews';
+import { planReviewRecalculation } from './reviews';
 
 export const TITLE_MAX_LENGTH = 200;
 export const CONTENT_MAX_LENGTH = 50_000;
@@ -135,8 +136,9 @@ export async function listMemosForBrowse(
 		trimmedQuery ? memoSearchCondition(trimmedQuery) : undefined
 	);
 
-	const minPendingScheduledAt = minPendingScheduledAtSubquery(db);
-
+	// 「次回予定」はメモの現在の未完了 step（@ebb/db の isCurrentPendingReview、#83 で
+	// 一元化した中核実装）の scheduledAt。全ステップ完了済み（該当行なし）のメモは
+	// LEFT JOIN 側で null になる。
 	const [rows, totalRows] = await Promise.all([
 		db
 			.select({
@@ -144,11 +146,11 @@ export async function listMemosForBrowse(
 				title: memos.title,
 				content: memos.content,
 				presetName: intervalPresets.name,
-				nextScheduledAt: minPendingScheduledAt.minScheduledAt
+				nextScheduledAt: reviews.scheduledAt
 			})
 			.from(memos)
 			.innerJoin(intervalPresets, eq(memos.intervalPresetId, intervalPresets.id))
-			.leftJoin(minPendingScheduledAt, eq(minPendingScheduledAt.memoId, memos.id))
+			.leftJoin(reviews, and(eq(reviews.memoId, memos.id), isCurrentPendingReview(db)))
 			.where(where)
 			.orderBy(desc(memos.createdAt), desc(memos.id))
 			.limit(limit)
@@ -163,7 +165,7 @@ export async function listMemosForBrowse(
 			title: row.title,
 			content: row.content,
 			presetName: row.presetName,
-			nextScheduledAt: row.nextScheduledAt === null ? null : new Date(row.nextScheduledAt)
+			nextScheduledAt: row.nextScheduledAt
 		})),
 		total: totalRows[0]?.total ?? 0,
 		limit,

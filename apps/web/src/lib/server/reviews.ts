@@ -7,6 +7,7 @@ import {
 	exists,
 	gt,
 	intervalPresets,
+	isCurrentPendingReview,
 	isNotNull,
 	isNull,
 	lte,
@@ -65,84 +66,19 @@ export interface CompletedReview {
 	nextScheduledAt: Date | null;
 }
 
-// メモごとの「未完了の最小 step」を1行だけ持つサブクエリ。docs/schema.md が #17 に
-// 委ねた不変条件（常に最小の未完了 step からのみ完了させる）の実装の核。
-// due 判定（scheduledAt <= now）はこのサブクエリの外で行う。中に入れると
-// 「期限が来ている行の中での最小 step」になり、期限前の若い step を飛ばして
-// 期限切れの後続 step を表示しうる（advisor 指摘）。
-// apps/scheduler/src/notify-due-reviews.ts も、相関 NOT EXISTS という別のSQL表現で
-// 同じ不変条件を適用している（#21）。この条件を変更するときは両方を確認すること。
-function minPendingStepSubquery(db: Db) {
-	return db
-		.select({
-			memoId: reviews.memoId,
-			minStep: sql<number>`min(${reviews.step})`.as('min_step')
-		})
-		.from(reviews)
-		.where(isNull(reviews.completedAt))
-		.groupBy(reviews.memoId)
-		.as('min_pending_step');
-}
-
-// メモ一覧（apps/web/src/lib/server/memos.ts の listMemosForBrowse）向け。
-// 「次回予定時刻」はメモの現在ステップの scheduledAt そのものであり、
-// 全ステップ完了済み（未完了行が1件も無い）メモはこのサブクエリに現れず、
-// LEFT JOIN 側で null になることで「復習完了」と判定できる。
-//
-// ここでは未完了行を min(step) ではなく min(scheduledAt) で選んでいる（一覧の
-// JOIN で1行に絞り込む都合上、step ではなく時刻を直接引く方が JOIN 条件が単純に
-// なるため）。メモ詳細側（apps/web/src/routes/(app)/memos/[id]/+page.server.ts の
-// nextStep 判定、schedule.find(row => row.completedAt === null)）は min(step) で
-// 同じ行を求めており、通常は intervals が常に厳密昇順である（@ebb/core の
-// parseIntervals が全てのプリセット作成・更新経路で検証し、SYSTEM_INTERVAL_PRESETS
-// も昇順で定義されている）ため scheduledAt が step に対して単調増加し、両者は
-// 一致する（設計レビューで指摘）。
-//
-// ただし intervals が昇順であっても一致しないケースが存在する: メモの
-// intervalPresetId が変更され、その後 completeReview が未完了ステップを
-// 新プリセットの intervals で再アンカリングする際、新 intervals の範囲外に
-// なった step は再アンカリングされず古い scheduledAt が残る（completeReview の
-// reanchorUpdates 節を参照）。この場合、古い scheduledAt を持つ後続 step が
-// 新しく再アンカリングされた前段の step より早い時刻になり得るため、
-// min(scheduledAt) と min(step) が異なる行を指すことがある（正確性レビューで
-// 指摘）。#82 以降、intervalPresetId の変更は changeMemoPreset が同じ
-// db.batch() で reviews を新プリセット基準に作り直すため、この経路には
-// 通常到達しない。到達しうるのは #82 のデプロイより前に古い updateMemo で
-// intervalPresetId を変更され、reviews が古いプリセットのまま残っている
-// 既存メモのみ。
-export function minPendingScheduledAtSubquery(db: Db) {
-	return db
-		.select({
-			memoId: reviews.memoId,
-			// reviews.scheduledAt は integer(mode: 'timestamp_ms') 列だが、min() を通した
-			// raw sql 式は drizzle の timestamp デコードを経由しないため、ここでは素の
-			// エポックミリ秒（number）として扱う。呼び出し側（listMemosForBrowse）で
-			// Date へ変換する。
-			minScheduledAt: sql<number>`min(${reviews.scheduledAt})`.as('min_scheduled_at')
-		})
-		.from(reviews)
-		.where(isNull(reviews.completedAt))
-		.groupBy(reviews.memoId)
-		.as('min_pending_scheduled_at');
-}
-
 export async function listDueReviews(db: Db, userId: string, options: ListOptions = {}) {
 	const limit = clamp(options.limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT);
 	const offset = normalizeOffset(options.offset);
 	const now = new Date();
 
-	const minPendingStep = minPendingStepSubquery(db);
-	const joinMinStep = and(
-		eq(reviews.memoId, minPendingStep.memoId),
-		eq(reviews.step, minPendingStep.minStep)
-	);
 	// アーカイブ済みメモの未完了 reviews は archiveMemo が削除するため理屈上は
 	// 発生しないが、その不変条件は archivedAt を書く経路が archiveMemo のみである
 	// ことに依存している（docs/schema.md）。ここでも明示的に除外し、依存しない。
 	const where = and(
 		eq(memos.userId, userId),
 		isNull(memos.archivedAt),
-		lte(reviews.scheduledAt, now)
+		lte(reviews.scheduledAt, now),
+		isCurrentPendingReview(db)
 	);
 
 	const [rows, totalRows] = await Promise.all([
@@ -156,7 +92,6 @@ export async function listDueReviews(db: Db, userId: string, options: ListOption
 				scheduledAt: reviews.scheduledAt
 			})
 			.from(reviews)
-			.innerJoin(minPendingStep, joinMinStep)
 			.innerJoin(memos, eq(reviews.memoId, memos.id))
 			.where(where)
 			// scheduledAt はミリ秒精度で同時刻の行が起こり得るため、id を tie-breaker にして
@@ -168,7 +103,6 @@ export async function listDueReviews(db: Db, userId: string, options: ListOption
 		db
 			.select({ total: count() })
 			.from(reviews)
-			.innerJoin(minPendingStep, joinMinStep)
 			.innerJoin(memos, eq(reviews.memoId, memos.id))
 			.where(where)
 			.all()
@@ -194,17 +128,34 @@ export async function listDueReviews(db: Db, userId: string, options: ListOption
 	};
 }
 
+export interface CurrentPendingReview {
+	step: number;
+	scheduledAt: Date;
+}
+
+// メモの「現在の未完了 step」（@ebb/db の isCurrentPendingReview が定義する不変条件、
+// #83 で一元化した中核実装）を1件取得する。メモ詳細画面の nextStep 判定・isNext 表示、
+// assertIsCurrentStep の両方がこれを使う。全ステップ完了済みなら undefined。
+export async function getCurrentPendingReview(
+	db: Db,
+	memoId: string
+): Promise<CurrentPendingReview | undefined> {
+	const rows = await db
+		.select({ step: reviews.step, scheduledAt: reviews.scheduledAt })
+		.from(reviews)
+		.where(and(eq(reviews.memoId, memoId), isCurrentPendingReview(db)))
+		.limit(1)
+		.all();
+	return rows[0];
+}
+
 // 常に最小の未完了 step からのみ完了・閲覧できる（docs/schema.md が #17 に委ねた不変条件。
 // #18 の再計算レシピが「完了済みステップ数を起点に」で成立することに依存している）。
 // 一覧は常にこの条件を満たす行しか見せないため通常は到達しないが、review id を直接
 // 指定した呼び出し（URL 直打ち等）に対する防御として、完了操作・詳細取得の両方で再検証する。
 async function assertIsCurrentStep(db: Db, memoId: string, step: number) {
-	const rows = await db
-		.select({ minStep: sql<number>`min(${reviews.step})` })
-		.from(reviews)
-		.where(and(eq(reviews.memoId, memoId), isNull(reviews.completedAt)))
-		.all();
-	if (rows[0]?.minStep !== step) {
+	const current = await getCurrentPendingReview(db, memoId);
+	if (current?.step !== step) {
 		throw new ConflictError('an earlier review step must be completed first');
 	}
 }

@@ -1,16 +1,14 @@
 import {
 	and,
-	alias,
 	asc,
 	eq,
 	inArray,
+	isCurrentPendingReview,
 	isNull,
-	lt,
 	lte,
 	memos,
 	pushSubscriptions,
 	reviews,
-	notExists,
 	type Db
 } from '@ebb/db';
 import { sendPush, type PushSubscriptionRecord, type VapidConfig } from '@ebb/push';
@@ -62,17 +60,6 @@ type DueReviewRow = {
 type StoredPushSubscription = PushSubscriptionRecord & { id: string };
 
 async function selectDueReviews(db: Db, now: Date): Promise<DueReviewRow[]> {
-	const earlierReviews = alias(reviews, 'earlier_reviews');
-	const hasEarlierPendingStep = db
-		.select({ id: earlierReviews.id })
-		.from(earlierReviews)
-		.where(
-			and(
-				eq(earlierReviews.memoId, reviews.memoId),
-				isNull(earlierReviews.completedAt),
-				lt(earlierReviews.step, reviews.step)
-			)
-		);
 	return (
 		db
 			.select({
@@ -86,9 +73,11 @@ async function selectDueReviews(db: Db, now: Date): Promise<DueReviewRow[]> {
 			.where(
 				and(
 					lte(reviews.scheduledAt, now),
-					isNull(reviews.completedAt),
 					isNull(reviews.notifiedAt),
-					notExists(hasEarlierPendingStep),
+					// メモごとの「現在の未完了 step」判定（@ebb/db の isCurrentPendingReview、
+					// #83 で apps/web の listDueReviews 等と一元化した中核実装）。isNull(completedAt)
+					// もこの述語に含まれる。
+					isCurrentPendingReview(db),
 					// アーカイブ済みメモの未完了 reviews は archiveMemo が削除するため理屈上は
 					// 発生しないが、apps/web の listDueReviews と同じ理由でここでも明示的に
 					// 除外し、その不変条件に依存しない。
