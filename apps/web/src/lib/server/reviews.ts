@@ -6,6 +6,7 @@ import {
 	eq,
 	exists,
 	gt,
+	inArray,
 	intervalPresets,
 	isCurrentPendingReview,
 	isNotNull,
@@ -18,6 +19,7 @@ import {
 	type Db
 } from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
+import { queryInChunks } from './db-chunk';
 import { excerptOf } from './excerpt';
 import { ConflictError, NotFoundError } from './errors';
 import { clamp, normalizeOffset, type PaginationOptions } from './pagination';
@@ -445,9 +447,23 @@ export interface ReviewRecalculationPlan {
 	statements: BatchItem<'sqlite'>[];
 }
 
-// メモ1件分の未完了 reviews を、新しい intervals に基づいて作り直すための
-// DELETE/INSERT 文を組み立てる（実行はしない）。#18 の再計算レシピ
-// （docs/schema.md の reviews 節、ユーザー承認済みの設計判断）:
+// メモ1件分の再計算に必要な入力。#84 で「対象メモを一括取得する」ようにした
+// updateCustomPresetIntervals/previewPresetIntervalsUpdate（loadReviewRecalculationInputs
+// 経由）と、1件だけを対象にする planReviewRecalculation の両方が、この同じ形の入力を
+// computeReviewRecalculation に渡す。
+export interface MemoRecalcInputs {
+	createdAt: Date;
+	// このメモの完了済み reviews のうち、最大 step の行（＝最新の完了済みステップ）。
+	// 1件も完了していなければ undefined。
+	latestCompleted: { step: number; completedAt: Date } | undefined;
+	// このメモの現在の未完了 reviews 件数。
+	incompleteCount: number;
+}
+
+// #18 の再計算レシピ（docs/schema.md の reviews 節、ユーザー承認済みの設計判断）を
+// DB アクセスなしで計算する純粋関数（#84 で切り出し。取得済みの入力から計画を作る
+// 処理と、その入力をどう取得するか（1件ずつ／一括）を分離し、プレビュー・確定・
+// 単一メモ更新の3経路すべてが同じ計算ロジックを共有できるようにした）:
 // - 完了済み行（completedAt IS NOT NULL）には一切触れない。
 // - 未完了行は、期限到来済み（due）のものも含めて全て DELETE し、完了済み
 //   ステップ数を起点に新しい intervals の残りステップを再生成する。
@@ -458,6 +474,46 @@ export interface ReviewRecalculationPlan {
 // 「常に最小の未完了 step から完了させる」不変条件（#17 が保証）により、完了済み
 // 行数は「最大の完了済み step + 1」と一致する（欠番が発生しない）ため、
 // 完了済み行を1件1件数えるクエリを別に発行する必要はない。
+export function computeReviewRecalculation(
+	memoId: string,
+	input: MemoRecalcInputs,
+	intervals: readonly number[]
+): { affectedCount: number; newRows: (typeof reviews.$inferInsert)[] } {
+	const completedCount = input.latestCompleted ? input.latestCompleted.step + 1 : 0;
+	const baseTime = input.latestCompleted?.completedAt ?? input.createdAt;
+
+	const newRows: (typeof reviews.$inferInsert)[] = [];
+	for (let step = completedCount; step < intervals.length; step++) {
+		const scheduledAt = nextReviewAt(baseTime, intervals, step);
+		if (scheduledAt) newRows.push({ memoId, step, scheduledAt });
+	}
+
+	return { affectedCount: input.incompleteCount, newRows };
+}
+
+// computeReviewRecalculation が返す newRows から、実際に db.batch() へ積む
+// DELETE/INSERT 文を組み立てる（実行はしない）。DELETE は常に積み、INSERT は
+// newRows が1件以上あるときのみ積む（＝メモ1件あたり最大2文、
+// interval-presets.ts の MAX_STATEMENTS_PER_MEMO が前提とする上限と一致）。
+// planReviewRecalculation（単一メモ）・updateCustomPresetIntervals（一括、#84）の
+// 両方がこのヘルパー経由で文を組み立てる。
+export function buildReviewRecalculationStatements(
+	db: Db,
+	memoId: string,
+	newRows: (typeof reviews.$inferInsert)[]
+): BatchItem<'sqlite'>[] {
+	const deleteStatement = db
+		.delete(reviews)
+		.where(and(eq(reviews.memoId, memoId), isNull(reviews.completedAt)));
+	const statements: BatchItem<'sqlite'>[] = [deleteStatement];
+	if (newRows.length > 0) statements.push(db.insert(reviews).values(newRows));
+	return statements;
+}
+
+// メモ1件分の未完了 reviews を、新しい intervals に基づいて作り直すための
+// DELETE/INSERT 文を組み立てる（実行はしない）。changeMemoPreset（#82、常に1件のみ
+// 対象）向け。対象メモが複数ありうる updateCustomPresetIntervals（#84）は、代わりに
+// loadReviewRecalculationInputs で一括取得してから計算する。
 export async function planReviewRecalculation(
 	db: Db,
 	memoId: string,
@@ -479,9 +535,6 @@ export async function planReviewRecalculation(
 		.orderBy(desc(reviews.step))
 		.limit(1)
 		.all();
-	const latestCompleted = latestCompletedRows[0];
-	const completedCount = latestCompleted ? latestCompleted.step + 1 : 0;
-	const baseTime = (latestCompleted && latestCompleted.completedAt) || memo.createdAt;
 
 	const incompleteRows = await db
 		.select({ id: reviews.id })
@@ -489,18 +542,95 @@ export async function planReviewRecalculation(
 		.where(and(eq(reviews.memoId, memoId), isNull(reviews.completedAt)))
 		.all();
 
-	const deleteStatement = db
-		.delete(reviews)
-		.where(and(eq(reviews.memoId, memoId), isNull(reviews.completedAt)));
+	const latestCompletedRow = latestCompletedRows[0];
+	const { affectedCount, newRows } = computeReviewRecalculation(
+		memoId,
+		{
+			createdAt: memo.createdAt,
+			// isNotNull(reviews.completedAt) が WHERE 句に入っているため completedAt は
+			// 必ず non-null（drizzle の列型が反映していないだけ）。
+			latestCompleted: latestCompletedRow && {
+				step: latestCompletedRow.step,
+				completedAt: latestCompletedRow.completedAt as Date
+			},
+			incompleteCount: incompleteRows.length
+		},
+		intervals
+	);
 
-	const newRows: (typeof reviews.$inferInsert)[] = [];
-	for (let step = completedCount; step < intervals.length; step++) {
-		const scheduledAt = nextReviewAt(baseTime, intervals, step);
-		if (scheduledAt) newRows.push({ memoId, step, scheduledAt });
+	return { affectedCount, statements: buildReviewRecalculationStatements(db, memoId, newRows) };
+}
+
+// updateCustomPresetIntervals・previewPresetIntervalsUpdate（#84）向け。対象メモ数に
+// 依らず常に3クエリ集合（チャンク分割込み）で完了する点が、1メモにつき3 SELECT を
+// 発行する planReviewRecalculation との違い。戻り値の Map は対象メモ数より少ない
+// ことがある（後述）ため、呼び出し側は memoIds の各要素に対して `.get(memoId)` が
+// undefined になり得ることを前提にする。
+export async function loadReviewRecalculationInputs(
+	db: Db,
+	memoIds: readonly string[]
+): Promise<Map<string, MemoRecalcInputs>> {
+	if (memoIds.length === 0) return new Map();
+
+	const [createdAtRows, completedRows, incompleteCountRows] = await Promise.all([
+		queryInChunks(memoIds, (ids) =>
+			db
+				.select({ id: memos.id, createdAt: memos.createdAt })
+				.from(memos)
+				.where(inArray(memos.id, ids))
+				.all()
+		),
+		queryInChunks(memoIds, (ids) =>
+			db
+				.select({ memoId: reviews.memoId, step: reviews.step, completedAt: reviews.completedAt })
+				.from(reviews)
+				.where(and(inArray(reviews.memoId, ids), isNotNull(reviews.completedAt)))
+				.all()
+		),
+		// GROUP BY はあるが bind は inArray 1つのみ（他に条件を持たない）ため、
+		// db-chunk.ts の D1_MAX_BIND_PARAMS チャンクサイズがそのまま使える。
+		queryInChunks(memoIds, (ids) =>
+			db
+				.select({ memoId: reviews.memoId, count: count() })
+				.from(reviews)
+				.where(and(inArray(reviews.memoId, ids), isNull(reviews.completedAt)))
+				.groupBy(reviews.memoId)
+				.all()
+		)
+	]);
+
+	// 完了済み行のうち、メモごとに最大 step の1行だけを残す。SQL 側で
+	// max(step)・max(completedAt) を別々に集約しない理由: 「最新の完了済み
+	// ステップの completedAt」は常に「同じ行の completedAt」でなければならないが、
+	// それは step と completedAt が単調に対応するという #17 の不変条件に依存した
+	// 前提であり、別々の集約はこの前提を検証せず、#82 より前の不整合な既存データ
+	// （memos.ts の changeMemoPreset コメント参照）に対して誤った baseTime を返しうる
+	// （advisor 指摘）。JS 側で「同じ行から取った」ことを保証する。
+	const latestCompletedMap = new Map<string, { step: number; completedAt: Date }>();
+	for (const row of completedRows) {
+		const current = latestCompletedMap.get(row.memoId);
+		if (!current || row.step > current.step) {
+			// isNotNull(reviews.completedAt) が WHERE 句に入っているため completedAt は
+			// 必ず non-null（drizzle の列型が反映していないだけ）。
+			latestCompletedMap.set(row.memoId, { step: row.step, completedAt: row.completedAt as Date });
+		}
 	}
+	const incompleteCountMap = new Map(incompleteCountRows.map((row) => [row.memoId, row.count]));
 
-	const statements: BatchItem<'sqlite'>[] = [deleteStatement];
-	if (newRows.length > 0) statements.push(db.insert(reviews).values(newRows));
-
-	return { affectedCount: incompleteRows.length, statements };
+	// memos 側から見つかった id だけを結果に含める。このメモ実装に delete-memo
+	// 機能は無く、対象は必ず collectAffectedMemoIds が直前に返した非アーカイブ
+	// メモの id であるため理屈上は常に全件見つかるが、万一見つからなければ
+	// 「対象から静かに除外する」（呼び出し元は Map.get が undefined を返す
+	// memoId をスキップする）方を選んだ。呼び出し元にとっては
+	// stillActiveMemoIds ガードが除外する「途中でアーカイブされたメモ」と
+	// 同じ扱いになる。
+	const inputs = new Map<string, MemoRecalcInputs>();
+	for (const row of createdAtRows) {
+		inputs.set(row.id, {
+			createdAt: row.createdAt,
+			latestCompleted: latestCompletedMap.get(row.id),
+			incompleteCount: incompleteCountMap.get(row.id) ?? 0
+		});
+	}
+	return inputs;
 }
