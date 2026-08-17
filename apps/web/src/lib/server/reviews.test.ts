@@ -19,6 +19,7 @@ import { ConflictError, NotFoundError } from './errors';
 import { createMemo } from './memos';
 import {
 	completeReview,
+	getCurrentPendingReview,
 	getDueReviewDetail,
 	listDueReviews,
 	listReviewSchedule,
@@ -1146,5 +1147,63 @@ describe('listReviewSchedule', () => {
 		const schedule = await listReviewSchedule(db, memo.id);
 		expect(schedule).toHaveLength(3);
 		expect(schedule.every((row) => row.completedAt !== null)).toBe(true);
+	});
+});
+
+describe('getCurrentPendingReview', () => {
+	it('returns the smallest incomplete step', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24, 72]
+		});
+		const [firstStep] = await db
+			.select()
+			.from(reviews)
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 0)))
+			.all();
+		if (!firstStep) throw new Error('fixture setup failed');
+		await db.update(reviews).set({ completedAt: new Date() }).where(eq(reviews.id, firstStep.id));
+
+		const current = await getCurrentPendingReview(db, memo.id);
+		expect(current?.step).toBe(1);
+	});
+
+	it('returns undefined once every step is completed', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24, 72]
+		});
+		await db.update(reviews).set({ completedAt: new Date() }).where(eq(reviews.memoId, memo.id));
+
+		const current = await getCurrentPendingReview(db, memo.id);
+		expect(current).toBeUndefined();
+	});
+
+	// #82 のデプロイより前に古い updateMemo でプリセットだけが変更され、reviews が
+	// 作り直されていない既存メモを模す: step 0（未完了）の scheduledAt が、
+	// 本来より後の step 1（同じく未完了）の scheduledAt より「遅い」。
+	// min(scheduledAt) で選ぶ実装だと step 1 を誤って「現在の未完了 step」として
+	// 返してしまう（#83 が解消する不整合）。min(step) 相当の判定なら、常に
+	// scheduledAt の大小に関係なく step 0 を返す。
+	it('picks the smallest step even when a later pending step has an earlier scheduledAt', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24, 72]
+		});
+		const now = new Date();
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(now.getTime() + 10_000) })
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 0)));
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(now.getTime() - 10_000) })
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 1)));
+
+		const current = await getCurrentPendingReview(db, memo.id);
+		expect(current?.step).toBe(0);
 	});
 });

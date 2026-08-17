@@ -593,10 +593,39 @@ describe('notifyDueReviews', () => {
 		expect((await reload(step1.id)).notifiedAt).toBeNull();
 	});
 
+	// due 判定を isCurrentPendingReview（#83 で web/scheduler 共有にした述語）の外側で
+	// 行っているため、まだ期限前の最小未完了ステップ（この場合 step0）がある限り、
+	// 期限切れの後続ステップ（step1）を追い越して通知することはない。
+	//
+	// 両ステップとも期限切れの上のフィクスチャでは、due 判定を述語の内側（先に
+	// scheduledAt <= now で絞ってから「より小さい未完了 step が無い」を見る実装）に
+	// 変えても step0 が選ばれ続けるため、この2つの実装を区別できない
+	// （apps/web の reviews.test.ts に対する指摘と同様、テスト網羅性レビューで指摘）。
+	it('期限前の最小未完了 step がある間は、期限到来済みの後続 step を通知しない', async () => {
+		const userId = await createTestUser(db);
+		const presetId = await createPreset(userId);
+		const [memo] = await db
+			.insert(memos)
+			.values({ userId, title: 'memo', content: 'c', intervalPresetId: presetId })
+			.returning();
+		if (!memo) throw new Error('fixture setup failed');
+		// step0（最小の未完了 step）は期限前のまま残し、step1 だけを期限切れにする。
+		const step0 = await addReview(memo.id, 0, { scheduledAt: new Date(Date.now() + 60_000) });
+		const step1 = await addReview(memo.id, 1, { scheduledAt: new Date(Date.now() - 1000) });
+		await addSubscription(userId, 'https://push.example/a');
+
+		const summary = await notifyDueReviews(db, vapid);
+
+		expect(summary.reviewsSelected).toBe(0);
+		expect(sendPush).not.toHaveBeenCalled();
+		expect((await reload(step0.id)).notifiedAt).toBeNull();
+		expect((await reload(step1.id)).notifiedAt).toBeNull();
+	});
+
 	it('step 0 が完了済みなら、期限到来した step 1 が最小未完了 step として選ばれる', async () => {
 		// 実運用で最も普通に起こるケース（1回目の復習を終えた後、2回目が期限到来する）。
-		// minPendingStepSubquery が isNull(completedAt) で絞らずに min(step) を取ると、
-		// 完了済みの step 0 が含まれて minStep が常に 0 に固定され、step 1 が
+		// isCurrentPendingReview が isNull(completedAt) で絞らずに判定すると、
+		// 完了済みの step 0 が「より小さい未完了 step」に数えられず step 1 が
 		// 二度と選ばれなくなる（受入条件・テスト網羅性レビューで指摘）。
 		const userId = await createTestUser(db);
 		const presetId = await createPreset(userId);

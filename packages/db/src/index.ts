@@ -3,6 +3,7 @@ import type { D1Database } from '@cloudflare/workers-types';
 import * as schema from './schema';
 
 export * from './schema';
+export * from './current-reviews';
 export {
 	and,
 	asc,

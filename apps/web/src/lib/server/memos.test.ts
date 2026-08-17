@@ -15,7 +15,7 @@ import {
 	TITLE_MAX_LENGTH,
 	updateMemo
 } from './memos';
-import { completeReview } from './reviews';
+import { completeReview, getCurrentPendingReview } from './reviews';
 import { createTestUser } from './test-helpers';
 
 function statusOf(fn: () => unknown): number {
@@ -756,7 +756,7 @@ describe('listMemosForBrowse', () => {
 		expect(result.items).toEqual([]);
 	});
 
-	it('reports the next scheduled time as the earliest pending review', async () => {
+	it('reports the next scheduled time as the current (smallest incomplete step) pending review', async () => {
 		const memo = await createMemo(db, ownerId, {
 			title: 'title',
 			content: 'c',
@@ -805,6 +805,70 @@ describe('listMemosForBrowse', () => {
 		expect(byId.get(completed.id)?.nextScheduledAt).toBeNull();
 		expect(byId.get(pending.id)?.nextScheduledAt?.getTime()).toBe(
 			pending.createdAt.getTime() + 1 * 60 * 60 * 1000
+		);
+	});
+
+	// #82 のデプロイより前に古い updateMemo でプリセットだけが変更され、reviews が
+	// 作り直されていない既存メモを模す: step 0（未完了）の scheduledAt が、
+	// 本来より後の step 1（同じく未完了）の scheduledAt より「遅い」。
+	// min(scheduledAt) で選ぶ旧実装だと nextScheduledAt が step 1 の時刻になってしまう
+	// （#83 が解消する不整合）。現在の定義（最小未完了 step）なら、常に
+	// scheduledAt の大小に関係なく step 0 の scheduledAt を返す。
+	it('does not let a later pending step with an earlier scheduledAt overtake an earlier step', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24]
+		});
+		const now = new Date();
+		const step0ScheduledAt = new Date(now.getTime() + 10_000);
+		const step1ScheduledAt = new Date(now.getTime() - 10_000);
+		await db
+			.update(reviews)
+			.set({ scheduledAt: step0ScheduledAt })
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 0)));
+		await db
+			.update(reviews)
+			.set({ scheduledAt: step1ScheduledAt })
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 1)));
+
+		const result = await listMemosForBrowse(db, ownerId);
+		expect(result.items[0]?.nextScheduledAt?.getTime()).toBe(step0ScheduledAt.getTime());
+	});
+
+	// メモ一覧（listMemosForBrowse）とメモ詳細（getCurrentPendingReview）が同じ
+	// current pending review を指すことを直接突き合わせる（#83 の受入条件
+	// 「メモ一覧と詳細で同じ次回 review が表示される」）。上と同じ「後続 step の
+	// scheduledAt が前 step より早い」skewed なフィクスチャを使う（両 step とも
+	// 未完了のまま）。未完了行が1件しかないフィクスチャでは min(scheduledAt) 方式
+	// でも min(step) 方式でも同じ行を選んでしまい、両者の乖離を検出できない
+	// （テスト網羅性レビューで指摘）。
+	it('agrees with getCurrentPendingReview on which step is current', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24]
+		});
+		const now = new Date();
+		const step0ScheduledAt = new Date(now.getTime() + 10_000);
+		const step1ScheduledAt = new Date(now.getTime() - 10_000);
+		await db
+			.update(reviews)
+			.set({ scheduledAt: step0ScheduledAt })
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 0)));
+		await db
+			.update(reviews)
+			.set({ scheduledAt: step1ScheduledAt })
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 1)));
+
+		const [browseResult, currentReview] = await Promise.all([
+			listMemosForBrowse(db, ownerId),
+			getCurrentPendingReview(db, memo.id)
+		]);
+
+		expect(currentReview?.step).toBe(0);
+		expect(browseResult.items[0]?.nextScheduledAt?.getTime()).toBe(
+			currentReview?.scheduledAt.getTime()
 		);
 	});
 });
