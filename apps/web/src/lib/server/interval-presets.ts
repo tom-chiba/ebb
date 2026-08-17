@@ -7,19 +7,23 @@ import {
 	isNull,
 	memos,
 	or,
-	reviews,
 	userSettings,
 	type BatchItem,
 	type Db
 } from '@ebb/db';
 import { diffIntervals, parseIntervals, type IntervalDiffEntry } from '@ebb/core';
+import { queryInChunks } from './db-chunk';
 import {
 	ConflictError,
 	isUniqueConstraintViolation,
 	NotFoundError,
 	ValidationError
 } from './errors';
-import { planReviewRecalculation } from './reviews';
+import {
+	buildReviewRecalculationStatements,
+	computeReviewRecalculation,
+	loadReviewRecalculationInputs
+} from './reviews';
 
 // #15/#16 が着地する前の暫定値として #14 で導入された、システム標準プリセットの
 // 固定 slug id。#18 でユーザーが一度も既定プリセットを選んでいない場合の
@@ -213,10 +217,11 @@ async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[
 	return rows.map((row) => row.id);
 }
 
-// planReviewRecalculation が1メモあたりに積む文数の上限（DELETE 1 + INSERT 1）。
-// 実際の文数はこれより少ないことがある（新 intervals の残りステップが0件で
-// INSERT 不要、等）が、プレビューと確定操作を同じ条件で早期拒否するため、両方とも
-// 実際の文数ではなく、この上限値を使った悲観的見積もりで判定する。
+// buildReviewRecalculationStatements（$lib/server/reviews.ts）が1メモあたりに積む
+// 文数の上限（DELETE 1 + INSERT 1）。実際の文数はこれより少ないことがある（新
+// intervals の残りステップが0件で INSERT 不要、等）が、プレビューと確定操作を
+// 同じ条件で早期拒否するため、両方とも実際の文数ではなく、この上限値を使った
+// 悲観的見積もりで判定する。
 const MAX_STATEMENTS_PER_MEMO = 2;
 
 // プレビュー・確定共通のバッチ上限超過エラー。報告の仕方（メッセージ文言・
@@ -237,56 +242,13 @@ function estimateWorstCaseBatchStatementCount(memoCount: number): number {
 	return 1 + memoCount * MAX_STATEMENTS_PER_MEMO;
 }
 
-// D1 は1クエリあたりの bind パラメータ数に上限があり（ローカル実行で実測したところ
-// ちょうど100件で、101件から `too many SQL variables` になる。Cloudflare の
-// ドキュメントが示す上限と一致）、MAX_BATCH_STATEMENTS（500）が許容する最大
-// メモ数（悲観的見積もりで最大249件）はこれを容易に超える。`inArray` にメモ id を
-// まとめて渡す箇所は必ずこの単位でチャンク分割してからクエリを発行する
-// （正確性レビューで指摘。実際に251件規模のテストで生の D1 エラーを再現して確認した）。
-// これは「1クエリの bind パラメータ総数」の上限であり「1つの inArray に渡せる件数」
-// ではない点に注意（設計レビューで指摘）。現状 queryInChunks を使うクエリは
-// inArray 1つだけで他に bind を持たないため一致しているが、条件を追加する際は
-// チャンクサイズも見直すこと。同様に、reviews への1回の INSERT 文
-// （$lib/server/reviews.ts の planReviewRecalculation）が使う bind 数は
-// 「新 intervals の要素数（@ebb/core の MAX_INTERVAL_COUNT が上限）× 1行あたりの
-// カラム数」であり、MAX_INTERVAL_COUNT を将来引き上げる場合はこの上限との関係も
-// 見直す必要がある。
-const D1_MAX_BIND_PARAMS = 100;
-
-function chunk<T>(items: readonly T[], size: number): T[][] {
-	const chunks: T[][] = [];
-	for (let i = 0; i < items.length; i += size) {
-		chunks.push(items.slice(i, i + size));
-	}
-	return chunks;
-}
-
-// `inArray` にまとめて渡す id 一覧を D1_MAX_BIND_PARAMS 単位に分割してクエリを並列
-// 発行し、結果を1つに結合する。空配列なら（chunk が空配列を返すため）そのままクエリ
-// 0件で空配列を返す。countIncompleteReviewsForMemos・updateCustomPresetIntervals
-// 内のアーカイブ再確認の両方が、この同じヘルパー経由でチャンク分割する
-// （設計レビューで指摘、ロジックの重複と分岐の複雑化を避けるため共通化）。
-async function queryInChunks<T, R>(
-	ids: readonly T[],
-	query: (chunkIds: T[]) => Promise<R[]>
-): Promise<R[]> {
-	const results = await Promise.all(chunk(ids, D1_MAX_BIND_PARAMS).map(query));
-	return results.flat();
-}
-
-// 対象メモ群の未完了 reviews 件数。プレビュー（countだけ必要）と実行結果の返り値
-// （updateCustomPresetIntervals、実際に削除された件数の合計）の両方が
-// 「非アーカイブメモの未完了 reviews」という同じ定義を共有するための唯一の実装。
-async function countIncompleteReviewsForMemos(db: Db, memoIds: string[]): Promise<number> {
-	const rows = await queryInChunks(memoIds, (ids) =>
-		db
-			.select({ id: reviews.id })
-			.from(reviews)
-			.where(and(inArray(reviews.memoId, ids), isNull(reviews.completedAt)))
-			.all()
-	);
-	return rows.length;
-}
+// queryInChunks（./db-chunk）のチャンク分割は、D1 の1クエリあたり bind パラメータ数
+// 上限（ローカル実測でちょうど100件、101件から `too many SQL variables`）に対する
+// 対処。MAX_BATCH_STATEMENTS（500）が許容する最大メモ数（悲観的見積もりで最大249件）
+// はこれを容易に超えるため、updateCustomPresetIntervals 内のアーカイブ再確認・
+// $lib/server/reviews.ts の loadReviewRecalculationInputs（#84 で一括取得に変更した
+// 際に追加）の両方がこのヘルパー経由でチャンク分割する（#18 の正確性レビューで
+// 指摘。実際に251件規模のテストで生の D1 エラーを再現して確認した）。
 
 // プリセット編集画面（#63）の「このプリセットを使っているメモ」一覧・削除ボタンの
 // 活性判定に使う。deleteCustomPreset の使用中判定と同じく、アーカイブ済みメモも
@@ -326,10 +288,23 @@ export async function previewPresetIntervalsUpdate(
 
 	const memoIds = await collectAffectedMemoIds(db, presetId);
 	assertWithinBatchStatementLimit(estimateWorstCaseBatchStatementCount(memoIds.length));
-	return {
-		previewCount: await countIncompleteReviewsForMemos(db, memoIds),
-		diff: diffIntervals(owned.intervals, intervals)
-	};
+
+	// #84: 対象メモ1件ずつ SELECT する代わりに、対象メモ数に依らない一括取得
+	// （loadReviewRecalculationInputs）＋ DB アクセスなしの純粋関数
+	// （computeReviewRecalculation）で件数を積み上げる。この集計・計画生成ロジックは
+	// updateCustomPresetIntervals（確定側）と全く同じものを使う。
+	const inputs = await loadReviewRecalculationInputs(db, memoIds);
+	let previewCount = 0;
+	for (const memoId of memoIds) {
+		const input = inputs.get(memoId);
+		// collectAffectedMemoIds が返した直後に見つからなくなるのは
+		// loadReviewRecalculationInputs のコメントに記した通り理屈上は起こらないが、
+		// 起きた場合は確定側（stillActiveMemoIds ガード）と同じく対象から除外する。
+		if (!input) continue;
+		previewCount += computeReviewRecalculation(memoId, input, intervals).affectedCount;
+	}
+
+	return { previewCount, diff: diffIntervals(owned.intervals, intervals) };
 }
 
 export async function updateCustomPresetIntervals(
@@ -342,22 +317,35 @@ export async function updateCustomPresetIntervals(
 	const intervals = parseIntervalsOrValidationError(rawIntervals);
 
 	const memoIds = await collectAffectedMemoIds(db, presetId);
-	// プレビューと同じ悲観的見積もりで、メモごとの再計算プランを作る前に拒否する。
-	// これが無いと、UIの確認フローを迂回して
-	// confirmed=true を直接POSTした場合に、大量メモ分の planReviewRecalculation
-	// （1メモあたりSELECT3回）とアーカイブ再確認クエリを全て実行してから最後に
-	// 拒否することになり、MAX_BATCH_STATEMENTS を設けた本来の目的（CPU時間の安全弁）
-	// を実行系では部分的にしか達成できていなかった（設計レビューで指摘）。
+	// プレビューと同じ悲観的見積もりで、対象メモの再計算プランを取得する前に拒否する。
+	// これが無いと、UIの確認フローを迂回して confirmed=true を直接POSTした場合に、
+	// 大量メモ分の loadReviewRecalculationInputs とアーカイブ再確認クエリを全て
+	// 実行してから最後に拒否することになり、MAX_BATCH_STATEMENTS を設けた本来の
+	// 目的（CPU時間の安全弁）を実行系では部分的にしか達成できていなかった
+	// （#18 の設計レビューで指摘）。
 	assertWithinBatchStatementLimit(estimateWorstCaseBatchStatementCount(memoIds.length));
+
+	// #84: 対象メモ1件につき3 SELECT（memo作成日時・最新の完了済みstep・未完了件数）を
+	// 発行していた旧実装（メモ数に比例してクエリが増える）を、対象メモ数に依らない
+	// 一括取得（loadReviewRecalculationInputs）＋ DB アクセスなしの純粋関数
+	// （computeReviewRecalculation）に置き換えた。previewPresetIntervalsUpdate と
+	// 全く同じ集計・計画生成ロジックを使う。
 	// memoId と plan を最初からペアで持ち回ることで、後段のフィルタが2つの並行配列を
 	// index で対応付ける必要をなくす（設計レビューで指摘。index対応付けだと
 	// 「memoIds と plans が同じ順序・同じ長さ」という別の不変条件に暗黙に依存してしまう）。
-	const memoPlans = await Promise.all(
-		memoIds.map(async (memoId) => ({
-			memoId,
-			plan: await planReviewRecalculation(db, memoId, intervals)
-		}))
-	);
+	const inputs = await loadReviewRecalculationInputs(db, memoIds);
+	const memoPlans = memoIds
+		.map((memoId) => {
+			const input = inputs.get(memoId);
+			// loadReviewRecalculationInputs のコメントの通り理屈上は起こらないが、
+			// 起きた場合は後段の stillActiveMemoIds ガードと同じく対象から除外する。
+			if (!input) return undefined;
+			return { memoId, plan: computeReviewRecalculation(memoId, input, intervals) };
+		})
+		.filter(
+			(entry): entry is { memoId: string; plan: ReturnType<typeof computeReviewRecalculation> } =>
+				entry !== undefined
+		);
 
 	// collectAffectedMemoIds の SELECT から db.batch() 確定までの間に、対象メモの
 	// いずれかが別リクエストの archiveMemo によりアーカイブされていた場合、そのメモの
@@ -379,10 +367,10 @@ export async function updateCustomPresetIntervals(
 			)
 		).map((row) => row.id)
 	);
-	const activePlans = memoPlans
-		.filter(({ memoId }) => stillActiveMemoIds.has(memoId))
-		.map(({ plan }) => plan);
-	const activeStatements = activePlans.flatMap((plan) => plan.statements);
+	const activePlans = memoPlans.filter(({ memoId }) => stillActiveMemoIds.has(memoId));
+	const activeStatements = activePlans.flatMap(({ memoId, plan }) =>
+		buildReviewRecalculationStatements(db, memoId, plan.newRows)
+	);
 
 	const updatePresetStatement = db
 		.update(intervalPresets)
@@ -404,7 +392,7 @@ export async function updateCustomPresetIntervals(
 	try {
 		await db.batch(statements);
 	} catch (err) {
-		// planReviewRecalculation の SELECT（completedCount・未完了行の読み取り）と
+		// loadReviewRecalculationInputs の一括 SELECT（completedCount・未完了件数の読み取り）と
 		// この db.batch() 実行の間に、対象メモのいずれかで別リクエストの completeReview
 		// が割り込むと、そこで計算した完了済みステップ数が古くなり、新しい INSERT が
 		// 既に完了済みの step 番号と衝突して reviews_memoId_step_unique に違反しうる
@@ -426,7 +414,7 @@ export async function updateCustomPresetIntervals(
 	// されて対象から外れたメモ（activePlans に含まれない）分は実際には再計算していない
 	// ため、ここでも含めない。
 	return {
-		updatedReviewsCount: activePlans.reduce((sum, plan) => sum + plan.affectedCount, 0)
+		updatedReviewsCount: activePlans.reduce((sum, { plan }) => sum + plan.affectedCount, 0)
 	};
 }
 
