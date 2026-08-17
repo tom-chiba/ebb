@@ -2319,6 +2319,19 @@ MemoRecalcInputs>` を返し、見つからなかった memoId は含めない�
     `review_schedules` 行（`version = 0`）も作るため、このテーブルは
     メモと常に1:1で存在する前提が成立する（delete-memo 機能が無いことに
     も依存する）。
+  - **この1:1の前提には、migrate（新テーブル作成）から deploy（新しい
+    `createMemo` への切り替え）が完了するまでの短い window（#7 節: この
+    順序前提）という穴が残る**（正確性レビューで指摘）。この window に
+    旧バージョンのコードで作られたメモは `review_schedules` 行を持たない。
+    治癒しないまま version だけを 0 にフォールバックすると、以後の claim の
+    bump 文（`WHERE memo_id = ? AND version = 0`）が対象行の不在によって
+    恒久的に0件のままになり、そのメモの review 完了・プリセット変更が
+    「一度だけ失敗する」ではなく永久に失敗し続けてしまう。`ensureReviewsExist`
+    （memos.ts、#16 の reviews 欠落治癒）と同じ考え方で、`completeReview`・
+    `planReviewRecalculation`・`loadReviewRecalculationInputs` の各読み取り
+    箇所に `ensureReviewScheduleExists`（`version = 0` で `onConflictDoNothing`
+    INSERT）を追加し、行が見つからなかった時点で治癒してから version 0 として
+    扱うようにした。
 
 - **不変条件**:「reviews への書き込み経路は、同じ論理操作内で
   `review_schedules.version` の CAS に勝った場合のみ書き込む」。これを
@@ -2386,6 +2399,15 @@ MemoRecalcInputs>` を返し、見つからなかった memoId は含めない�
     - claim に負けたメモを再確認するための別クエリ（旧 `stillActiveMemoIds`）
       は、claim 自身のガードが対象メモの `archivedAt` を直接見るようになった
       ことで不要になった（advisor 指摘）。
+    - **claim の結果配列を読む際、DELETE 文をまとめて先に積み、bump 文をまとめて
+      後に積む形にした**（初版は `[DELETE, bump]` のペアを `flatMap` で交互に
+      積み、`claimResults[i * 2 + 1]` という暗黙のストライドで bump 結果を
+      読んでいたが、積む側・読む側の2箇所に同じレイアウト知識が分散する
+      設計になっていた。設計レビューで指摘）。bump 文は `.returning({ memoId })`
+      で自分の memoId 自身を返すため、結果を読む側は位置ではなく返ってきた
+      memoId の値から勝者集合を作れる。各メモの DELETE が自分の bump より先に
+      実行される必要があるが、メモ同士は独立な行を操作するため「全 DELETE →
+      全 bump」の順序に変えても各メモの整合性は保たれる。
 
 - **`isUniqueConstraintViolation` による 409 変換は backstop として残した**が、
   主たる検出手段ではなくなった。claim に勝った直後・INSERT 実行前のごく狭い窓

@@ -1672,6 +1672,53 @@ describe('archiveMemo', () => {
 		expect(rows[0]?.step).toBe(0);
 		expect(rows[0]?.completedAt).not.toBeNull();
 	});
+
+	// Issue #85 の回帰テスト（テスト網羅性レビューで指摘）: アーカイブとの競合は
+	// interval-presets.test.ts の bulk 経路（updateCustomPresetIntervals、
+	// loadReviewRecalculationInputs 呼び出し自体を横取りしてバージョン取得より前に
+	// アーカイブを割り込ませる形）でしか検証されていなかった。単一メモ経路
+	// （changeMemoPreset）でも、planReviewRecalculation の SELECT 後・claim 実行前に
+	// アーカイブされた場合、claim が正しく敗れて ConflictError になることを確認する
+	// （この経路では archiveMemo 自身が review_schedules.version も進めるため、
+	// version 不一致としても検出されるが、claim 自身の archivedAt チェックが
+	// version の一致だけに依存しない独立した安全策になっていることの回帰でもある）。
+	it('rejects a changeMemoPreset claim if the memo gets archived between the plan read and the claim', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'm',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24]
+		});
+		const [targetPreset] = await db
+			.insert(intervalPresets)
+			.values({ userId: ownerId, name: 'target', intervals: [2, 5] })
+			.returning();
+		if (!targetPreset) throw new Error('fixture setup failed');
+
+		const originalBatch = db.batch.bind(db);
+		const batchSpy = vi
+			.spyOn(db, 'batch')
+			.mockImplementationOnce(async (queries: Parameters<typeof originalBatch>[0]) => {
+				// changeMemoPreset の 1) memo UPDATE・planReviewRecalculation の SELECT
+				// はこの時点で完了済み。ここでこのメモをアーカイブする。
+				await archiveMemo(db, ownerId, memo.id);
+				return originalBatch(queries);
+			});
+
+		try {
+			await expect(
+				changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+					intervalPresetId: targetPreset.id
+				})
+			).rejects.toThrow(ConflictError);
+		} finally {
+			batchSpy.mockRestore();
+		}
+
+		// アーカイブ済みメモに未完了 reviews が復活していない
+		// （claim の DELETE は素通りしても、INSERT 自体が実行されない）。
+		const rows = await db.select().from(reviews).where(eq(reviews.memoId, memo.id)).all();
+		expect(rows).toHaveLength(0);
+	});
 });
 
 describe('handleDomainError', () => {

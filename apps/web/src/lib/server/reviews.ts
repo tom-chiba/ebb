@@ -280,11 +280,25 @@ export async function getDueReviewDetail(
 	};
 }
 
+// review_schedules は createMemo が memos・reviews と同じ db.batch() で必ず作るため
+// 通常はメモと1:1で存在するが、migrate（新テーブル作成）から deploy（新しい
+// createMemo への切り替え）が完了するまでの短い window（docs/design-decisions.md の
+// #7 節: この順序前提）に、旧バージョンのコードで作られたメモは review_schedules
+// 行を持たない。ensureReviewsExist（memos.ts、#16 の reviews 欠落治癒と同じ形）に
+// 倣い、行が見つからなかった場合はここで治癒する。治癒しないと、この後の claim の
+// bump 文（`WHERE memo_id = ? AND version = 0`）が対象行の不在によって恒久的に
+// 0件のままになり、対象メモの review 完了・プリセット変更が永久に失敗し続ける
+// （advisor 指摘、実機の D1 エラーではなく静的レビューで発見）。
+async function ensureReviewScheduleExists(db: Db, memoId: string): Promise<void> {
+	await db.insert(reviewSchedules).values({ memoId, version: 0 }).onConflictDoNothing();
+}
+
 export async function completeReview(db: Db, userId: string, id: string): Promise<CompletedReview> {
 	const requestedAt = new Date();
 	// reviews 自体は userId を持たないため、所有権の確認は memos との JOIN で行う。
 	// scheduleVersion は Issue #85 の楽観ロック用（下記 wonThisCompletion・
-	// scheduleVersionMatches の説明を参照）。
+	// scheduleVersionMatches の説明を参照）。review_schedules 行が無いメモを
+	// 対象から除外しないよう leftJoin にする（ensureReviewScheduleExists 参照）。
 	const rows = await db
 		.select({
 			id: reviews.id,
@@ -297,7 +311,7 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 		})
 		.from(reviews)
 		.innerJoin(memos, eq(reviews.memoId, memos.id))
-		.innerJoin(reviewSchedules, eq(reviewSchedules.memoId, memos.id))
+		.leftJoin(reviewSchedules, eq(reviewSchedules.memoId, memos.id))
 		.where(
 			and(
 				eq(reviews.id, id),
@@ -311,6 +325,11 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 	const target = rows[0];
 	if (!target) throw new NotFoundError('review not found');
 	if (target.completedAt !== null) throw new ConflictError('review has already been completed');
+
+	if (target.scheduleVersion === null) {
+		await ensureReviewScheduleExists(db, target.memoId);
+	}
+	const scheduleVersion = target.scheduleVersion ?? 0;
 
 	await assertIsCurrentStep(db, target.memoId, target.step);
 
@@ -355,7 +374,7 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 	// 同じ形で更新する、下記 reviewScheduleVersionMatches を参照）が割り込んだ場合。
 	// completeCurrent の WHERE に含めることで、古いスナップショット（旧 intervals・
 	// 旧 step 構成）を前提にした完了・再アンカリングがコミットされることを防ぐ。
-	const scheduleVersionMatches = reviewScheduleVersionMatches(db, target.memoId, target.scheduleVersion);
+	const scheduleVersionMatches = reviewScheduleVersionMatches(db, target.memoId, scheduleVersion);
 
 	// #82 以降 changeMemoPreset は intervalPresetId の変更と reviews の作り直しを
 	// 同じ db.batch() で行うため、通常この reviews のステップ数は現在のプリセットの
@@ -658,11 +677,17 @@ export async function planReviewRecalculation(
 		.where(eq(reviewSchedules.memoId, memoId))
 		.limit(1)
 		.all();
-	// createMemo とマイグレーションのバックフィルにより review_schedules 行はメモと
-	// 1:1 で常に存在する（このアプリに delete-memo 機能は無い）ため、通常
-	// scheduleRows[0] は必ず存在するが、その前提が崩れた場合でも安全側
-	// （claim が version 不一致で必ず負ける 0）に倒す。
-	const expectedVersion = scheduleRows[0]?.version ?? 0;
+	// createMemo とマイグレーションのバックフィルにより review_schedules 行は通常
+	// メモと1:1で存在するが、その前提が崩れた場合（ensureReviewScheduleExists の
+	// コメントを参照）は治癒してから version 0 として扱う。治癒しないまま
+	// expectedVersion だけを 0 にフォールバックすると、後続の claim の bump 文
+	// （`WHERE memo_id = ? AND version = 0`）が対象行の不在によって恒久的に
+	// 0件のままになり、このメモの再計算が永久に失敗し続ける。
+	const scheduleRow = scheduleRows[0];
+	if (!scheduleRow) {
+		await ensureReviewScheduleExists(db, memoId);
+	}
+	const expectedVersion = scheduleRow?.version ?? 0;
 
 	const latestCompletedRows = await db
 		.select({ step: reviews.step, completedAt: reviews.completedAt })
@@ -699,10 +724,11 @@ export async function planReviewRecalculation(
 }
 
 // updateCustomPresetIntervals・previewPresetIntervalsUpdate（#84）向け。対象メモ数に
-// 依らず常に3クエリ集合（チャンク分割込み）で完了する点が、1メモにつき3 SELECT を
-// 発行する planReviewRecalculation との違い。戻り値の Map は対象メモ数より少ない
-// ことがある（後述）ため、呼び出し側は memoIds の各要素に対して `.get(memoId)` が
-// undefined になり得ることを前提にする。
+// 依らず常に一定数のクエリ集合（チャンク分割込み。#84 時点は3、Issue #85 で
+// version 取得を追加し4）で完了する点が、1メモにつき3 SELECT を発行する
+// planReviewRecalculation との違い。戻り値の Map は対象メモ数より少ないことがある
+// （後述）ため、呼び出し側は memoIds の各要素に対して `.get(memoId)` が undefined に
+// なり得ることを前提にする。
 export async function loadReviewRecalculationInputs(
 	db: Db,
 	memoIds: readonly string[]
@@ -763,6 +789,23 @@ export async function loadReviewRecalculationInputs(
 	const incompleteCountMap = new Map(incompleteCountRows.map((row) => [row.memoId, row.count]));
 	const versionMap = new Map(scheduleVersionRows.map((row) => [row.memoId, row.version]));
 
+	// review_schedules 行が無いメモ（ensureReviewScheduleExists のコメントを参照）を
+	// ここで治癒する。治癒しないまま version だけを 0 にフォールバックすると、
+	// 後続の claim の bump 文が対象行の不在によって恒久的に0件のままになり、
+	// このメモの再計算が永久に失敗し続ける。
+	const missingScheduleMemoIds = createdAtRows
+		.map((row) => row.id)
+		.filter((id) => !versionMap.has(id));
+	if (missingScheduleMemoIds.length > 0) {
+		await queryInChunks(missingScheduleMemoIds, async (ids) => {
+			await db
+				.insert(reviewSchedules)
+				.values(ids.map((memoId) => ({ memoId, version: 0 })))
+				.onConflictDoNothing();
+			return [];
+		});
+	}
+
 	// memos 側から見つかった id だけを結果に含める。このメモ実装に delete-memo
 	// 機能は無く、対象は必ず collectAffectedMemoIds が直前に返した非アーカイブ
 	// メモの id であるため理屈上は常に全件見つかるが、万一見つからなければ
@@ -771,9 +814,6 @@ export async function loadReviewRecalculationInputs(
 	// 除外する「途中でアーカイブ・変更されたメモ」と同じ扱いになる。
 	const inputs = new Map<string, MemoRecalcInputs>();
 	for (const row of createdAtRows) {
-		// review_schedules 行はメモと1:1で常に存在する（createMemo・マイグレーションの
-		// バックフィル）。万一見つからない場合も、存在しないバージョン値を使えば
-		// claim は必ず版不一致で負けるだけなので、0 にフォールバックして安全側に倒す。
 		inputs.set(row.id, {
 			createdAt: row.createdAt,
 			latestCompleted: latestCompletedMap.get(row.id),

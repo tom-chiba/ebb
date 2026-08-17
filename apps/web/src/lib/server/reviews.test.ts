@@ -10,6 +10,7 @@ import {
 	isNull,
 	memos,
 	reviews,
+	reviewSchedules,
 	sql,
 	type Db
 } from '@ebb/db';
@@ -17,6 +18,7 @@ import { nextReviewAt } from '@ebb/core';
 import { ConflictError, NotFoundError } from './errors';
 import { createMemo } from './memos';
 import {
+	claimReviewSchedule,
 	completeReview,
 	commitReviewRecalculation,
 	computeReviewRecalculation,
@@ -790,6 +792,58 @@ describe('completeReview', () => {
 		expect(listAfter.total).toBe(1);
 		expect(listAfter.items[0]?.step).toBe(1);
 	});
+
+	// Issue #85 の回帰テスト（テスト網羅性レビューで指摘）: interval-presets.test.ts・
+	// memos.test.ts の既存競合テストはいずれも「completeReview が先に割り込んで
+	// プリセット変更側の claim を負けさせる」方向のみを検証していた。逆方向
+	// （プリセット変更側の claim が先に成立し、completeReview の書き込みが古い
+	// version を前提にしたまま実行される）も同じ ConflictError になることを確認する。
+	it('rejects completion when a concurrent claim (e.g. a preset change) advances the schedule version first', async () => {
+		const { memo, due } = await createDueReview(ownerId, ownerPresetId);
+
+		const originalBatch = db.batch.bind(db);
+		const batchSpy = vi
+			.spyOn(db, 'batch')
+			.mockImplementationOnce(async (queries: Parameters<typeof originalBatch>[0]) => {
+				// completeReview の冒頭 SELECT（scheduleVersion=0 の取得）はこの時点で
+				// 完了済み。ここで別リクエストの claim（プリセット変更等）を先に成立させ、
+				// version を進める（新規メモの初期 version は必ず0）。
+				const won = await claimReviewSchedule(db, memo.id, 0);
+				if (!won) throw new Error('fixture setup failed: claim should win on a fresh memo');
+				return originalBatch(queries);
+			});
+
+		try {
+			await expect(completeReview(db, ownerId, due.id)).rejects.toThrow(ConflictError);
+		} finally {
+			batchSpy.mockRestore();
+		}
+
+		// completeReview 自身の書き込み（completedAt）はコミットされていない
+		// （割り込んだ claim の DELETE で対象行自体が既に削除されているため、
+		// そもそも見つからない）。
+		const rows = await db.select().from(reviews).where(eq(reviews.id, due.id)).all();
+		expect(rows).toHaveLength(0);
+	});
+
+	// Issue #85 の回帰テスト（正確性レビューで指摘）: review_schedules 行が無い
+	// メモ（migrate〜deploy window の既存データを想定）でも、completeReview が
+	// 恒久的に NotFoundError になったりせず、治癒（ensureReviewScheduleExists）の
+	// 上で通常どおり完了できることを確認する。
+	it('heals a memo missing its review_schedules row before completing it', async () => {
+		const { memo, due } = await createDueReview(ownerId, ownerPresetId);
+		await db.delete(reviewSchedules).where(eq(reviewSchedules.memoId, memo.id));
+
+		const result = await completeReview(db, ownerId, due.id);
+		expect(result.memoId).toBe(memo.id);
+
+		const [healedRow] = await db
+			.select({ version: reviewSchedules.version })
+			.from(reviewSchedules)
+			.where(eq(reviewSchedules.memoId, memo.id))
+			.all();
+		expect(healedRow?.version).toBe(1);
+	});
 });
 
 describe('getDueReviewDetail', () => {
@@ -1097,6 +1151,45 @@ describe('planReviewRecalculation', () => {
 			.all();
 		expect(rows.map((r) => r.step)).toEqual([0, 1, 2]);
 		expect(rows.filter((r) => r.completedAt === null)).toHaveLength(2);
+	});
+
+	// Issue #85 の回帰テスト（正確性レビューで指摘）: migrate 完了〜deploy 完了までの
+	// 短い window（docs/design-decisions.md #7 節）に旧バージョンの createMemo で
+	// 作られたメモは review_schedules 行を持たない。ここではそれを直接
+	// db.delete() で再現し、治癒（ensureReviewScheduleExists）が働いて
+	// 恒久的な失敗にならないことを確認する。
+	it('heals a memo missing its review_schedules row (pre-#85 data) instead of failing forever', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'memo', // intervals: [1, 24, 72]
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await db.delete(reviewSchedules).where(eq(reviewSchedules.memoId, memo.id));
+
+		const plan = await planReviewRecalculation(db, memo.id, [1, 6, 24]);
+		expect(plan.expectedVersion).toBe(0);
+		await commitReviewRecalculation(db, memo.id, plan);
+
+		// 治癒された行に対して version=0 で claim が成立し、以後の再計算も
+		// 通常どおり version=1 を前提に動作する（恒久的な ConflictError にならない）。
+		const [healedRow] = await db
+			.select({ version: reviewSchedules.version })
+			.from(reviewSchedules)
+			.where(eq(reviewSchedules.memoId, memo.id))
+			.all();
+		expect(healedRow?.version).toBe(1);
+
+		const nextPlan = await planReviewRecalculation(db, memo.id, [2, 5]);
+		expect(nextPlan.expectedVersion).toBe(1);
+		await commitReviewRecalculation(db, memo.id, nextPlan);
+
+		const rows = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(rows).toHaveLength(2);
 	});
 });
 

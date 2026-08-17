@@ -366,28 +366,34 @@ export async function updateCustomPresetIntervals(
 	// 割り込んでいない）memo のみが「勝つ」。claim 自身のガードが対象メモの
 	// archivedAt を直接見るため、旧実装が別クエリで行っていた「batch 実行直前の
 	// アーカイブ再確認」（stillActiveMemoIds）は不要になった（advisor 指摘）。
-	// bump 文の .returning() で勝敗を判定するため、DELETE 側の結果は使わない。
+	// DELETE 文をまとめて先に積み、bump 文をまとめて後に積む（各メモの DELETE は
+	// 必ず自分の bump より先に実行される必要があるが、メモ同士は独立な行を操作する
+	// ため互いの順序は問わない）。bump は .returning({ memoId }) で「勝った」memoId
+	// 自身を返すため、結果を読む側は「何番目が誰の bump か」という位置の知識を
+	// 持たずに済む（設計レビューで指摘: 以前は flatMap で [delete, bump] を交互に
+	// 積み、`claimResults[i * 2 + 1]` という暗黙のストライドで bump 結果を読んでおり、
+	// 積む側・読む側の2箇所に同じレイアウト知識が分散していた）。
 	const claimPairs = memoPlans.map(({ memoId, expectedVersion }) => ({
 		memoId,
 		...buildReviewScheduleClaimStatements(db, memoId, expectedVersion)
 	}));
 	const wonMemoIds = new Set<string>();
 	if (claimPairs.length > 0) {
-		const claimStatements = claimPairs.flatMap(({ deleteStatement, bumpStatement }) => [
-			deleteStatement,
-			bumpStatement
-		]);
+		const claimStatements = [
+			...claimPairs.map(({ deleteStatement }) => deleteStatement),
+			...claimPairs.map(({ bumpStatement }) => bumpStatement)
+		];
 		// db.batch は静的に非空とわかるタプル型を要求する（#17 の completeReview と同じ
 		// 理由）。claimPairs.length > 0 のガードにより実行時には常に1件以上になるが、
-		// flatMap の戻り値は配列型のままでタプル型と直接オーバーラップしないため、
+		// 配列の展開は配列型のままでタプル型と直接オーバーラップしないため、
 		// unknown 経由でキャストする。
 		const claimResults = await db.batch(
 			claimStatements as unknown as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]
 		);
-		claimPairs.forEach(({ memoId }, i) => {
-			const bumpResult = claimResults[i * 2 + 1];
-			if (Array.isArray(bumpResult) && bumpResult.length > 0) wonMemoIds.add(memoId);
-		});
+		const bumpResults = claimResults.slice(claimPairs.length) as { memoId: string }[][];
+		for (const wonMemoId of bumpResults.flat().map((row) => row.memoId)) {
+			wonMemoIds.add(wonMemoId);
+		}
 	}
 	const wonPlans = memoPlans.filter(({ memoId }) => wonMemoIds.has(memoId));
 

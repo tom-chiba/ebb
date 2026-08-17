@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDb, eq, intervalPresets, reviews, userSettings, type Db } from '@ebb/db';
+import { createDb, eq, intervalPresets, reviews, reviewSchedules, userSettings, type Db } from '@ebb/db';
 import { ConflictError, NotFoundError, ValidationError } from './errors';
 import {
 	createCustomPreset,
@@ -613,6 +613,49 @@ describe('updateCustomPresetIntervals', () => {
 			.where(eq(reviews.memoId, getsArchivedMidFlight.id))
 			.all();
 		expect(archivedRows).toHaveLength(0);
+	});
+
+	// Issue #85 の回帰テスト（正確性レビューで指摘）: migrate〜deploy window の
+	// 既存データを想定し、対象メモの一部が review_schedules 行を持たない状態でも、
+	// 一括更新（bulk 経路）が恒久的に失敗せず治癒して成功することを確認する。
+	it('heals memos missing their review_schedules row (pre-#85 data) instead of excluding them forever', async () => {
+		const withSchedule = await createMemo(db, ownerId, {
+			title: 'with-schedule',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24, 72]
+		});
+		const missingSchedule = await createMemo(db, ownerId, {
+			title: 'missing-schedule',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await db.delete(reviewSchedules).where(eq(reviewSchedules.memoId, missingSchedule.id));
+
+		const { updatedReviewsCount } = await updateCustomPresetIntervals(
+			db,
+			ownerId,
+			ownerPresetId,
+			'2h, 5h'
+		);
+		// 両メモとも元の3ステップ全てが未完了だったため合計6件。
+		expect(updatedReviewsCount).toBe(6);
+
+		for (const memo of [withSchedule, missingSchedule]) {
+			const rows = await db
+				.select()
+				.from(reviews)
+				.where(eq(reviews.memoId, memo.id))
+				.orderBy(reviews.step)
+				.all();
+			expect(rows).toHaveLength(2);
+		}
+
+		const [healedRow] = await db
+			.select({ version: reviewSchedules.version })
+			.from(reviewSchedules)
+			.where(eq(reviewSchedules.memoId, missingSchedule.id))
+			.all();
+		expect(healedRow?.version).toBe(1);
 	});
 });
 
