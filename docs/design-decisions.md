@@ -2244,7 +2244,7 @@ Date()` という各呼び出し固有の値を使うのに対し、ユーザー
     `previewPresetIntervalsUpdate`（#84 で追加）向けの新しい一括取得経路。対象
     メモ数に依らず常に3クエリ集合（`memos` の作成日時・完了済み `reviews`・
     未完了件数の GROUP BY、いずれもチャンク分割込み）で完了する。`Map<memoId,
-    MemoRecalcInputs>` を返し、見つからなかった memoId は含めない（後述）。
+MemoRecalcInputs>` を返し、見つからなかった memoId は含めない（後述）。
 
 - **プレビューと確定処理が同じ集計・計画生成ロジックを共有する**（受入条件）。
   両者とも `collectAffectedMemoIds` → `assertWithinBatchStatementLimit`
