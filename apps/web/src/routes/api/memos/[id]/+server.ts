@@ -1,7 +1,7 @@
 import { error, json } from '@sveltejs/kit';
 import { requireAuthedDb, requireJsonContentType } from '$lib/server/api';
 import { handleDomainError } from '$lib/server/errors';
-import { archiveMemo, getMemo, updateMemo } from '$lib/server/memos';
+import { archiveMemo, changeMemoPreset, getMemo, updateMemo } from '$lib/server/memos';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async ({ locals, platform, params }) => {
@@ -48,7 +48,21 @@ export const PATCH: RequestHandler = async ({ locals, platform, params, request 
 
 	try {
 		const { expectedUpdatedAt, ...input } = body;
-		const memo = await updateMemo(db, user.id, params.id, expectedUpdatedAt, input);
+		// intervalPresetId が含まれるリクエストのみ changeMemoPreset（プリセット変更、
+		// reviews の再計算を伴う）に回す。省略された場合は updateMemo（title/content
+		// のみ、reviews には一切触れない）のまま（#82、プリセット変更を通常の
+		// メモ更新から分離する設計）。
+		const memo =
+			input.intervalPresetId !== undefined
+				? await changeMemoPreset(db, user.id, params.id, expectedUpdatedAt, {
+						title: input.title,
+						content: input.content,
+						intervalPresetId: input.intervalPresetId
+					})
+				: await updateMemo(db, user.id, params.id, expectedUpdatedAt, {
+						title: input.title,
+						content: input.content
+					});
 		return json(memo);
 	} catch (err) {
 		handleDomainError(err);

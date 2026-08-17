@@ -1,10 +1,12 @@
 import { isHttpError } from '@sveltejs/kit';
 import { env } from 'cloudflare:test';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { and, createDb, eq, intervalPresets, memos, reviews, user, type Db } from '@ebb/db';
+import { nextReviewAt } from '@ebb/core';
 import { ConflictError, handleDomainError, NotFoundError, ValidationError } from './errors';
 import {
 	archiveMemo,
+	changeMemoPreset,
 	CONTENT_MAX_LENGTH,
 	createMemo,
 	getMemo,
@@ -13,6 +15,7 @@ import {
 	TITLE_MAX_LENGTH,
 	updateMemo
 } from './memos';
+import { completeReview } from './reviews';
 import { createTestUser } from './test-helpers';
 
 function statusOf(fn: () => unknown): number {
@@ -940,21 +943,9 @@ describe('updateMemo', () => {
 		);
 	});
 
-	it('rejects switching to a preset owned by another user', async () => {
-		const memo = await createMemo(db, ownerId, {
-			title: 'title',
-			content: 'content',
-			intervalPresetId: ownerPresetId
-		});
-		await expect(
-			updateMemo(db, ownerId, memo.id, memo.updatedAt, { intervalPresetId: otherUserPresetId })
-		).rejects.toThrow(ValidationError);
-	});
-
-	// reviews の再計算（未完了行を削除して新しい intervals から作り直す）は #18 の責務であり、
-	// #16 のスコープには含めない（docs/design-decisions.md 参照）。intervalPresetId を
-	// 変更しても、作成時に生成された reviews がそのまま残ることを確認する。
-	it('does not touch existing reviews when intervalPresetId changes', async () => {
+	// intervalPresetId の変更は changeMemoPreset の責務に分離されている（#82）。
+	// updateMemo は title/content だけを受け付け、reviews には一切触れないことを確認する。
+	it('does not touch existing reviews when updateMemo changes title/content only', async () => {
 		const memo = await createMemo(db, ownerId, {
 			title: 'title',
 			content: 'content',
@@ -968,11 +959,10 @@ describe('updateMemo', () => {
 			.all();
 
 		const updated = await updateMemo(db, ownerId, memo.id, memo.updatedAt, {
-			intervalPresetId: systemPresetId // intervals: [1, 6, 24]
+			title: 'new title',
+			content: 'new content'
 		});
-		// intervalPresetId が実際に変更されたことを確認した上で、それでも reviews が
-		// 変化しないことを検証する（更新自体が無視された結果ではないことの担保）。
-		expect(updated.intervalPresetId).toBe(systemPresetId);
+		expect(updated.intervalPresetId).toBe(ownerPresetId);
 
 		const after = await db
 			.select()
@@ -1030,6 +1020,413 @@ describe('updateMemo', () => {
 		await expect(updateMemo(db, ownerId, memo.id, memo.updatedAt, { title: '  ' })).rejects.toThrow(
 			NotFoundError
 		);
+	});
+});
+
+describe('changeMemoPreset', () => {
+	it('rejects switching to a preset owned by another user', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		await expect(
+			changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+				intervalPresetId: otherUserPresetId
+			})
+		).rejects.toThrow(ValidationError);
+	});
+
+	it('rejects switching to a preset with no intervals', async () => {
+		const [emptyPreset] = await db
+			.insert(intervalPresets)
+			.values({ userId: ownerId, name: 'empty', intervals: [] })
+			.returning();
+		if (!emptyPreset) throw new Error('fixture setup failed');
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		await expect(
+			changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, { intervalPresetId: emptyPreset.id })
+		).rejects.toThrow(ValidationError);
+	});
+
+	// #82 の核心: プリセット変更で未完了 reviews が新しい intervals に基づいて
+	// 再計算されること、完了済み reviews は保持されることを確認する。
+	it('recalculates incomplete reviews based on the new preset and preserves completed reviews', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId // intervals: [1, 24]
+		});
+		// step 0 を完了済みにしておく（完了済み行は再計算の対象外であることの検証用）。
+		const completedAt = new Date(memo.createdAt.getTime() + 1000);
+		await db
+			.update(reviews)
+			.set({ completedAt })
+			.where(and(eq(reviews.memoId, memo.id), eq(reviews.step, 0)));
+
+		const updated = await changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+			intervalPresetId: systemPresetId // intervals: [1, 6, 24]
+		});
+		expect(updated.intervalPresetId).toBe(systemPresetId);
+
+		const after = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+
+		// step 0 (完了済み) はそのまま残る。
+		const step0 = after.find((r) => r.step === 0);
+		expect(step0?.completedAt?.getTime()).toBe(completedAt.getTime());
+
+		// 未完了だった step 1 は削除され、新しい intervals（システムプリセットの
+		// intervals: [1, 6, 24]）に基づいて completedAt を起点に作り直される。
+		// 大小関係だけでなく、実際に nextReviewAt が計算する値と厳密に一致すること
+		// まで確認する（テスト網羅性レビューで指摘: 旧プリセットの間隔で再計算されて
+		// いても、あるいは createdAt を起点にしていても、大小比較だけでは検出できない）。
+		const systemIntervals = [1, 6, 24];
+		const remaining = after.filter((r) => r.completedAt === null);
+		expect(remaining.map((r) => r.step)).toEqual([1, 2]);
+		for (const row of remaining) {
+			const expected = nextReviewAt(completedAt, systemIntervals, row.step);
+			expect(expected).toBeDefined();
+			expect(row.scheduledAt.getTime()).toBe(expected?.getTime());
+		}
+	});
+
+	// planReviewRecalculation の SELECT（完了済みステップ数の読み取り）と
+	// db.batch() 実行の間に、別リクエストの completeReview が同じメモの対象
+	// ステップを完了させる真の競合を再現する（interval-presets.test.ts の
+	// 「translates a concurrent completion race into a ConflictError」と同型。
+	// テスト網羅性レビューで指摘: この経路を正確性ではなくテストで裏付ける）。
+	it('translates a concurrent completion race into a ConflictError instead of a raw DB error', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'm', // ownerPreset の intervals: [1, 24]
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(Date.now() - 1000) })
+			.where(eq(reviews.memoId, memo.id));
+		const [due] = await db
+			.select({ id: reviews.id })
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.limit(1)
+			.all();
+		if (!due) throw new Error('fixture setup failed');
+
+		const originalBatch = db.batch.bind(db);
+		const batchSpy = vi
+			.spyOn(db, 'batch')
+			.mockImplementationOnce(async (queries: Parameters<typeof originalBatch>[0]) => {
+				// changeMemoPreset の SELECT（planReviewRecalculation 内)はこの時点で
+				// 完了済みで、completedCount=0 を前提に step0 から INSERT しようとしている。
+				// ここで step0 を完了させることで、その前提を古くする。
+				await completeReview(db, ownerId, due.id);
+				return originalBatch(queries);
+			});
+
+		try {
+			await expect(
+				// 編集フォームと同じく title・content を一緒に送る（正確性レビューで
+				// 指摘: catch 節の復元が intervalPresetId だけを戻し、同じ呼び出しで
+				// 確定していた title・content を戻し忘れていた回帰の再発防止）。
+				changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+					title: 'updated title',
+					content: 'updated content',
+					intervalPresetId: systemPresetId // intervals: [1, 6, 24]
+				})
+			).rejects.toThrow(ConflictError);
+		} finally {
+			batchSpy.mockRestore();
+		}
+
+		// バッチ全体がロールバックされ、memo は title・content・intervalPresetId の
+		// 全フィールドが呼び出し前の状態のまま（一部だけ確定した部分適用になっていない）。
+		const memoAfter = await getMemo(db, ownerId, memo.id);
+		expect(memoAfter.title).toBe('m');
+		expect(memoAfter.content).toBe('c');
+		expect(memoAfter.intervalPresetId).toBe(ownerPresetId);
+	});
+
+	// catch 節の復元ガード（`eq(memos.updatedAt, thisChangeStamp)`）の否定側:
+	// 1) の memo UPDATE が勝った直後・2) の reviews 再計算実行前に、別リクエストが
+	// このメモを更に更新していた場合、復元はその別更新を上書きしてはならない
+	// （テスト網羅性レビューで指摘）。
+	it('does not overwrite a newer update when restoring after a failed reviews recalculation', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'm', // ownerPreset の intervals: [1, 24]
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(Date.now() - 1000) })
+			.where(eq(reviews.memoId, memo.id));
+		const [due] = await db
+			.select({ id: reviews.id })
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.limit(1)
+			.all();
+		if (!due) throw new Error('fixture setup failed');
+
+		const originalBatch = db.batch.bind(db);
+		const batchSpy = vi
+			.spyOn(db, 'batch')
+			.mockImplementationOnce(async (queries: Parameters<typeof originalBatch>[0]) => {
+				// completeReview で unique 制約違反を発生させるのに加え、この呼び出しの
+				// 1) が勝った後の memo をさらに書き換える「別の更新」を割り込ませる。
+				await completeReview(db, ownerId, due.id);
+				await db
+					.update(memos)
+					.set({ title: 'overwritten by someone else' })
+					.where(eq(memos.id, memo.id));
+				return originalBatch(queries);
+			});
+
+		try {
+			await expect(
+				changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+					intervalPresetId: systemPresetId // intervals: [1, 6, 24]
+				})
+			).rejects.toThrow(ConflictError);
+		} finally {
+			batchSpy.mockRestore();
+		}
+
+		// 復元処理が thisChangeStamp と一致しない（＝別更新が既に上書きした）ため、
+		// 復元 UPDATE 自体は0行に終わり、別更新の内容がそのまま残る。
+		const memoAfter = await getMemo(db, ownerId, memo.id);
+		expect(memoAfter.title).toBe('overwritten by someone else');
+	});
+
+	// 編集フォームは常に intervalPresetId を送るが、実際に選択が変わっていなければ
+	// スケジュールを変更してはならない（完了条件: 「プリセットを変更しない更新では
+	// スケジュールが変わらない」）。
+	it('leaves reviews untouched when the submitted intervalPresetId matches the current one', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		const before = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+
+		const updated = await changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+			title: 'new title',
+			intervalPresetId: ownerPresetId
+		});
+		expect(updated.title).toBe('new title');
+		expect(updated.intervalPresetId).toBe(ownerPresetId);
+
+		const after = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(after).toEqual(before);
+	});
+
+	it('updates title/content together with the preset change in the same call', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		const updated = await changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+			title: 'new title',
+			content: 'new content',
+			intervalPresetId: systemPresetId
+		});
+		expect(updated.title).toBe('new title');
+		expect(updated.content).toBe('new content');
+		expect(updated.intervalPresetId).toBe(systemPresetId);
+	});
+
+	// 同時更新時は 409 になり、かつ memo・reviews のどちらか一方だけが反映される
+	// 状態にならないこと（reviews は完全に手つかずのまま）を確認する。
+	it('throws ConflictError on a stale expectedUpdatedAt and leaves memo and reviews untouched', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		// staleUpdatedAt は「このリクエストが最後に読んだ」とみなす基準時刻。
+		// 「別のリクエストが先に確定させた」後の状態を、changeMemoPreset 内部が
+		// 生成する thisChangeStamp（実行時点の実時刻）と衝突しない、既知の過去の
+		// 固定値で直接作る。updateMemo 経由で本物の同時実行を模すと、両者の
+		// `new Date()` がミリ秒精度の解像度で偶然同じ値になり得て、ガードが
+		// たまたま真になってしまいテストが不安定になる（正確性レビューで指摘された
+		// 「target値が偶然一致するレース」とは別の、テスト特有のタイミング衝突）。
+		const staleUpdatedAt = new Date(memo.updatedAt.getTime() - 60_000);
+		const winningUpdatedAt = new Date(memo.updatedAt.getTime() - 30_000);
+		await db
+			.update(memos)
+			.set({ updatedAt: winningUpdatedAt, title: 'updated by someone else' })
+			.where(eq(memos.id, memo.id));
+
+		const reviewsBefore = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+
+		await expect(
+			changeMemoPreset(db, ownerId, memo.id, staleUpdatedAt, { intervalPresetId: systemPresetId })
+		).rejects.toThrow(ConflictError);
+
+		const memoAfter = await getMemo(db, ownerId, memo.id);
+		expect(memoAfter.intervalPresetId).toBe(ownerPresetId);
+
+		const reviewsAfter = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(reviewsAfter).toEqual(reviewsBefore);
+	});
+
+	// 正確性レビューで指摘された回帰テスト: 同じ変更先プリセットへの二重送信
+	// （多重タブ・二重クリック等）で、負けたはずの2回目の呼び出しが「現在の
+	// intervalPresetId が変更先と一致しているか」だけを見るガードだと、1回目が
+	// 既にその値へ書き込んでいるため誤って真になり、負けた側の reviews 再計算まで
+	// 実行されてしまうバグがあった。2段階更新への設計変更後は、2回目の呼び出しが
+	// 読む existing.intervalPresetId は既に1回目が書き込んだ後の値であるため、
+	// presetChanged が false と判定され「変更なしの no-op」として扱われる
+	// （409 にはならない）。これは「プリセットを変更しない更新ではスケジュールが
+	// 変わらない」という別の完了条件と同じ扱いであり、正しい挙動である。
+	it('treats a second submission of the same already-applied target preset as a no-op, not a conflict', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId // intervals: [1, 24]
+		});
+
+		// 勝者が先に systemPresetId へ変更・確定した状態を直接作る。
+		await changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+			intervalPresetId: systemPresetId // intervals: [1, 6, 24]
+		});
+		const reviewsAfterWinner = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+
+		// 敗者は勝者より前の（今や古い）expectedUpdatedAt を使うが、変更先は
+		// 勝者と同じ systemPresetId（多重タブでの二重送信を想定）。
+		const result = await changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+			intervalPresetId: systemPresetId
+		});
+		expect(result.intervalPresetId).toBe(systemPresetId);
+
+		const reviewsAfterLoser = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(reviewsAfterLoser).toEqual(reviewsAfterWinner);
+	});
+
+	// 正確性レビューで指摘された、より深刻な回帰テスト: 完了済みステップ数と
+	// 新旧 intervals の組み合わせ次第では、既存の未完了行と負けた側の新ステップ
+	// 番号が重ならず、unique 制約違反にすら頼れないケースがある（勝者が完了済み
+	// ステップ数以下のプリセットへ縮小し未完了行が0件になり、敗者がそれより
+	// 長いプリセットへ変更しようとする場合）。このケースでは、memo の UPDATE を
+	// 先に確定させてから reviews を再計算する2段階設計そのものが唯一の防御線と
+	// なる（DELETE/INSERT を1つの db.batch() にまとめ、既存行との偶然の衝突に
+	// 頼っていた旧設計では検出できなかった）。
+	it('does not silently apply a losing preset change even when no unique-constraint collision would occur', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId // intervals: [1, 24]
+		});
+		// 両ステップとも完了済みにし、未完了行を0件にする。
+		await db.update(reviews).set({ completedAt: new Date() }).where(eq(reviews.memoId, memo.id));
+		const reviewsBefore = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+
+		// 勝者が先に、完了済みステップ数(2)以下のプリセットへ変更する
+		// （otherUserPresetId は intervals: [1] だが他ユーザー所有のため使えない。
+		// ここでは新規に2ステップちょうどのプリセットを用意する）。
+		const [shrinkPreset] = await db
+			.insert(intervalPresets)
+			.values({ userId: ownerId, name: 'shrink', intervals: [1, 24] })
+			.returning();
+		if (!shrinkPreset) throw new Error('fixture setup failed');
+		await changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+			intervalPresetId: shrinkPreset.id
+		});
+
+		// 敗者は勝者より前の（今や古い）expectedUpdatedAt を使い、
+		// systemPresetId（intervals: [1, 6, 24]、3ステップ）へ変更しようとする。
+		// 敗者からは新しく1件（step 2）を INSERT する必要があるが、既存の
+		// 未完了行は0件（勝者の変更で全ステップ完了扱いのまま）なので、
+		// unique 制約違反は起こらない。
+		await expect(
+			changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+				intervalPresetId: systemPresetId
+			})
+		).rejects.toThrow(ConflictError);
+
+		const memoAfter = await getMemo(db, ownerId, memo.id);
+		expect(memoAfter.intervalPresetId).toBe(shrinkPreset.id);
+
+		const reviewsAfter = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(reviewsAfter).toEqual(reviewsBefore);
+	});
+
+	it('throws NotFoundError when changing the preset of another user memo', async () => {
+		const memo = await createMemo(db, otherUserId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: otherUserPresetId
+		});
+		await expect(
+			changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+				intervalPresetId: otherUserPresetId
+			})
+		).rejects.toThrow(NotFoundError);
+	});
+
+	it('throws NotFoundError when changing the preset of an archived memo', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		await archiveMemo(db, ownerId, memo.id);
+		await expect(
+			changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, { intervalPresetId: systemPresetId })
+		).rejects.toThrow(NotFoundError);
 	});
 });
 

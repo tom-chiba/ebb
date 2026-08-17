@@ -16,7 +16,7 @@ import {
 } from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
 import { ConflictError, NotFoundError } from './errors';
-import { createMemo, updateMemo } from './memos';
+import { createMemo } from './memos';
 import {
 	completeReview,
 	getDueReviewDetail,
@@ -682,6 +682,10 @@ describe('completeReview', () => {
 	// 残り未完了ステップの再アンカリングに使う intervals は、そのメモの現在の
 	// intervalPresetId が指すプリセットの値でなければならない（docs/design-decisions.md
 	// #17節）。作成時に使ったプリセットのキャッシュを誤って使い回していないかを検証する。
+	// intervalPresetId の変更は #82 以降 changeMemoPreset（reviews も同時に作り直す）
+	// を経由するため、ここでは「reviews は作成時のまま、intervalPresetId だけが
+	// 変わっている」状態を意図的に直接 UPDATE で作る（#82 のデプロイ前に発生し得た
+	// 既存データの再現。changeMemoPreset 経由ではこの状態にならない）。
 	it('re-anchors using the current intervalPresetId, not the one used at creation', async () => {
 		const memo = await createMemo(db, ownerId, {
 			title: 'memo', // intervals: [1, 24, 72]
@@ -693,10 +697,7 @@ describe('completeReview', () => {
 			.values({ userId: ownerId, name: 'new preset', intervals: [1, 1000] })
 			.returning();
 		if (!newPreset) throw new Error('fixture setup failed');
-		const updated = await updateMemo(db, ownerId, memo.id, memo.updatedAt, {
-			intervalPresetId: newPreset.id
-		});
-		expect(updated.intervalPresetId).toBe(newPreset.id);
+		await db.update(memos).set({ intervalPresetId: newPreset.id }).where(eq(memos.id, memo.id));
 
 		await makeAllReviewsDue(db, memo.id);
 		const listed = await listDueReviews(db, ownerId);
@@ -724,6 +725,8 @@ describe('completeReview', () => {
 	// ことも検証する（正確性・テスト網羅性の両レビューで指摘: 完了直後に一覧へ戻ると
 	// 同じメモが即座に復活するにもかかわらず、修正前は nextScheduledAt が null になり
 	// UI が「このメモの復習はすべて完了しました」という事実と異なるメッセージを表示していた）。
+	// #82 以降 changeMemoPreset は reviews も同時に作り直すためこの不整合状態には
+	// ならないが、#82 のデプロイ前の既存データでは起こり得るため、直接 UPDATE で再現する。
 	it('still completes the target step, and does not misreport it as fully done, when the current preset is too short to re-anchor a later step', async () => {
 		const memo = await createMemo(db, ownerId, {
 			title: 'memo', // intervals: [1, 24, 72]
@@ -735,7 +738,7 @@ describe('completeReview', () => {
 			.values({ userId: ownerId, name: 'short', intervals: [1] })
 			.returning();
 		if (!shortPreset) throw new Error('fixture setup failed');
-		await updateMemo(db, ownerId, memo.id, memo.updatedAt, { intervalPresetId: shortPreset.id });
+		await db.update(memos).set({ intervalPresetId: shortPreset.id }).where(eq(memos.id, memo.id));
 
 		await makeAllReviewsDue(db, memo.id);
 		const listBefore = await listDueReviews(db, ownerId);
@@ -869,7 +872,9 @@ describe('getDueReviewDetail', () => {
 			.values({ userId: ownerId, name: 'short', intervals: [1] })
 			.returning();
 		if (!shortPreset) throw new Error('fixture setup failed');
-		await updateMemo(db, ownerId, memo.id, memo.updatedAt, { intervalPresetId: shortPreset.id });
+		// #82 以降 changeMemoPreset は reviews も同時に作り直すためこの不整合状態には
+		// ならないが、#82 のデプロイ前の既存データでは起こり得るため、直接 UPDATE で再現する。
+		await db.update(memos).set({ intervalPresetId: shortPreset.id }).where(eq(memos.id, memo.id));
 
 		await makeAllReviewsDue(db, memo.id);
 		const listed = await listDueReviews(db, ownerId);

@@ -9,6 +9,7 @@ import {
 	or,
 	reviews,
 	sql,
+	type BatchItem,
 	type Db
 } from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
@@ -20,7 +21,7 @@ import {
 } from './errors';
 import { getAccessiblePreset } from './interval-presets';
 import { clamp, normalizeOffset, type PaginationOptions } from './pagination';
-import { minPendingScheduledAtSubquery } from './reviews';
+import { minPendingScheduledAtSubquery, planReviewRecalculation } from './reviews';
 
 export const TITLE_MAX_LENGTH = 200;
 export const CONTENT_MAX_LENGTH = 50_000;
@@ -323,7 +324,24 @@ export async function createMemo(db: Db, userId: string, input: CreateMemoInput)
 	return toMemoResponse(memo);
 }
 
-export type UpdateMemoInput = Partial<Omit<CreateMemoInput, 'id'>>;
+// intervalPresetId はここには含まれない。プリセット変更は reviews の再計算を
+// 伴うため、通常の title/content 更新から分離した changeMemoPreset の責務とする
+// （#82、docs/design-decisions.md の #82 節）。
+export type UpdateMemoInput = Partial<Pick<CreateMemoInput, 'title' | 'content'>>;
+
+// updateMemo・changeMemoPreset で共通の title/content バリデーション＋SET
+// オブジェクト構築（設計レビューで指摘、重複コード解消）。指定されたフィールド
+// だけを SET することで、他フィールドを対象にした同時 PATCH の変更を古い読み取り
+// 値で上書きしてしまう read-modify-write のロストアップデートを避ける。
+function buildTitleContentSet(input: UpdateMemoInput): Partial<typeof memos.$inferInsert> {
+	if (input.title !== undefined) assertTitle(input.title);
+	if (input.content !== undefined) assertContent(input.content);
+
+	const set: Partial<typeof memos.$inferInsert> = {};
+	if (input.title !== undefined) set.title = input.title;
+	if (input.content !== undefined) set.content = input.content;
+	return set;
+}
 
 export async function updateMemo(
 	db: Db,
@@ -336,19 +354,7 @@ export async function updateMemo(
 	// 他人のメモやアーカイブ済みのメモに対する不正な入力が 404 ではなく 400 に
 	// なってしまう（存在確認より前に ValidationError が投げられるため）。
 	const existing = await getMemo(db, userId, id);
-
-	if (input.title !== undefined) assertTitle(input.title);
-	if (input.content !== undefined) assertContent(input.content);
-	if (input.intervalPresetId !== undefined) {
-		await getAccessiblePreset(db, userId, input.intervalPresetId);
-	}
-
-	// 指定されたフィールドだけを SET することで、他フィールドを対象にした同時 PATCH の
-	// 変更を古い読み取り値で上書きしてしまう read-modify-write のロストアップデートを避ける。
-	const set: Partial<typeof memos.$inferInsert> = {};
-	if (input.title !== undefined) set.title = input.title;
-	if (input.content !== undefined) set.content = input.content;
-	if (input.intervalPresetId !== undefined) set.intervalPresetId = input.intervalPresetId;
+	const set = buildTitleContentSet(input);
 
 	if (Object.keys(set).length === 0) {
 		return existing;
@@ -357,17 +363,131 @@ export async function updateMemo(
 	// 楽観的並行性制御: クライアントが最後に読んだ updatedAt を WHERE 条件に含める。
 	// 別のリクエストが先に更新していれば updatedAt がずれて 0 行ヒットになるため、
 	// 同一フィールドへの同時更新が古い方で新しい方を黙って上書きすることを防ぐ。
-	const rows = await db
+	const rows = await applyMemoUpdate(db, userId, id, expectedUpdatedAt, set);
+	return resolveUpdateResult(db, userId, id, rows[0]);
+}
+
+export interface ChangeMemoPresetInput extends UpdateMemoInput {
+	intervalPresetId: string;
+}
+
+// メモのプリセット変更専用ユースケース（#82）。updateMemo から分離し、
+// intervalPresetId が実際に変わる場合にのみ、memo の UPDATE と reviews の
+// 再計算（$lib/server/reviews.ts の planReviewRecalculation、#18 のレシピ）を
+// 同じ db.batch() で実行する。編集画面のフォームは常に intervalPresetId を
+// 送ってくる（selectedPresetId が必ず埋まっている）ため、呼び出し側はまず
+// title/content と合わせてこの関数に渡し、実際に変更があったかはここで判定する。
+// updateMemo・changeMemoPreset で共通の、楽観ロック付き UPDATE 本体（設計
+// レビューで指摘、重複コード解消）。
+function applyMemoUpdate(
+	db: Db,
+	userId: string,
+	id: string,
+	expectedUpdatedAt: Date,
+	set: Partial<typeof memos.$inferInsert>
+) {
+	return db
 		.update(memos)
 		.set(set)
 		.where(and(ownMemo(userId, id), eq(memos.updatedAt, expectedUpdatedAt)))
 		.returning()
 		.all();
-	const updated = rows[0];
+}
+
+export async function changeMemoPreset(
+	db: Db,
+	userId: string,
+	id: string,
+	expectedUpdatedAt: Date,
+	input: ChangeMemoPresetInput
+) {
+	const existing = await getMemo(db, userId, id);
+	const set = buildTitleContentSet(input);
+
+	let newIntervals: readonly number[] | undefined;
+	if (input.intervalPresetId !== existing.intervalPresetId) {
+		const preset = await getAccessiblePreset(db, userId, input.intervalPresetId);
+		// createMemo と同じ理由（reviews が1件も生成できず、静かに「全ステップ完了」に
+		// 見えるメモが生まれる）で拒否する。#18 の時点でこの検証を持たない空プリセットが
+		// 既に存在し得るため、既存メモ作成時だけでなくここでも確認する。
+		if (preset.intervals.length === 0) {
+			throw new ValidationError('intervalPresetId references a preset with no intervals');
+		}
+		newIntervals = preset.intervals;
+		set.intervalPresetId = input.intervalPresetId;
+	}
+
+	if (Object.keys(set).length === 0) {
+		return existing;
+	}
+
+	// プリセットが変わらない場合、reviews に一切触れない従来どおりの単一 UPDATE。
+	if (!newIntervals) {
+		const rows = await applyMemoUpdate(db, userId, id, expectedUpdatedAt, set);
+		return resolveUpdateResult(db, userId, id, rows[0]);
+	}
+
+	// この呼び出し自身の UPDATE が実際に勝ったことを、失敗時の復元処理（下記 catch
+	// 節）で判別するための目印。明示的にここで確定させた値を SET する
+	// （completeReview の wonThisCompletion が `completedAt = new Date()` を使うのと
+	// 同じ理由）。
+	const thisChangeStamp = new Date();
+	set.updatedAt = thisChangeStamp;
+
+	// プリセットが変わる場合は2段階に分ける: 1) memo の UPDATE だけを先に確定させ、
+	// 2) それが勝った場合にのみ reviews の再計算を別の db.batch() で実行する
+	// （経緯・却下した設計は docs/design-decisions.md の #82 節を参照）。
+	const rows = await applyMemoUpdate(db, userId, id, expectedUpdatedAt, set);
+	const updatedMemo = rows[0];
+	if (!updatedMemo) {
+		return resolveUpdateResult(db, userId, id, undefined);
+	}
+
+	const plan = await planReviewRecalculation(db, id, newIntervals);
+	try {
+		// planReviewRecalculation は常に DELETE 文を先頭に積むため実行時には常に
+		// 1件以上になるが、可変長の配列であることは型システムでは静的に証明できない
+		// ため、既存の completeReview・updateCustomPresetIntervals と同じ型注釈で表明する。
+		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+	} catch (err) {
+		// 上記の db.batch() が失敗しうるのは、1) の直後・2) の実行前に別リクエストの
+		// completeReview が割り込む、ごく狭い残存レースのみ（#82 節に記録）。
+		// この呼び出し自身の書き込み（thisChangeStamp で識別）がまだ現在の値である
+		// 場合に限り、1) で確定させた全フィールド（title・content・intervalPresetId）を
+		// 呼び出し前の状態へ戻す。intervalPresetId だけを戻すと、同じ呼び出しで
+		// 一緒に確定していた title・content が静かに確定したまま残ってしまう
+		// （409 を返したのに一部フィールドだけ保存される部分適用。正確性レビューで
+		// 指摘）。他の誰かが既にこのメモを更に更新していた場合は、その更新を
+		// 上書きしないよう戻さない。
+		await db
+			.update(memos)
+			.set({
+				title: existing.title,
+				content: existing.content,
+				intervalPresetId: existing.intervalPresetId
+			})
+			.where(and(eq(memos.id, id), eq(memos.updatedAt, thisChangeStamp)));
+		if (isUniqueConstraintViolation(err, 'reviews.step')) {
+			throw new ConflictError('メモの復習予定が同時に更新されました。もう一度お試しください。');
+		}
+		throw err;
+	}
+
+	return toMemoResponse(updatedMemo);
+}
+
+// updateMemo・changeMemoPreset で共通の「0行だった理由の判別」。0行だった理由が
+// 「そもそも対象が無くなった（同時アーカイブ等）」のか「バージョンが古い
+// （同時更新）」のかを区別する（設計レビューで指摘、2箇所で一字一句同じ判定
+// ロジックが重複していたのを共通化した）。
+async function resolveUpdateResult(
+	db: Db,
+	userId: string,
+	id: string,
+	updated: typeof memos.$inferSelect | undefined
+) {
 	if (updated) return toMemoResponse(updated);
 
-	// 0 行だった理由が「そもそも対象が無くなった（同時アーカイブ等）」のか
-	// 「バージョンが古い（同時更新）」のかを区別する。
 	const stillOwned = await db
 		.select({ id: memos.id })
 		.from(memos)

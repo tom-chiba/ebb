@@ -2054,3 +2054,102 @@ VAPID_PRIVATE_KEY` が必要**（ユーザーが実行する必要がある。#1
   プロファイルの実 Chrome でも `matchMedia` は素通しで確認でき、iOS の
   `navigator.standalone` 偽装と合わせて「ホーム画面から起動した場合は案内が
   出ない」受け入れ条件を確認した
+
+## メモのプリセット変更時に復習予定を再計算する (#82)
+
+- **#18 が編集画面へのプリセット切替 UI をスコープ外にし、`updateMemo` が
+  `intervalPresetId` を変更しても reviews を再計算しない制約として先送りした
+  ものへの対応**（`docs/design-decisions.md` の #18 節を参照）。#74 で編集画面に
+  `IntervalPresetChips` が実装されて以降、この不整合は API 直叩きに限らず
+  通常の編集画面操作でも到達可能になっていた。
+- **`updateMemo` から `intervalPresetId` を完全に除去し、`changeMemoPreset` を
+  新設した**。`UpdateMemoInput` は title/content のみを受け付け、reviews に一切
+  触れない。`changeMemoPreset` は intervalPresetId が実際に変わる場合にのみ
+  `$lib/server/reviews.ts` の `planReviewRecalculation`（#18 のレシピをそのまま
+  再利用）を呼び、memo の UPDATE と reviews の DELETE/INSERT を同じ `db.batch()`
+  で実行する。編集フォームは常に intervalPresetId を送るため、値が変わって
+  いない場合は reviews に触れないことを `changeMemoPreset` 側の比較で保証する
+  （呼び出し側でフィールドの有無だけを見て分岐すると、この判定ができない）。
+- **`/api/memos/[id]` の PATCH は、リクエストボディに `intervalPresetId` が
+  含まれるかどうかで `updateMemo`／`changeMemoPreset` を呼び分ける**。含まれない
+  場合は title/content のみの更新として扱い、reviews には触れない。
+- **memo の楽観ロックと reviews の再計算を2段階に分けた**（正確性レビューで
+  指摘、advisor 相談の上で採用）。プリセットが実際に変わる場合、
+  1. memo の UPDATE だけを先に確定させ、2) その UPDATE が実際に勝った場合に
+     のみ、reviews の再計算（DELETE+INSERT）を別の `db.batch()` で実行する。
+     UPDATE が負けた（0行）場合、reviews には一切触れずに `ConflictError` を返す
+     ——これが本来欲しかった保証そのものであり、これ以上の仕掛けを要さない。
+  - **当初は memo の UPDATE と reviews の DELETE/INSERT を同じ `db.batch()`
+    にまとめ、`completeReview`（#17）の `wonThisCompletion` と同じ形の EXISTS
+    ガードを DELETE 文に組み込む設計だった**。しかし `db.insert(reviews)
+.values(...)` は VALUES 直接挿入のため WHERE 句を持てず、ガードは DELETE
+    にしか適用できなかった。UPDATE が負けた場合に DELETE も0行になり、既存の
+    未完了 reviews が残ったまま後続の INSERT が同じ step 番号と衝突する
+    （unique 制約違反でバッチ全体がロールバックされる）ことに「たまたま」
+    頼る設計であり、完了済みステップ数と新旧 intervals の組み合わせ次第では
+    （未完了行が0件で、負けた側の新ステップ番号がどの既存行とも重ならない
+    場合）衝突が起きず、負けたリクエストの reviews 再計算が静かに成功して
+    しまうバグが正確性レビューで発見・再現された。`memos.test.ts` の
+    「does not silently apply a losing preset change even when no
+    unique-constraint collision would occur」で固定化した。
+    `db.insert(reviews).select(...)` や生SQLの `INSERT ... SELECT ... FROM
+(VALUES ...) WHERE ...`（`db.run()` 経由）による INSERT 側のガードも
+    検討したが、D1 の `batch()` は各文が `._prepare()` 由来の実 prepared
+    statement（`.stmt` を持つ）であることを前提にしており、`db.run(sql\`...\`)`が返す`SQLiteRaw` はその要件を満たさず実行時エラーになることを確認した
+    ため、2段階方式へ変更した。
+    - この設計変更の過程で、EXISTS ガードの判定条件自体にも別の欠陥があった
+      ことが判明した: 初版は「DB 上の intervalPresetId が変更先の値と一致
+      しているか」でガードしており、同じ変更先プリセットへの二重送信
+      （多重タブ・二重クリック）で、負けたリクエストから見ても「DB は既に
+      変更先の値になっている（＝勝ったリクエストが書き込んだ値）」ため、
+      ガードが誤って真になっていた（`completeReview` が `completedAt = new
+Date()` という各呼び出し固有の値を使うのに対し、ユーザー入力値という
+      「複数リクエストが同じ値を狙いうる」ものをガードに使ってしまっていた
+      のが根本原因）。2段階方式では memo の UPDATE 自体の楽観ロック（
+      `expectedUpdatedAt` との一致）だけが勝敗を決めるため、この種の判定
+      ミスは構造的に起こり得ない。
+  - **残るリスクは、1) の memo UPDATE が成功した直後・2) の reviews
+    再計算実行前に、別リクエストの `completeReview` が割り込み、2) が
+    unique 制約違反で失敗するごく狭い窓のみ**。この場合、この呼び出し自身の
+    書き込み（`thisChangeStamp` という呼び出し専用のタイムスタンプを
+    `updatedAt` に明示的に SET したもので識別）がまだ現在の値である場合に
+    限り、1) で確定させた title・content・intervalPresetId **全フィールド**を
+    呼び出し前の状態へ復元してから `ConflictError` を返す（他の誰かが既に
+    このメモを更に更新していた場合は、その更新を上書きしないよう復元しない）。
+    この残存レースは `updateCustomPresetIntervals`（#18）の
+    `stillActiveMemoIds` が持つのと同種の「完全な排除はできないが窓を狭める」
+    設計として許容する。
+    - **初版は intervalPresetId だけを復元しており、正確性レビューで指摘された
+      部分適用バグが残っていた**。編集画面は title・content・intervalPresetId を
+      常にまとめて送るため、この2)の失敗経路では「409 を返したのに、同じ
+      呼び出しで確定していた title・content の変更だけは静かに保存される」
+      という、呼び出し元の期待（409＝何も反映されていない）に反する状態が
+      生じ得た。復元対象を全フィールドに広げて修正した。
+- **上記の unique 制約違反を `ConflictError`（409）に変換する** —
+  `planReviewRecalculation` の SELECT（完了済みステップ数の読み取り）と
+  `db.batch()` 実行の間に別リクエストの `completeReview` が割り込む競合
+  （`updateCustomPresetIntervals` と同種の SELECT-then-write ハザード）でも
+  同じ違反が起こりうるため、`isUniqueConstraintViolation` で捕捉して 409 に
+  変換する（advisor 指摘）。この経路は `interval-presets.test.ts` の
+  「translates a concurrent completion race into a ConflictError」と同型の
+  `db.batch` 横取りで `memos.test.ts` にも回帰テストを追加した（テスト網羅性
+  レビューで指摘）。
+- **プリセット変更時、新しいプリセットの `intervals` が空の場合は拒否する**
+  （`createMemo` の空プリセットガードと同じ理由。#18 時点でこの検証を持たない
+  空プリセットが既に存在し得るため、advisor 指摘によりここでも確認する）。
+- **reviews.ts に残っていた「`updateMemo` は reviews を再生成しない」前提の
+  コメント（`minPendingScheduledAtSubquery`・`getDueReviewDetail`・
+  `completeReview` の3箇所）を、`changeMemoPreset` 導入後の実態に合わせて
+  書き換えた**（advisor 指摘）。これらのコメントが説明していた「min(scheduledAt)
+  と min(step) の不一致」「プリセット短縮時の再アンカリング不能」という不整合
+  自体は、#82 以前に古い `updateMemo` でプリセットが変更された既存メモに対しては
+  引き続き起こり得るため、フォールバック処理自体は削除せず残した（`completeReview`
+  の `reanchorUpdates` フィルタ等）。コメントだけを「Web UI からは到達しない」
+  という古い（#74 以降は誤りだった）前提から「#82 より前のデータに限られる」
+  という正しい前提に更新した。これに合わせて、`reviews.test.ts` の該当テストは
+  `changeMemoPreset` ではなく直接 `db.update(memos)` でこの不整合状態を再現する
+  よう変更した（`changeMemoPreset` 経由ではこの状態を作れないため）。
+- **`updateMemo`・`changeMemoPreset` に一字一句同じ形で重複していた「0行
+  だった理由（対象消失 vs バージョン競合）の判別」ロジックを `resolveUpdateResult`
+  として共通化し、`ChangeMemoPresetInput` を `UpdateMemoInput` を拡張する形に
+  変更した**（設計レビューで指摘）。
