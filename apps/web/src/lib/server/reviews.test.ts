@@ -19,10 +19,12 @@ import { ConflictError, NotFoundError } from './errors';
 import { createMemo } from './memos';
 import {
 	completeReview,
+	computeReviewRecalculation,
 	getCurrentPendingReview,
 	getDueReviewDetail,
 	listDueReviews,
 	listReviewSchedule,
+	loadReviewRecalculationInputs,
 	planReviewRecalculation
 } from './reviews';
 import { createTestUser } from './test-helpers';
@@ -1095,6 +1097,137 @@ describe('planReviewRecalculation', () => {
 			.all();
 		expect(rows.map((r) => r.step)).toEqual([0, 1, 2]);
 		expect(rows.filter((r) => r.completedAt === null)).toHaveLength(2);
+	});
+});
+
+// #84: updateCustomPresetIntervals/previewPresetIntervalsUpdate 向けの一括取得。
+// 「1メモにつき何回 SELECT するか」ではなく「対象メモ数に依らず一定回数で完了するか」
+// を検証する。同じ入力から computeReviewRecalculation が作る結果が
+// planReviewRecalculation（1メモずつ SELECT する既存経路）と一致することも合わせて
+// 確認し、2つの経路が同じ計算ロジックを共有していることを保証する。
+describe('loadReviewRecalculationInputs', () => {
+	it('returns an empty map for an empty memoId list without querying', async () => {
+		const inputs = await loadReviewRecalculationInputs(db, []);
+		expect(inputs.size).toBe(0);
+	});
+
+	it('does not issue more SELECT queries as the memo count grows within a single chunk', async () => {
+		// D1_MAX_BIND_PARAMS（100）のチャンク境界内であれば、対象メモ数に関わらず
+		// 常に同じ回数の SELECT（3クエリ集合）で完了するはずで、1メモ増えるごとに
+		// クエリが増えないことを示す（完了条件「クエリ数が対象メモ数に比例して
+		// 増えない」の回帰テスト）。
+		const memoIdsFor = async (count: number) => {
+			const ids: string[] = [];
+			for (let i = 0; i < count; i++) {
+				const memo = await createMemo(db, ownerId, {
+					title: `memo-${i}`,
+					content: 'c',
+					intervalPresetId: ownerPresetId
+				});
+				ids.push(memo.id);
+			}
+			return ids;
+		};
+
+		const fewIds = await memoIdsFor(5);
+		const manyIds = await memoIdsFor(50);
+
+		const selectSpy = vi.spyOn(db, 'select');
+		selectSpy.mockClear();
+		await loadReviewRecalculationInputs(db, fewIds);
+		const callsForFew = selectSpy.mock.calls.length;
+
+		selectSpy.mockClear();
+		await loadReviewRecalculationInputs(db, manyIds);
+		const callsForMany = selectSpy.mock.calls.length;
+
+		selectSpy.mockRestore();
+		expect(callsForMany).toBe(callsForFew);
+	});
+
+	it('splits into multiple chunked queries beyond the D1 bind parameter limit (100) without erroring', async () => {
+		const ids: string[] = [];
+		for (let i = 0; i < 150; i++) {
+			const memo = await createMemo(db, ownerId, {
+				title: `memo-${i}`,
+				content: 'c',
+				intervalPresetId: ownerPresetId
+			});
+			ids.push(memo.id);
+		}
+
+		const inputs = await loadReviewRecalculationInputs(db, ids);
+		expect(inputs.size).toBe(150);
+		for (const id of ids) {
+			expect(inputs.get(id)?.incompleteCount).toBe(3);
+			expect(inputs.get(id)?.latestCompleted).toBeUndefined();
+		}
+	});
+
+	it('matches planReviewRecalculation for a memo with zero completed steps', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'memo',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+
+		const single = await planReviewRecalculation(db, memo.id, [2, 5]);
+		const inputs = await loadReviewRecalculationInputs(db, [memo.id]);
+		const input = inputs.get(memo.id);
+		if (!input) throw new Error('fixture setup failed');
+		const batched = computeReviewRecalculation(memo.id, input, [2, 5]);
+
+		expect(batched.affectedCount).toBe(single.affectedCount);
+		expect(input.incompleteCount).toBe(3);
+		expect(input.latestCompleted).toBeUndefined();
+		expect(batched.newRows).toEqual([
+			{ memoId: memo.id, step: 0, scheduledAt: nextReviewAt(memo.createdAt, [2, 5], 0) },
+			{ memoId: memo.id, step: 1, scheduledAt: nextReviewAt(memo.createdAt, [2, 5], 1) }
+		]);
+	});
+
+	it('matches planReviewRecalculation for a memo with a completed step (uses its completedAt as baseTime)', async () => {
+		const { memo, due } = await createDueReview(ownerId, ownerPresetId);
+		const completed = await completeReview(db, ownerId, due.id); // step0 完了
+
+		const single = await planReviewRecalculation(db, memo.id, [1, 6, 24]);
+		const inputs = await loadReviewRecalculationInputs(db, [memo.id]);
+		const input = inputs.get(memo.id);
+		if (!input) throw new Error('fixture setup failed');
+		const batched = computeReviewRecalculation(memo.id, input, [1, 6, 24]);
+
+		expect(input.latestCompleted).toEqual({ step: 0, completedAt: completed.completedAt });
+		expect(input.incompleteCount).toBe(2); // step1・step2 のみ未完了
+		expect(batched.affectedCount).toBe(single.affectedCount);
+		expect(batched.newRows).toEqual([
+			{ memoId: memo.id, step: 1, scheduledAt: nextReviewAt(completed.completedAt, [1, 6, 24], 1) },
+			{ memoId: memo.id, step: 2, scheduledAt: nextReviewAt(completed.completedAt, [1, 6, 24], 2) }
+		]);
+	});
+
+	it('keeps each memos completed rows separate when a completed-step memo and a zero-completed memo are fetched together', async () => {
+		// completedRows を1つの配列にまとめてから memoId ごとに最大 step を振り分ける
+		// latestCompletedMap の構築が、他のメモの completedAt を取り違えないことの
+		// 回帰テスト（テスト網羅性レビューで指摘。単一メモずつの呼び出しでは
+		// 「複数メモの完了済み行が1つの結果セットに混在した状態からの振り分け」を
+		// 検証できていなかった）。
+		const { memo: completedMemo, due } = await createDueReview(ownerId, ownerPresetId);
+		const completed = await completeReview(db, ownerId, due.id); // step0 完了
+		const freshMemo = await createMemo(db, ownerId, {
+			title: 'fresh',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+
+		const inputs = await loadReviewRecalculationInputs(db, [completedMemo.id, freshMemo.id]);
+
+		expect(inputs.get(completedMemo.id)?.latestCompleted).toEqual({
+			step: 0,
+			completedAt: completed.completedAt
+		});
+		expect(inputs.get(completedMemo.id)?.incompleteCount).toBe(2);
+		expect(inputs.get(freshMemo.id)?.latestCompleted).toBeUndefined();
+		expect(inputs.get(freshMemo.id)?.incompleteCount).toBe(3);
 	});
 });
 

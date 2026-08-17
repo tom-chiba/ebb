@@ -262,10 +262,11 @@ describe('previewPresetIntervalsUpdate', () => {
 
 	it('counts correctly across D1s per-query bind parameter limit (100) without erroring', async () => {
 		// D1 は1クエリあたりの bind パラメータ数に上限があり（ローカル実測でちょうど100件、
-		// 101件から `too many SQL variables` になる）、countIncompleteReviewsForMemos が
-		// memoId をチャンク分割せずに inArray へまとめて渡すと、MAX_BATCH_STATEMENTS
-		// （500）が許容する規模（悲観的見積もりで最大249メモ）の範囲内でも生の D1 エラーに
-		// なりうる（正確性レビューで指摘、実測で確認した回帰）。ここでは
+		// 101件から `too many SQL variables` になる）、loadReviewRecalculationInputs
+		// （$lib/server/reviews.ts、#84 で一括取得に変更）が memoId をチャンク分割せずに
+		// inArray へまとめて渡すと、MAX_BATCH_STATEMENTS（500）が許容する規模
+		// （悲観的見積もりで最大249メモ）の範囲内でも生の D1 エラーになりうる
+		// （#18 の正確性レビューで指摘、実測で確認した回帰）。ここでは
 		// MAX_BATCH_STATEMENTS には抵触しないが100件は超えるメモ数で実行し、
 		// チャンク分割が正しく機能して例外を投げないことを確認する。
 		const memoCount = 150;
@@ -556,9 +557,10 @@ describe('updateCustomPresetIntervals', () => {
 	// アーカイブ状態を確認する stillActiveMemoIds ガード（正確性レビューで指摘）の
 	// 回帰テスト。db.batch を横取りする既存の競合テストとは異なるタイミング
 	// （「対象メモの列挙後・再確認前」）を再現する必要があるため、代わりに
-	// planReviewRecalculation（対象メモごとに1回ずつ呼ばれる）を横取りし、
-	// その内部で該当メモを archiveMemo することで、再確認より前にアーカイブが
-	// 割り込む状況を決定的に再現する。
+	// loadReviewRecalculationInputs（#84 で対象メモ全件を一括取得するようになった、
+	// updateCustomPresetIntervals 内で1回だけ呼ばれる関数）を横取りし、その内部で
+	// 該当メモを archiveMemo することで、再確認より前にアーカイブが割り込む状況を
+	// 決定的に再現する。
 	it('excludes a memo archived after it was selected but before the batch commits', async () => {
 		const staysActive = await createMemo(db, ownerId, {
 			title: 'stays-active',
@@ -571,14 +573,12 @@ describe('updateCustomPresetIntervals', () => {
 			intervalPresetId: ownerPresetId
 		});
 
-		const originalPlan = reviewsModule.planReviewRecalculation;
-		const planSpy = vi
-			.spyOn(reviewsModule, 'planReviewRecalculation')
-			.mockImplementation(async (db2, memoId, intervals) => {
-				if (memoId === getsArchivedMidFlight.id) {
-					await archiveMemo(db2, ownerId, memoId);
-				}
-				return originalPlan(db2, memoId, intervals);
+		const originalLoad = reviewsModule.loadReviewRecalculationInputs;
+		const loadSpy = vi
+			.spyOn(reviewsModule, 'loadReviewRecalculationInputs')
+			.mockImplementation(async (db2, memoIds) => {
+				await archiveMemo(db2, ownerId, getsArchivedMidFlight.id);
+				return originalLoad(db2, memoIds);
 			});
 
 		try {
@@ -591,7 +591,7 @@ describe('updateCustomPresetIntervals', () => {
 			// staysActive の元3ステップ分のみ。途中でアーカイブされたメモの分は含まない。
 			expect(updatedReviewsCount).toBe(3);
 		} finally {
-			planSpy.mockRestore();
+			loadSpy.mockRestore();
 		}
 
 		const activeRows = await db
