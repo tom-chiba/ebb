@@ -2289,3 +2289,115 @@ MemoRecalcInputs>` を返し、見つからなかった memoId は含めない�
   （呼び出し回数は対象メモ数に依らず1回）を横取りする形に変更した。検証内容
   （アーカイブされたメモの reviews が0件のまま・他のメモは正しく再計算される）
   自体は変えていない。
+
+## review スケジュールにバージョンを導入して競合を検出する (#85)
+
+- **背景**: プリセット再計算（`changeMemoPreset`・`updateCustomPresetIntervals`）
+  は、計画作成用の SELECT から `db.batch()` 実行までの間に review 完了・メモの
+  アーカイブ・別のプリセット変更が割り込む競合窓を持っていた。#82・#84 時点では
+  この窓を「unique 制約違反への偶発的な衝突」に頼って検出しており、完了済み
+  ステップ数と新旧 intervals の組み合わせ次第では衝突すら起こらず、古い
+  スナップショットに基づく再計算が静かに成功してしまうケースが正確性レビューで
+  発見・再現されていた（#82 節を参照）。
+
+- **version の所有先は memo の列ではなく専用テーブル `review_schedules`
+  （`memo_id` 1:1 の PK、`version` 整数）にした**。理由は実測で確認した
+  drizzle-orm の挙動: `buildUpdateSet`（`sqlite-core/dialect.js`）は、
+  `$onUpdate` を持つ列を `.set()` に明示的に含めなくても、その UPDATE 文の
+  SET 句へ自動的に追加する。`memos.updatedAt` は `$onUpdate` を持つため、
+  version を memos の列にすると、`completeReview` が version を進めるたびに
+  `memos` テーブルへの UPDATE が発生し、`updatedAt` が意図せず更新されてしまう。
+  これは `changeMemoPreset`・`updateMemo` の楽観ロック（`expectedUpdatedAt`）を
+  汚染し、他クライアントが読んでいた `updatedAt` を使った title/content の
+  更新が、無関係な review の完了のたびに 409 になる回帰を生む（advisor 指摘、
+  `memos.test.ts` の「does not conflict a title-only update with an updatedAt
+  read before an unrelated review completion」で固定化）。専用テーブルに
+  分離することで、この結合を構造的に排除した。
+  - migration（`0012_uneven_jean_grey.sql`）では、既存メモ全件に
+    `version = 0` の行をバックフィルする `INSERT ... SELECT` を追加した。
+    以後の新規メモは `createMemo` が memos・reviews と同じ `db.batch()` で
+    `review_schedules` 行（`version = 0`）も作るため、このテーブルは
+    メモと常に1:1で存在する前提が成立する（delete-memo 機能が無いことに
+    も依存する）。
+
+- **不変条件**:「reviews への書き込み経路は、同じ論理操作内で
+  `review_schedules.version` の CAS に勝った場合のみ書き込む」。これを
+  `completeReview`・`changeMemoPreset`・`updateCustomPresetIntervals`・
+  `archiveMemo` の4経路すべてに適用した。
+  - **`completeReview`**: 冒頭の JOIN で対象メモの `review_schedules.version`
+    も一緒に取得し、`completeCurrent`（対象ステップの completedAt を立てる
+    UPDATE）の WHERE に「version が読み取り時のまま変わっていないか」の
+    EXISTS 条件を追加した。別リクエストの claim（プリセット変更）が先に
+    割り込んで version を進めていた場合、この UPDATE は0行になり、既存の
+    「0行なら ConflictError」分岐がそのまま働く。加えて、この呼び出し自身が
+    実際に完了させた場合（既存の `wonThisCompletion` ガードと同じ形）に限り
+    version を1進める文を同じ `db.batch()` に追加した。これにより
+    `completeReview` 自身も「reviews の状態を変える書き込み」として version
+    を進める側に回る。
+  - **`changeMemoPreset`・`updateCustomPresetIntervals`**: DELETE（未完了
+    reviews）+ version bump を「claim」として1つの `db.batch()` にまとめ、
+    bump の `.returning()` で勝敗を判定してから、勝った場合にのみ別の
+    呼び出しで新しい行を INSERT する2段階方式にした（#82 で確立した
+    「memo の UPDATE を先に確定させ、勝った場合にのみ reviews を再計算する」
+    という2段階の考え方を、reviews の再計算そのものにも適用したもの）。
+    INSERT 文自体に WHERE を持たせて version を検証することはできない
+    （D1 の `batch()` が `INSERT ... VALUES` への WHERE 付与や、それに代わる
+    guarded な生 SQL INSERT の実行を許さないことは #82 で確認済み）ため、
+    「DELETE + bump が勝ったことを確認してから INSERT する」という順序上の
+    分離が唯一の実現手段になる。
+  - claim のガード（`reviewScheduleVersionMatches`・`memoIsNotArchived`、
+    `$lib/server/reviews.ts`）は、version の列を直接 WHERE に混ぜるのではなく
+    EXISTS で包む必要がある。実装時に一度、DELETE 文（`reviews` テーブルが
+    対象）の WHERE へ `review_schedules` の列をそのまま条件式として混ぜた
+    ところ、`review_schedules` がその文の FROM/JOIN に無いため
+    "no such column: review_schedules.memo_id" という D1 エラーになった
+    （実機で確認）。UPDATE 対象のテーブル自身の列であれば直接条件式に書けるが、
+    それ以外の文からは EXISTS 経由でしか参照できない、という drizzle/SQL の
+    制約に注意が必要。
+  - アーカイブ済みメモの除外は version の一致だけでは保証できない: version を
+    読み取った時点より後にアーカイブされた場合、その読み取り自体が既に
+    アーカイブ後の状態であれば version は「一致している」ように見えてしまう。
+    アーカイブは一方向（un-archive しない）操作のため、claim 評価時点の
+    `memos.archivedAt` を毎回ライブに確認する EXISTS 条件を version チェックと
+    独立に持たせることで、読み取りタイミングに関わらず確実に除外できる
+    （advisor 指摘、`interval-presets.test.ts` の既存回帰テストで検証）。
+  - **`updateCustomPresetIntervals`（複数メモ対象）固有の追加考慮**:
+    `updatePresetStatement`（プリセット自体の `intervals` 列 UPDATE）は
+    メモ単位のガードを持てず、claim の勝敗に関わらずこのプリセットを使う
+    全メモに適用される。そのため、claim に負けたメモのうち「アーカイブされた
+    から対象外」以外の理由（version 不一致 = 別の書き込みが割り込んだ）で
+    負けたメモが1件でもあれば、この操作全体を `ConflictError` として拒否し、
+    プリセットの UPDATE・勝った memo 分の INSERT を一切実行しない
+    （advisor 指摘）。実行してしまうと「プリセットの intervals だけが
+    更新され、負けたメモの reviews は古い intervals のまま」という恒久的な
+    不整合が「成功」として返ってしまう。
+    - **この結果、claim（DELETE + bump）で既に削除された「勝った」メモの
+      未完了 reviews は、直後に ConflictError で操作全体を止めても元に戻らない
+      残存リスクとして残る**（claim の DELETE は既にコミットされた別の
+      `db.batch()` であり、後から取り消せない）。この状態は破損ではなく、
+      再実行すれば `computeReviewRecalculation` が「削除された未完了行」に
+      依存せず `latestCompleted`（完了済み行）だけから再計算できるため回復可能
+      （advisor 指摘）。#82 の「残るリスク」と同種の、狙って完全には排除しない
+      残存窓として受容する。
+    - `MAX_STATEMENTS_PER_MEMO` は claim（DELETE 1 + version bump 1）+
+      INSERT 1 の3文になり、#84 時点の2文（DELETE + INSERT）から増えた。
+      `MAX_BATCH_STATEMENTS`（500）が許容する最大メモ数は、悲観的見積もりで
+      249件（#84）から166件に変わった。
+    - claim に負けたメモを再確認するための別クエリ（旧 `stillActiveMemoIds`）
+      は、claim 自身のガードが対象メモの `archivedAt` を直接見るようになった
+      ことで不要になった（advisor 指摘）。
+
+- **`isUniqueConstraintViolation` による 409 変換は backstop として残した**が、
+  主たる検出手段ではなくなった。claim に勝った直後・INSERT 実行前のごく狭い窓
+  （2段階方式のため完全には排除できない、#82 節が記録する残存レースと同種）に
+  限り、DB 制約エラーからの変換に頼る。#82 で発見された「非overlapping な
+  step 番号のため unique 制約にすら頼れず静かに成功する」ケースは、version の
+  CAS が主たる防御線になったことで、`memos.test.ts` の
+  「does not silently apply a losing preset change even when no
+  unique-constraint collision would occur」がそのまま検出できる
+  （このテスト自体は実際には #82 由来の `updatedAt` 楽観ロックで先に
+  弾かれる別経路だが、version CAS 経由の同種の競合は新規追加した
+  「detects a stale changeMemoPreset claim even when a concurrent bulk
+  preset update races in」で検証している。`updateCustomPresetIntervals` は
+  memos.updatedAt に触れないため、この経路の検出は version CAS のみに
+  依存する）。

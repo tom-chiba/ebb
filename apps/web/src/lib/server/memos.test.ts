@@ -15,6 +15,7 @@ import {
 	TITLE_MAX_LENGTH,
 	updateMemo
 } from './memos';
+import { updateCustomPresetIntervals } from './interval-presets';
 import { completeReview, getCurrentPendingReview } from './reviews';
 import { createTestUser } from './test-helpers';
 
@@ -885,6 +886,43 @@ describe('updateMemo', () => {
 		expect(updated.content).toBe('content');
 	});
 
+	// Issue #85 の設計判断の裏付け: review_schedules.version を memos の列にせず
+	// 専用テーブルへ分離した理由は、drizzle の buildUpdateSet が $onUpdate 持ちの列
+	// （memos.updatedAt）を、その列を .set() に含めない UPDATE でも自動で SET 句に
+	// 追加してしまう（実測確認済み）ため。version を memos の列にすると、
+	// completeReview のたびに updatedAt が意図せず進み、他クライアントが読んでいた
+	// updatedAt を使った title/content の更新が復習完了のたびに 409 になってしまう。
+	// この非結合を回帰させないためのテスト。
+	it('does not conflict a title-only update with an updatedAt read before an unrelated review completion', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title', // ownerPreset の intervals: [1, 24]
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(Date.now() - 1000) })
+			.where(eq(reviews.memoId, memo.id));
+		const [due] = await db
+			.select({ id: reviews.id })
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.limit(1)
+			.all();
+		if (!due) throw new Error('fixture setup failed');
+
+		// クライアントが memo.updatedAt を読んだ後、（このクライアントとは無関係に）
+		// review を完了させる操作が挟まる。
+		await completeReview(db, ownerId, due.id);
+
+		// クライアントが読んでいた（完了前の）updatedAt を使って title だけを更新する。
+		const updated = await updateMemo(db, ownerId, memo.id, memo.updatedAt, {
+			title: 'new title'
+		});
+		expect(updated.title).toBe('new title');
+	});
+
 	it('rejects an empty title on update', async () => {
 		const memo = await createMemo(db, ownerId, {
 			title: 'title',
@@ -1219,6 +1257,72 @@ describe('changeMemoPreset', () => {
 		expect(memoAfter.title).toBe('m');
 		expect(memoAfter.content).toBe('c');
 		expect(memoAfter.intervalPresetId).toBe(ownerPresetId);
+	});
+
+	// Issue #85 の回帰テスト: updateCustomPresetIntervals（プリセット単位の一括変更）は
+	// memos.updatedAt に一切触れない。そのため、changeMemoPreset の1) memo UPDATE（
+	// updatedAt の楽観ロック）が通過した後・2) reviews の claim 実行前に、同じメモが
+	// 使っているプリセット自体が別リクエストで一括変更された場合、updatedAt の
+	// 楽観ロックだけでは検出できない。review_schedules.version の CAS
+	// （commitReviewRecalculation・claimReviewSchedule）が唯一の防御線になることを
+	// 確認する。
+	it('detects a stale changeMemoPreset claim even when a concurrent bulk preset update races in (memos.updatedAt is untouched by it)', async () => {
+		// changeMemoPreset の1) memo UPDATE（stage 1）は、この呼び出しの db.batch()
+		// より前に memos.intervalPresetId を変更先（targetPreset）へ既に書き換えている。
+		// そのため、割り込ませる一括変更（updateCustomPresetIntervals）の対象は
+		// 変更前の ownerPresetId ではなく、この変更先 targetPreset でなければ
+		// このメモを対象に含められない（collectAffectedMemoIds が現在の
+		// intervalPresetId で絞り込むため）。
+		const [targetPreset] = await db
+			.insert(intervalPresets)
+			.values({ userId: ownerId, name: 'target', intervals: [1, 24] })
+			.returning();
+		if (!targetPreset) throw new Error('fixture setup failed');
+
+		const memo = await createMemo(db, ownerId, {
+			title: 'm',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24]
+		});
+
+		const originalBatch = db.batch.bind(db);
+		const batchSpy = vi
+			.spyOn(db, 'batch')
+			.mockImplementationOnce(async (queries: Parameters<typeof originalBatch>[0]) => {
+				// この時点で 1) の memo UPDATE は既に成功し、memos.intervalPresetId は
+				// targetPreset.id になっている。changeMemoPreset の
+				// planReviewRecalculation（未完了2件を前提にした SELECT）も完了済み。
+				// ここで targetPreset 自体を一括変更し、このメモの reviews と
+				// review_schedules.version を作り直す。memos.updatedAt には一切触れない。
+				await updateCustomPresetIntervals(db, ownerId, targetPreset.id, '2h, 10h');
+				return originalBatch(queries);
+			});
+
+		try {
+			await expect(
+				changeMemoPreset(db, ownerId, memo.id, memo.updatedAt, {
+					intervalPresetId: targetPreset.id
+				})
+			).rejects.toThrow(ConflictError);
+		} finally {
+			batchSpy.mockRestore();
+		}
+
+		// memo は intervalPresetId が変更前のまま（updatedAt の楽観ロックだけでは
+		// 検出できないはずのこの競合が、version の CAS によって正しく拒否されている）。
+		const memoAfter = await getMemo(db, ownerId, memo.id);
+		expect(memoAfter.intervalPresetId).toBe(ownerPresetId);
+
+		// reviews は一括変更（bulk）側が作り直した2件のまま（changeMemoPreset の
+		// claim は version 不一致で敗れ、DELETE/INSERT を一切実行していない）。
+		const rows = await db
+			.select()
+			.from(reviews)
+			.where(eq(reviews.memoId, memo.id))
+			.orderBy(reviews.step)
+			.all();
+		expect(rows).toHaveLength(2);
+		expect(rows.every((r) => r.completedAt === null)).toBe(true);
 	});
 
 	// catch 節の復元ガード（`eq(memos.updatedAt, thisChangeStamp)`）の否定側:
