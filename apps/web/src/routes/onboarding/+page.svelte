@@ -1,8 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { deserialize } from '$app/forms';
 	import { detectPlatform, type PlatformInfo } from '$lib/platform-detect';
-	import { requestPushSubscription } from '$lib/push-subscribe';
+	import { requestPushSubscription, submitPushSubscription } from '$lib/push-subscribe';
 	import Button from '$lib/components/Button.svelte';
 	import type { PageProps } from './$types';
 
@@ -19,20 +18,6 @@
 		platform = detectPlatform();
 	});
 
-	async function submitSubscription(subscription: PushSubscription): Promise<boolean> {
-		const json = subscription.toJSON();
-		if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
-			throw new Error('購読情報の取得に失敗しました');
-		}
-		const body = new FormData();
-		body.set('endpoint', json.endpoint);
-		body.set('p256dh', json.keys.p256dh);
-		body.set('auth', json.keys.auth);
-		const response = await fetch('?/subscribePush', { method: 'POST', body });
-		const result = deserialize(await response.text());
-		return result.type === 'success';
-	}
-
 	// 許可ダイアログはこのボタンを押したときにだけ出す（#19 の注意事項と同じ）。
 	async function enableNotifications() {
 		if (!data.vapidPublicKey) return;
@@ -44,7 +29,7 @@
 				statusMessage = '通知が許可されませんでした。あとで設定画面から有効にできます。';
 				return;
 			}
-			if (await submitSubscription(subscription)) {
+			if (await submitPushSubscription('?/subscribePush', subscription)) {
 				subscribed = true;
 			} else {
 				statusMessage = 'サーバーへの保存に失敗しました。もう一度お試しください。';
