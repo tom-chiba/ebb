@@ -2367,6 +2367,21 @@ MemoRecalcInputs>` を返し、見つからなかった memoId は含めない�
     （実機で確認）。UPDATE 対象のテーブル自身の列であれば直接条件式に書けるが、
     それ以外の文からは EXISTS 経由でしか参照できない、という drizzle/SQL の
     制約に注意が必要。
+  - **`changeMemoPreset`（単一メモ経路）には、上記の一括経路と同じ形の
+    残存リスクが未修正のまま残っている**（advisor 指摘。一括経路のような
+    データ損失バグとして実機再現はしていないが、構造は同一）: `claimReviewSchedule`
+    は自分自身で `db.batch([DELETE, bump])` を実行してコミットし、
+    `commitReviewRecalculation` はその後、別の独立した呼び出しとして
+    `db.insert(reviews).values(plan.newRows)` を実行する。この INSERT が
+    失敗する（unique 制約違反など）と、claim の DELETE + bump は既に
+    コミット済みのため元に戻らず、`changeMemoPreset` の catch 節に伝播しても
+    memos 側フィールドしか復元されない。到達には unique 制約の backstop が
+    実際に発火する必要があり、一括経路の初版バグ（claim 成功後に無条件で
+    処理全体を中断する設計）よりはるかに窓が狭いため、一括経路と同じ
+    「batch B を常に実行してから 409 判定する」形へ揃える修正は見送った。
+    #82 の「残るリスク」節が記録していた残存レースと同種の、狙って完全には
+    排除しない残存窓として受容する（ただし一括経路の初版のように恒常的に
+    発生する経路ではない点を区別しておく）。
   - アーカイブ済みメモの除外は version の一致だけでは保証できない: version を
     読み取った時点より後にアーカイブされた場合、その読み取り自体が既に
     アーカイブ後の状態であれば version は「一致している」ように見えてしまう。
@@ -2377,25 +2392,34 @@ MemoRecalcInputs>` を返し、見つからなかった memoId は含めない�
   - **`updateCustomPresetIntervals`（複数メモ対象）固有の追加考慮**:
     `updatePresetStatement`（プリセット自体の `intervals` 列 UPDATE）は
     メモ単位のガードを持てず、claim の勝敗に関わらずこのプリセットを使う
-    全メモに適用される。そのため、claim に負けたメモのうち「アーカイブされた
-    から対象外」以外の理由（version 不一致 = 別の書き込みが割り込んだ）で
-    負けたメモが1件でもあれば、この操作全体を `ConflictError` として拒否し、
-    プリセットの UPDATE・勝った memo 分の INSERT を一切実行しない
-    （advisor 指摘）。実行してしまうと「プリセットの intervals だけが
-    更新され、負けたメモの reviews は古い intervals のまま」という恒久的な
-    不整合が「成功」として返ってしまう。
-    - **この結果、claim（DELETE + bump）で既に削除された「勝った」メモの
-      未完了 reviews は、直後に ConflictError で操作全体を止めても元に戻らない
-      残存リスクとして残る**（claim の DELETE は既にコミットされた別の
-      `db.batch()` であり、後から取り消せない）。この状態は破損ではなく、
-      再実行すれば `computeReviewRecalculation` が「削除された未完了行」に
-      依存せず `latestCompleted`（完了済み行）だけから再計算できるため回復可能
-      （advisor 指摘）。#82 の「残るリスク」と同種の、狙って完全には排除しない
-      残存窓として受容する。
-    - `MAX_STATEMENTS_PER_MEMO` は claim（DELETE 1 + version bump 1）+
-      INSERT 1 の3文になり、#84 時点の2文（DELETE + INSERT）から増えた。
-      `MAX_BATCH_STATEMENTS`（500）が許容する最大メモ数は、悲観的見積もりで
-      249件（#84）から166件に変わった。
+    全メモに適用される。
+    - **初版実装は「claim（batch A）に負けたメモが1件でもいれば、batch B
+      （プリセットの UPDATE・勝った memo 分の INSERT）を一切実行せず
+      ConflictError で即座に中断する」という設計だったが、これは
+      実機で再現される重大なデータ損失バグだった**（advisor 指摘）:
+      claim の DELETE は batch A の時点で既にコミットされており、直後に
+      batch B の実行そのものを止めると、既に claim に「勝った」別のメモの
+      未完了 reviews が INSERT されないまま永久に失われる（winner と loser の
+      2メモを用意し、`db.batch` を横取りして loser だけを batch A 実行直前に
+      競合させ、`ConflictError` 発生後に winner の reviews が0件になることを
+      実機で確認した）。
+    - **修正後の設計**: batch B は claim の勝敗によらず常に実行する
+      （プリセットの UPDATE・勝ったメモ分の INSERT を必ず反映する）。
+      claim に負けたメモのうち「アーカイブされたから対象外」以外の理由
+      （version 不一致 = 別の書き込みが割り込んだ）で負けたメモが1件でも
+      あれば、batch B の**コミット後**に `ConflictError` を投げる。この順序
+      により、勝ったメモの reviews が失われることはなく、かつ負けたメモは
+      「古い intervals のまま」という不整合を隠さず 409 としてユーザーに
+      伝えられる（＝プリセットの intervals は更新されるが、負けたメモの
+      reviews は別途 retry してもらう必要がある。retry は claim を
+      やり直すだけなので安全）。`interval-presets.test.ts` の
+      「still recreates a winning memo reviews and updates the preset
+      even when a losing memo forces a 409」で固定化した。
+    - `MAX_STATEMENTS_PER_MEMO` は batch A（claim: DELETE 1 + version bump 1
+      の2文）が律速する。batch B（プリセット UPDATE 1件 + メモ毎最大1件の
+      INSERT）は常にそれ以下になるため、悲観的見積もりは batch A の2文を
+      使う。`MAX_BATCH_STATEMENTS`（500）が許容する最大メモ数は、
+      #84 時点の249件とほぼ同水準（250件）を維持する。
     - claim に負けたメモを再確認するための別クエリ（旧 `stillActiveMemoIds`）
       は、claim 自身のガードが対象メモの `archivedAt` を直接見るようになった
       ことで不要になった（advisor 指摘）。

@@ -218,14 +218,14 @@ async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[
 	return rows.map((row) => row.id);
 }
 
-// 1メモあたりに積む文数の上限: claim（buildReviewScheduleClaimStatements、
-// DELETE 1 + review_schedules の version bump 1）+ INSERT 1（Issue #85 で
-// DELETE/INSERT だけの2文から3文に増えた。claim の bump が version の CAS を兼ね、
-// INSERT だけを別 db.batch() に切り出す必要があるため）。実際の文数はこれより
-// 少ないことがある（新 intervals の残りステップが0件で INSERT 不要、等）が、
-// プレビューと確定操作を同じ条件で早期拒否するため、両方とも実際の文数ではなく、
-// この上限値を使った悲観的見積もりで判定する。
-const MAX_STATEMENTS_PER_MEMO = 3;
+// 1メモあたりに積む文数の上限。Issue #85 で claim（DELETE 1 + review_schedules の
+// version bump 1）と実際の reviews INSERT が別々の db.batch()（batch A ・ batch B）
+// に分離されたため、両者を合算した値ではなく、各 batch 単体での上限を見積もる
+// 必要がある。batch A は 1メモあたり2文（DELETE + bump）、batch B は
+// 「プリセット UPDATE 1件 + 1メモあたり最大1文（INSERT）」であり、メモ数が
+// 1件以上なら batch A の 2N が batch B の 1+N を常に上回るため、batch A が
+// 律速する。よってここでは batch A の上限（2）を使う。
+const MAX_STATEMENTS_PER_MEMO = 2;
 
 // プレビュー・確定共通のバッチ上限超過エラー。報告の仕方（メッセージ文言・
 // 例外の種類）は1箇所にまとめ、片方だけ文言を直し忘れる事故を避ける。
@@ -235,21 +235,21 @@ function assertWithinBatchStatementLimit(statementCount: number): void {
 	}
 }
 
-// 対象メモ数から、update 実行時に db.batch() へ積む文数（プリセット UPDATE 1件 +
-// 各メモ最大 MAX_STATEMENTS_PER_MEMO 件）の悲観的上限を見積もる。実際の文数は
-// 常にこの悲観的見積もり以下になるため、これが上限を超えなければ
-// updateCustomPresetIntervals は必ず成功する（＝プレビューが「N件の予定が
-// 更新されます」と成功を示したのに、確定操作だけが後から拒否される非対称を防ぐ。
-// 正確性レビューで指摘）。
+// 対象メモ数から、update 実行時に各 db.batch()（batch A・batch B）へ積む文数の
+// 悲観的上限を見積もる。batch A（各メモ最大 MAX_STATEMENTS_PER_MEMO 件）が
+// batch B（プリセット UPDATE 1件 + 各メモ最大1件）を常に上回るため、batch A の
+// 見積もりだけを使えば両方の batch を保証できる。実際の文数は常にこの悲観的
+// 見積もり以下になるため、これが上限を超えなければ updateCustomPresetIntervals は
+// 必ず成功する（＝プレビューが「N件の予定が更新されます」と成功を示したのに、
+// 確定操作だけが後から拒否される非対称を防ぐ。正確性レビューで指摘）。
 function estimateWorstCaseBatchStatementCount(memoCount: number): number {
-	return 1 + memoCount * MAX_STATEMENTS_PER_MEMO;
+	return memoCount * MAX_STATEMENTS_PER_MEMO;
 }
 
 // queryInChunks（./db-chunk）のチャンク分割は、D1 の1クエリあたり bind パラメータ数
 // 上限（ローカル実測でちょうど100件、101件から `too many SQL variables`）に対する
-// 対処。MAX_BATCH_STATEMENTS（500）が許容する最大メモ数（悲観的見積もりで最大166件、
-// Issue #85 で MAX_STATEMENTS_PER_MEMO が 2→3 になったことに伴い #84 時点の249件から
-// 変わった）はこれを容易に超えるため、$lib/server/reviews.ts の
+// 対処。MAX_BATCH_STATEMENTS（500）が許容する最大メモ数（悲観的見積もりで最大250件、
+// #84 時点の249件とほぼ同水準）はこれを容易に超えるため、$lib/server/reviews.ts の
 // loadReviewRecalculationInputs（#84 で一括取得に変更した際に追加）がこのヘルパー
 // 経由でチャンク分割する（#18 の正確性レビューで指摘。実際に251件規模のテストで
 // 生の D1 エラーを再現して確認した）。
@@ -397,30 +397,13 @@ export async function updateCustomPresetIntervals(
 	}
 	const wonPlans = memoPlans.filter(({ memoId }) => wonMemoIds.has(memoId));
 
-	// Issue #85: updatePresetStatement（下記）はメモ単位のガードを持てず、勝敗に関わらず
-	// このプリセットを使う全メモに適用される。そのため、負けたメモ（claim の
-	// 対象外・version 不一致）のうち「アーカイブされたから対象外」以外の理由で
-	// 負けたメモが1件でもあれば、この操作全体を 409 として拒否し、batch B
-	// （プリセットの UPDATE・勝った memo 分の INSERT）を一切実行しない。実行してしまうと、
-	// プリセットの intervals だけが更新され、負けたメモの reviews は古い intervals の
-	// ままという恒久的な不整合が「成功」として返ってしまう（advisor 指摘）。
-	// アーカイブによる除外は既存の不変条件（アーカイブ済みメモに未完了 reviews は
-	// 残らない）の範囲内であり、このプリセットの対象外として静かに除外してよい。
+	// Issue #85: claim（batch A、上記）は既にコミット済みであり、勝った memo の
+	// reviews は削除された状態で確定している。ここで負けたメモがいるからといって
+	// batch B（プリセットの UPDATE・勝った memo 分の INSERT）の実行を中断すると、
+	// 勝った memo の未完了 reviews が INSERT されないまま永久に失われる（実機で
+	// 再現・advisor 指摘）。そのため batch B は常に実行し、409 を投げるかどうかの
+	// 判定はその後に行う。
 	const loserMemoIds = memoPlans.map(({ memoId }) => memoId).filter((memoId) => !wonMemoIds.has(memoId));
-	if (loserMemoIds.length > 0) {
-		const stillActiveLoserRows = await queryInChunks(loserMemoIds, (ids) =>
-			db
-				.select({ id: memos.id })
-				.from(memos)
-				.where(and(inArray(memos.id, ids), isNull(memos.archivedAt)))
-				.all()
-		);
-		if (stillActiveLoserRows.length > 0) {
-			throw new ConflictError(
-				'このプリセットを使っているメモの復習予定が同時に更新されました。もう一度お試しください。'
-			);
-		}
-	}
 
 	const updatePresetStatement = db
 		.update(intervalPresets)
@@ -452,6 +435,27 @@ export async function updateCustomPresetIntervals(
 			);
 		}
 		throw err;
+	}
+
+	// batch B のコミット後に負けたメモの生死を確認する。ここで初めて 409 を
+	// 投げても、勝った memo の reviews は既に batch B で INSERT 済みのため
+	// 失われない（batch A 直後に判定していた旧実装は winner の reviews を
+	// 失う不具合があった。advisor 指摘・実機で再現・修正）。アーカイブ済みで
+	// 負けたメモは既存の不変条件（アーカイブ済みメモに未完了 reviews は残らない）
+	// の範囲内であり、静かに除外してよい。
+	if (loserMemoIds.length > 0) {
+		const stillActiveLoserRows = await queryInChunks(loserMemoIds, (ids) =>
+			db
+				.select({ id: memos.id })
+				.from(memos)
+				.where(and(inArray(memos.id, ids), isNull(memos.archivedAt)))
+				.all()
+		);
+		if (stillActiveLoserRows.length > 0) {
+			throw new ConflictError(
+				'このプリセットを使っているメモの復習予定が同時に更新されました。もう一度お試しください。'
+			);
+		}
 	}
 
 	// hidden field 等でクライアントから渡された件数を信用せず、実行直前に読み直した
