@@ -7,6 +7,13 @@ import { deserialize } from '$app/forms';
 // 成功可否の判定・result.data の型ガードは呼び出し側の責務のまま残す
 // （purposefully returns the raw ActionResult; settings/onboarding で success 判定や
 // data の中身が異なるため）。
+//
+// 呼び出し側で `applyAction`（$app/forms）は使わないこと。`type: 'error'`
+// （未処理例外による500）の結果を最寄りのエラーページへの全画面遷移として扱うため、
+// ユーザー操作なしで onMount から実行されるバックグラウンド呼び出し
+// （PushNotificationSettings の refreshSubscriptionState 等）がサーバー側の
+// 一時的な失敗だけで画面全体をエラーページに差し替えてしまう
+// （正確性レビューで指摘、settings #19）。
 export async function postFormAction(action: string, body: FormData) {
 	const response = await fetch(action, { method: 'POST', body });
 	return deserialize(await response.text());
