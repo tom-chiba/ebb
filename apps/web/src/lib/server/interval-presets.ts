@@ -225,7 +225,7 @@ async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[
 // に分離されたため、両者を合算した値ではなく、各 batch 単体での上限を見積もる
 // 必要がある。batch A は 1メモあたり2文（DELETE + bump）、batch B は
 // 「プリセット UPDATE 1件 + 1メモあたり最大1文（INSERT）」であり、メモ数が
-// 1件以上なら batch A の 2N が batch B の 1+N を常に上回るため、batch A が
+// 1件以上なら batch A の 2N が batch B の 1+N を常に下回らないため、batch A が
 // 律速する。よってここでは batch A の上限（2）を使う。
 const MAX_STATEMENTS_PER_MEMO = 2;
 
@@ -238,8 +238,8 @@ function assertWithinBatchStatementLimit(statementCount: number): void {
 }
 
 // 対象メモ数から、update 実行時に各 db.batch()（batch A・batch B）へ積む文数の
-// 悲観的上限を見積もる。batch A（各メモ最大 MAX_STATEMENTS_PER_MEMO 件）が
-// batch B（プリセット UPDATE 1件 + 各メモ最大1件）を常に上回るため、batch A の
+// 悲観的上限を見積もる。batch A（各メモ最大 MAX_STATEMENTS_PER_MEMO 件）の見積もりは
+// batch B（プリセット UPDATE 1件 + 各メモ最大1件）を常に下回らないため、batch A の
 // 見積もりだけを使えば両方の batch を保証できる。実際の文数は常にこの悲観的
 // 見積もり以下になるため、これが上限を超えなければ updateCustomPresetIntervals は
 // 必ず成功する（＝プレビューが「N件の予定が更新されます」と成功を示したのに、
@@ -252,9 +252,10 @@ function estimateWorstCaseBatchStatementCount(memoCount: number): number {
 // 上限（ローカル実測でちょうど100件、101件から `too many SQL variables`）に対する
 // 対処。MAX_BATCH_STATEMENTS（500）が許容する最大メモ数（悲観的見積もりで最大250件、
 // #84 時点の249件とほぼ同水準）はこれを容易に超えるため、$lib/server/reviews.ts の
-// loadReviewRecalculationInputs（#84 で一括取得に変更した際に追加）がこのヘルパー
-// 経由でチャンク分割する（#18 の正確性レビューで指摘。実際に251件規模のテストで
-// 生の D1 エラーを再現して確認した）。
+// loadReviewRecalculationInputs（#84 で一括取得に変更した際に追加）と、下記
+// updateCustomPresetIntervals 内の負けたメモのアーカイブ再確認（Issue #85 で追加）が
+// このヘルパー経由でチャンク分割する（#18 の正確性レビューで指摘。実際に251件規模の
+// テストで生の D1 エラーを再現して確認した）。
 
 // プリセット編集画面（#63）の「このプリセットを使っているメモ」一覧・削除ボタンの
 // 活性判定に使う。deleteCustomPreset の使用中判定と同じく、アーカイブ済みメモも
@@ -376,10 +377,13 @@ export async function updateCustomPresetIntervals(
 	// DELETE 文をまとめて先に積み、bump 文をまとめて後に積む（各メモの DELETE は
 	// 必ず自分の bump より先に実行される必要があるが、メモ同士は独立な行を操作する
 	// ため互いの順序は問わない）。bump は .returning({ memoId }) で「勝った」memoId
-	// 自身を返すため、結果を読む側は「何番目が誰の bump か」という位置の知識を
-	// 持たずに済む（設計レビューで指摘: 以前は flatMap で [delete, bump] を交互に
-	// 積み、`claimResults[i * 2 + 1]` という暗黙のストライドで bump 結果を読んでおり、
-	// 積む側・読む側の2箇所に同じレイアウト知識が分散していた）。
+	// 自身を返すため、結果を読む側は「bump 群がまとめて後半に来る」という粗い
+	// 位置の知識（`claimResults.slice(claimPairs.length)`）だけで済む（設計レビューで
+	// 指摘: 以前は flatMap で [delete, bump] を交互に積み、
+	// `claimResults[i * 2 + 1]` という「何番目が誰の bump か」まで踏み込んだ暗黙の
+	// ストライドで結果を読んでおり、積む側・読む側の2箇所に同じ細かいレイアウト知識が
+	// 分散していた。今回の形は「誰の」までは値（memoId）から読むため、その分の
+	// 位置依存は無くなっている）。
 	const claimPairs = memoPlans.map(({ memoId, expectedVersion }) => ({
 		memoId,
 		...buildReviewScheduleClaimStatements(db, memoId, expectedVersion)
@@ -457,6 +461,14 @@ export async function updateCustomPresetIntervals(
 	// コミット後に判定することで、勝った memo の reviews は既に INSERT 済みの
 	// ため失われない。アーカイブ済みで負けたメモは既存の不変条件（アーカイブ
 	// 済みメモに未完了 reviews は残らない）の範囲内であり、静かに除外してよい。
+	//
+	// ここで投げる ConflictError は、上の catch 節（batch B 自体が失敗した
+	// ケース）とは意味が異なる: batch B は既にコミット済みであり、プリセットの
+	// intervals も勝った memo の reviews も保存済みの「部分成功」状態である。
+	// メッセージを他の ConflictError と同じ文言にすると、実際には保存されている
+	// のに「何も保存されなかったので再試行してほしい」と誤解させる（設計レビューで
+	// 指摘）。負けたメモだけ古い intervals のままなので、そのメモに対して同じ
+	// 操作を再実行すれば揃う旨を明示する。
 	if (loserMemoIds.length > 0) {
 		const stillActiveLoserRows = await queryInChunks(loserMemoIds, (ids) =>
 			db
@@ -467,7 +479,7 @@ export async function updateCustomPresetIntervals(
 		);
 		if (stillActiveLoserRows.length > 0) {
 			throw new ConflictError(
-				'このプリセットを使っているメモの復習予定が同時に更新されました。もう一度お試しください。'
+				'プリセットは更新されましたが、一部のメモは同時に更新されたため復習予定が反映されていません。もう一度お試しください。'
 			);
 		}
 	}

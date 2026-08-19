@@ -636,9 +636,11 @@ describe('updateCustomPresetIntervals', () => {
 		expect(preset?.intervals).toEqual([2, 5]);
 	});
 
-	// collectAffectedMemoIds が対象メモを列挙した後、db.batch() 確定前にもう一度
-	// アーカイブ状態を確認する stillActiveMemoIds ガード（正確性レビューで指摘）の
-	// 回帰テスト。db.batch を横取りする既存の競合テストとは異なるタイミング
+	// collectAffectedMemoIds が対象メモを列挙した後、claim（batch A）確定前に
+	// アーカイブされた場合に対象から外れることの回帰テスト（正確性レビューで指摘）。
+	// Issue #85 以降は、archiveMemo が version を bump し claim 自身のガード
+	// （memoIsNotArchived・version の CAS）がライブに再確認するため、この経路で
+	// 弾かれる。db.batch を横取りする既存の競合テストとは異なるタイミング
 	// （「対象メモの列挙後・再確認前」）を再現する必要があるため、代わりに
 	// loadReviewRecalculationInputs（#84 で対象メモ全件を一括取得するようになった、
 	// updateCustomPresetIntervals 内で1回だけ呼ばれる関数）を横取りし、その内部で
@@ -685,8 +687,8 @@ describe('updateCustomPresetIntervals', () => {
 			.all();
 		expect(activeRows).toHaveLength(2);
 
-		// archiveMemo が削除した未完了行のまま。stillActiveMemoIds ガードが機能して
-		// いなければ、ここに新しい未完了行が2件 INSERT されてしまう。
+		// archiveMemo が削除した未完了行のまま。claim のガードが機能していなければ、
+		// ここに新しい未完了行が2件 INSERT されてしまう。
 		const archivedRows = await db
 			.select()
 			.from(reviews)
@@ -738,9 +740,10 @@ describe('updateCustomPresetIntervals', () => {
 		expect(healedRow?.version).toBe(1);
 	});
 
-	// queryInChunks は「1 id = 1 bind」を前提に D1_MAX_BIND_PARAMS(100) 単位で
-	// チャンク分割する（db-chunk.ts 参照）。review_schedules 治癒 INSERT が
-	// version も明示的に bind すると1行2 bind になり、51件以上の欠落で
+	// queryInChunks は既定では「1 id = 1 bind」を前提に D1_MAX_BIND_PARAMS(100) 単位で
+	// チャンク分割する（db-chunk.ts 参照）。review_schedules 治癒 INSERT は
+	// memo_id・version の2列に bind するため bindsPerItem: 2 を渡す必要があり、
+	// これを渡し忘れる（既定の1のままになる）と51件以上の欠落で
 	// `too many SQL variables` になる回帰があった（正確性レビューで指摘・実機で
 	// 再現）。60件（1チャンクに収まる100件以下だが、2 bind/行なら超過する件数）で
 	// 再現し、治癒が生の D1 エラーにならないことを固定化する。

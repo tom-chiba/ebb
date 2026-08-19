@@ -826,6 +826,43 @@ describe('completeReview', () => {
 		expect(rows).toHaveLength(0);
 	});
 
+	// 上のテストは claim の DELETE が対象 reviews 行自体を消すため、completeCurrent が
+	// 0行になるのが「scheduleVersionMatches の不一致」なのか「対象行が無いだけ」なのか
+	// 区別できない（テスト網羅性レビューで指摘・ミューテーションテストで検出:
+	// scheduleVersionMatches をガードから外しても既存テストが全て通ってしまっていた）。
+	// ここでは reviews 行を消さずに review_schedules.version だけを直接進めることで、
+	// scheduleVersionMatches 単体のガードを分離して検証する。
+	it('rejects completion when review_schedules.version alone has advanced (reviews row untouched)', async () => {
+		const { memo, due } = await createDueReview(ownerId, ownerPresetId);
+
+		const originalBatch = db.batch.bind(db);
+		const batchSpy = vi
+			.spyOn(db, 'batch')
+			.mockImplementationOnce(async (queries: Parameters<typeof originalBatch>[0]) => {
+				// completeReview の冒頭 SELECT（scheduleVersion=0 の取得）はこの時点で
+				// 完了済み。ここで reviews 行には触れず review_schedules.version だけを
+				// 進める（claimReviewSchedule のような DELETE を伴わない、archiveMemo の
+				// version bump 相当の割り込み）。
+				await db
+					.update(reviewSchedules)
+					.set({ version: sql`${reviewSchedules.version} + 1` })
+					.where(eq(reviewSchedules.memoId, memo.id));
+				return originalBatch(queries);
+			});
+
+		try {
+			await expect(completeReview(db, ownerId, due.id)).rejects.toThrow(ConflictError);
+		} finally {
+			batchSpy.mockRestore();
+		}
+
+		// completeCurrent の WHERE が version 不一致で弾いたため、completedAt は
+		// 立っていない（reviews 行自体は削除されていないので、対象行が無いことによる
+		// 失敗ではないと分かる）。
+		const [row] = await db.select().from(reviews).where(eq(reviews.id, due.id)).all();
+		expect(row?.completedAt).toBeNull();
+	});
+
 	// Issue #85 の回帰テスト（正確性レビューで指摘）: review_schedules 行が無い
 	// メモ（migrate〜deploy window の既存データを想定）でも、completeReview が
 	// 恒久的に NotFoundError になったりせず、治癒（ensureReviewScheduleExists）の

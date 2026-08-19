@@ -2342,6 +2342,12 @@ MemoRecalcInputs>` を返し、見つからなかった memoId は含めない�
   読み取り、アーカイブ後に古い version へ書き込もうとする操作を弾く（正確な
   役割は「CAS に勝つ側」ではなく「他の claim を無効化する側」。scope 外
   レビューで、この記述が「4経路すべてが CAS する」と誤読できる旨の指摘）。
+  また `ensureReviewsExist`（memos.ts、#16 由来の reviews 欠落治癒。対象メモの
+  reviews が0件のときにだけ発火する）も CAS ガードなしで `db.insert(reviews)`
+  する例外であり、version は変更しない。reviews が0件の状態からの復元という
+  狭い状況にのみ効く治癒であり、この不変条件が守ろうとしている「同時書き込み
+  競合の検出」とは別の目的のため、意図的に対象外とした（正確性レビューで、
+  この不変条件の記述が例外を暗黙に無視している旨の指摘）。
   - **`completeReview`**: 冒頭の JOIN で対象メモの `review_schedules.version`
     も一緒に取得し、`completeCurrent`（対象ステップの completedAt を立てる
     UPDATE）の WHERE に「version が読み取り時のまま変わっていないか」の

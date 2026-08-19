@@ -1,7 +1,17 @@
 import { isHttpError } from '@sveltejs/kit';
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { and, createDb, eq, intervalPresets, memos, reviews, user, type Db } from '@ebb/db';
+import {
+	and,
+	createDb,
+	eq,
+	intervalPresets,
+	memos,
+	reviews,
+	reviewSchedules,
+	user,
+	type Db
+} from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
 import { ConflictError, handleDomainError, NotFoundError, ValidationError } from './errors';
 import {
@@ -1626,6 +1636,33 @@ describe('archiveMemo', () => {
 		});
 		await archiveMemo(db, ownerId, memo.id);
 		await expect(archiveMemo(db, ownerId, memo.id)).rejects.toThrow(NotFoundError);
+	});
+
+	// Issue #85 の明示要件（アーカイブ時に version を更新する）の直接確認。
+	// claim（memoIsNotArchived）側のガードだけでも既存の競合テストは通ってしまい、
+	// この version bump 自体を外しても検出できていなかった（テスト網羅性レビューで
+	// ミューテーションテストにより指摘）。
+	it('bumps review_schedules.version when archiving', async () => {
+		const memo = await createMemo(db, ownerId, {
+			title: 'title',
+			content: 'content',
+			intervalPresetId: ownerPresetId
+		});
+		const [before] = await db
+			.select({ version: reviewSchedules.version })
+			.from(reviewSchedules)
+			.where(eq(reviewSchedules.memoId, memo.id))
+			.all();
+		expect(before?.version).toBe(0);
+
+		await archiveMemo(db, ownerId, memo.id);
+
+		const [after] = await db
+			.select({ version: reviewSchedules.version })
+			.from(reviewSchedules)
+			.where(eq(reviewSchedules.memoId, memo.id))
+			.all();
+		expect(after?.version).toBe(1);
 	});
 
 	it('deletes pending reviews for the archived memo only, leaving other memos untouched', async () => {

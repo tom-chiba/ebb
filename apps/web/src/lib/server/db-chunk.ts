@@ -4,9 +4,13 @@
 // この単位でチャンク分割してからクエリを発行する（#18 の正確性レビューで指摘。
 // 実際に251件規模のテストで生の D1 エラーを再現して確認した）。
 // これは「1クエリの bind パラメータ総数」の上限であり「1つの inArray に渡せる件数」
-// ではない点に注意（#18 の設計レビューで指摘）。このヘルパーを使う各クエリは
-// inArray 1つだけで他に bind を持たないため一致しているが、条件を追加する際は
-// チャンクサイズも見直すこと。同様に、reviews への1回の INSERT 文
+// ではない点に注意（#18 の設計レビューで指摘）。既定（bindsPerItem 省略）の呼び出しは
+// inArray 1つだけで他に bind を持たないためチャンクサイズ100件で一致するが、
+// Issue #85 で追加した review_schedules 欠落治癒 INSERT のように1件につき複数列へ
+// bind する呼び出しは bindsPerItem を渡すこと（省略すると51件以上で
+// `too many SQL variables` になる。正確性レビューで指摘・実機で再現）。
+// bindsPerItem: 2 は「1チャンクあたり50件 × 2 bind = ちょうど100」とヘッドルームが
+// 無いため、対象テーブルに列が増える場合はこの値も見直すこと。同様に、reviews への1回の INSERT 文
 // （$lib/server/reviews.ts の commitReviewRecalculation・updateCustomPresetIntervals が
 // 積む INSERT）が使う bind 数は
 // 「新 intervals の要素数（@ebb/core の MAX_INTERVAL_COUNT が上限）× 1行あたりの
