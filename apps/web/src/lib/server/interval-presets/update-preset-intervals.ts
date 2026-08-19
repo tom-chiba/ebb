@@ -1,37 +1,28 @@
 import {
 	and,
-	count,
 	eq,
 	inArray,
 	intervalPresets,
 	isNull,
 	memos,
-	or,
 	reviews,
-	userSettings,
 	type BatchItem,
 	type Db
 } from '@ebb/db';
-import { diffIntervals, parseIntervals, type IntervalDiffEntry } from '@ebb/core';
-import { queryInChunks } from './db-chunk';
-import {
-	ConflictError,
-	isUniqueConstraintViolation,
-	NotFoundError,
-	ValidationError
-} from './errors';
+import { diffIntervals, type IntervalDiffEntry } from '@ebb/core';
+import { queryInChunks } from '../db-chunk';
+import { ConflictError, isUniqueConstraintViolation, ValidationError } from '../errors';
+// このファイルは reviews ドメインのバレル（../reviews/index.ts）に依存する。逆方向
+// （reviews 側からこのファイルへ）の依存は無い。reviews/complete-review.ts が
+// このディレクトリの getPresetIntervals（queries.ts）を直接 import しているのは
+// このバレルではなく queries.ts 単体のため、循環にはならない。
 import {
 	buildReviewScheduleClaimStatements,
 	computeReviewRecalculation,
 	loadReviewRecalculationInputs
-} from './reviews';
-
-// #15/#16 が着地する前の暫定値として #14 で導入された、システム標準プリセットの
-// 固定 slug id。#18 でユーザーが一度も既定プリセットを選んでいない場合の
-// 最終フォールバックとして引き続き使う。
-export const DEFAULT_INTERVAL_PRESET_ID = 'system-standard';
-
-export const PRESET_NAME_MAX_LENGTH = 100;
+} from '../reviews';
+import { parseIntervalsOrValidationError } from './commands';
+import { collectAffectedMemoIds, getOwnedCustomPreset } from './queries';
 
 // 1回の db.batch() に積む文の数の上限（プリセット UPDATE + 影響メモ数 ×
 // (DELETE 1 + INSERT 最大 MAX_INTERVAL_COUNT 件)）。「Free プランは CPU 10ms/リクエスト」
@@ -39,186 +30,6 @@ export const PRESET_NAME_MAX_LENGTH = 100;
 // 避けるための安全弁。本アプリの想定ユーザー規模（自分を含む一般公開だが個人利用が
 // 中心）ではまず到達しない、十分に大きい値として選んだ任意の上限。
 export const MAX_BATCH_STATEMENTS = 500;
-
-function parseIntervalsOrValidationError(raw: string): number[] {
-	try {
-		return parseIntervals(raw);
-	} catch (err) {
-		throw new ValidationError(err instanceof Error ? err.message : 'invalid intervals');
-	}
-}
-
-// intervals も返す。createMemo（#16）が reviews をバッチ生成する際に使う。
-// updateMemo（プリセット変更時のアクセス可否チェックのみ、reviews は再生成しない）・
-// setDefaultPresetForUser（#18）は戻り値を無視して呼ぶだけにしている。
-export async function getAccessiblePreset(db: Db, userId: string, intervalPresetId: string) {
-	const rows = await db
-		.select({ intervals: intervalPresets.intervals })
-		.from(intervalPresets)
-		.where(
-			and(
-				eq(intervalPresets.id, intervalPresetId),
-				or(isNull(intervalPresets.userId), eq(intervalPresets.userId, userId))
-			)
-		)
-		.limit(1)
-		.all();
-	const preset = rows[0];
-	if (!preset) {
-		throw new ValidationError('intervalPresetId does not reference an accessible preset');
-	}
-	return preset;
-}
-
-export interface PresetNameAndIntervals {
-	name: string;
-	intervals: number[];
-}
-
-// メモ詳細画面（#60）向け。メモが参照する intervalPresetId は所有者チェック済みの
-// FK 値であり、getAccessiblePreset のような userId 一致/システム標準の判定は不要
-// （メモ自体の所有権は呼び出し元の getMemo が既に検証している）。
-export async function getPresetNameAndIntervals(
-	db: Db,
-	presetId: string
-): Promise<PresetNameAndIntervals | undefined> {
-	const rows = await db
-		.select({ name: intervalPresets.name, intervals: intervalPresets.intervals })
-		.from(intervalPresets)
-		.where(eq(intervalPresets.id, presetId))
-		.limit(1)
-		.all();
-	return rows[0];
-}
-
-export interface PresetSummary {
-	id: string;
-	name: string;
-	intervals: number[];
-	isSystem: boolean;
-	// このプリセットを使っている memo が1件以上あるか（アーカイブ済みも含む。
-	// memos.interval_preset_id の FK は onDelete: 'no action' のため、アーカイブ済み
-	// メモが参照している間はプリセット自体を削除できない）。削除ボタンの無効化に使う。
-	inUse: boolean;
-	// このプリセットを使っている memo の件数（アーカイブ済みも含む。inUse と同じ集計の
-	// 件数版。設定画面のプリセット一覧（#62）で「使用中メモ件数」として表示する）。
-	inUseCount: number;
-}
-
-// システム標準プリセット + このユーザー自身のカスタムプリセットの一覧。
-export async function listPresetsForUser(db: Db, userId: string): Promise<PresetSummary[]> {
-	const presetRows = await db
-		.select({
-			id: intervalPresets.id,
-			name: intervalPresets.name,
-			intervals: intervalPresets.intervals,
-			userId: intervalPresets.userId
-		})
-		.from(intervalPresets)
-		.where(or(isNull(intervalPresets.userId), eq(intervalPresets.userId, userId)))
-		.all();
-
-	// 対象プリセットごとの使用中 memo 件数を1クエリでまとめて調べる（プリセットごとに
-	// 問い合わせない）。userId で絞らないと、システム標準プリセット（全ユーザー共有）の
-	// 件数が「自分が使っている件数」ではなく「他ユーザーも含め誰かが使っている件数」に
-	// なってしまい、他ユーザーの存在に関する情報が（ページの data に含まれる形で）漏れる
-	// （#18 の inUse 判定に対する正確性レビュー指摘と同じ理由）。
-	const usageRows = await db
-		.select({ intervalPresetId: memos.intervalPresetId, count: count() })
-		.from(memos)
-		.where(eq(memos.userId, userId))
-		.groupBy(memos.intervalPresetId)
-		.all();
-	const usageCounts = new Map(usageRows.map((row) => [row.intervalPresetId, row.count]));
-
-	return presetRows
-		.map((preset) => {
-			const inUseCount = usageCounts.get(preset.id) ?? 0;
-			return {
-				id: preset.id,
-				name: preset.name,
-				intervals: preset.intervals,
-				isSystem: preset.userId === null,
-				inUse: inUseCount > 0,
-				inUseCount
-			};
-		})
-		.sort((a, b) => {
-			if (a.isSystem !== b.isSystem) return a.isSystem ? -1 : 1;
-			return a.name.localeCompare(b.name, 'ja');
-		});
-}
-
-export async function createCustomPreset(
-	db: Db,
-	userId: string,
-	name: string,
-	rawIntervals: string
-) {
-	const trimmedName = name.trim();
-	if (trimmedName.length === 0) {
-		throw new ValidationError('name is required');
-	}
-	if (trimmedName.length > PRESET_NAME_MAX_LENGTH) {
-		throw new ValidationError(`name must be ${PRESET_NAME_MAX_LENGTH} characters or fewer`);
-	}
-	const intervals = parseIntervalsOrValidationError(rawIntervals);
-
-	const rows = await db
-		.insert(intervalPresets)
-		.values({ userId, name: trimmedName, intervals })
-		.returning();
-	const preset = rows[0];
-	if (!preset) throw new Error('failed to create preset');
-	return preset;
-}
-
-// このユーザー自身が所有するカスタムプリセットのみを返す。「存在しない」場合と
-// 「他ユーザーのカスタムプリセットを指している」場合は区別せず NotFoundError にする
-// （#13/#17 と同じ、存在有無を秘匿する方針）。一方システム標準プリセット
-// （userId が NULL）を指した場合は、対象が何であるか自体は公開情報のため、
-// 「編集・削除できない」という理由を明示した ValidationError にする。
-export async function getOwnedCustomPreset(db: Db, userId: string, presetId: string) {
-	const rows = await db
-		.select({
-			id: intervalPresets.id,
-			userId: intervalPresets.userId,
-			name: intervalPresets.name,
-			intervals: intervalPresets.intervals
-		})
-		.from(intervalPresets)
-		.where(eq(intervalPresets.id, presetId))
-		.limit(1)
-		.all();
-	const preset = rows[0];
-	if (preset && preset.userId === null) {
-		throw new ValidationError('system presets cannot be edited or deleted');
-	}
-	if (!preset || preset.userId !== userId) {
-		throw new NotFoundError('interval preset not found');
-	}
-	return preset;
-}
-
-// このプリセットを使っている、非アーカイブメモの id 一覧。プレビュー（件数のみ必要）
-// と実行（再計算対象そのもの）の両方が「対象メモをどう選ぶか」を必ずこの関数経由で
-// 決める。アーカイブ済みメモを対象外にする理由: archiveMemo（#16）はアーカイブと
-// 同時に未完了 reviews を削除しており、「アーカイブ済みメモに未完了 reviews が
-// 残らない」不変条件（docs/schema.md）を再計算対象に含めることで静かに破ってしまうため。
-// この SELECT から db.batch() 確定までの間に別リクエストが同じメモを archiveMemo
-// した場合の残存レースは、claim（batch A）自身のガード（memoIsNotArchived）が
-// 実行時点で archivedAt をライブに確認するため、勝敗判定の時点では防がれる。
-// ただし claim に勝った後・batch B（reviews への実際の INSERT）実行前に
-// archiveMemo が割り込む窓は別に残る（正確性レビューで指摘、
-// docs/design-decisions.md の #18・#85 節に記録）。
-async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[]> {
-	const rows = await db
-		.select({ id: memos.id })
-		.from(memos)
-		.where(and(eq(memos.intervalPresetId, presetId), isNull(memos.archivedAt)))
-		.all();
-	return rows.map((row) => row.id);
-}
 
 // 1メモあたりに積む文数の上限。Issue #85 で claim（DELETE 1 + review_schedules の
 // version bump 1）と実際の reviews INSERT が別々の db.batch()（batch A ・ batch B）
@@ -248,30 +59,14 @@ function estimateWorstCaseBatchStatementCount(memoCount: number): number {
 	return memoCount * MAX_STATEMENTS_PER_MEMO;
 }
 
-// queryInChunks（./db-chunk）のチャンク分割は、D1 の1クエリあたり bind パラメータ数
+// queryInChunks（../db-chunk）のチャンク分割は、D1 の1クエリあたり bind パラメータ数
 // 上限（ローカル実測でちょうど100件、101件から `too many SQL variables`）に対する
 // 対処。MAX_BATCH_STATEMENTS（500）が許容する最大メモ数（悲観的見積もりで最大250件、
-// #84 時点の249件とほぼ同水準）はこれを容易に超えるため、$lib/server/reviews.ts の
+// #84 時点の249件とほぼ同水準）はこれを容易に超えるため、reviews/schedule-recalculation.ts の
 // loadReviewRecalculationInputs（#84 で一括取得に変更した際に追加）と、下記
 // updateCustomPresetIntervals 内の負けたメモのアーカイブ再確認（Issue #85 で追加）が
 // このヘルパー経由でチャンク分割する（#18 の正確性レビューで指摘。実際に251件規模の
 // テストで生の D1 エラーを再現して確認した）。
-
-// プリセット編集画面（#63）の「このプリセットを使っているメモ」一覧・削除ボタンの
-// 活性判定に使う。deleteCustomPreset の使用中判定と同じく、アーカイブ済みメモも
-// 含めて「使用中」とみなす（memos.interval_preset_id は onDelete: 'no action' で
-// あり、アーカイブ済みメモが参照している間はプリセットを削除できないため、この
-// 画面で見せる「使用中」もその制約と一致させる）。
-export async function listMemosUsingPreset(
-	db: Db,
-	presetId: string
-): Promise<{ id: string; title: string }[]> {
-	return db
-		.select({ id: memos.id, title: memos.title })
-		.from(memos)
-		.where(eq(memos.intervalPresetId, presetId))
-		.all();
-}
 
 // プリセット変更（intervals の編集）で更新される reviews の件数のプレビュー。
 // 「N 件の予定が更新されます」の表示用。所有権チェック（getOwnedCustomPreset）と
@@ -394,10 +189,10 @@ export async function updateCustomPresetIntervals(
 			...claimPairs.map(({ deleteStatement }) => deleteStatement),
 			...claimPairs.map(({ bumpStatement }) => bumpStatement)
 		];
-		// db.batch は静的に非空とわかるタプル型を要求する（#17 の completeReview と同じ
-		// 理由）。claimPairs.length > 0 のガードにより実行時には常に1件以上になるが、
-		// 配列の展開は配列型のままでタプル型と直接オーバーラップしないため、
-		// unknown 経由でキャストする。
+		// db.batch は静的に非空とわかるタプル型を要求する（#17 の reviews/complete-review.ts の
+		// completeReview と同じ理由）。claimPairs.length > 0 のガードにより実行時には
+		// 常に1件以上になるが、配列の展開は配列型のままでタプル型と直接オーバーラップ
+		// しないため、unknown 経由でキャストする。
 		const claimResults = await db.batch(
 			claimStatements as unknown as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]
 		);
@@ -419,8 +214,9 @@ export async function updateCustomPresetIntervals(
 		.filter(({ plan }) => plan.newRows.length > 0)
 		.map(({ plan }) => db.insert(reviews).values(plan.newRows));
 
-	// db.batch は静的に非空とわかるタプル型を要求する（#17 の completeReview と同じ理由）。
-	// updatePresetStatement は常に配列先頭にあるため実行時には常に1件以上になる。
+	// db.batch は静的に非空とわかるタプル型を要求する（#17 の reviews/complete-review.ts の
+	// completeReview と同じ理由）。updatePresetStatement は常に配列先頭にあるため
+	// 実行時には常に1件以上になる。
 	const statements: [typeof updatePresetStatement, ...BatchItem<'sqlite'>[]] = [
 		updatePresetStatement,
 		...insertStatements
@@ -491,57 +287,4 @@ export async function updateCustomPresetIntervals(
 	return {
 		updatedReviewsCount: wonPlans.reduce((sum, { plan }) => sum + plan.affectedCount, 0)
 	};
-}
-
-export async function deleteCustomPreset(db: Db, userId: string, presetId: string): Promise<void> {
-	await getOwnedCustomPreset(db, userId, presetId);
-
-	// アーカイブ済みメモも含めて使用中判定する。memos.interval_preset_id の FK は
-	// onDelete: 'no action' のため、アーカイブ済みメモが参照している間は DB 側でも
-	// 削除できない。ここで先にチェックし、生の FK エラーではなく分かりやすい
-	// メッセージを返す。
-	const usageRows = await db
-		.select({ id: memos.id })
-		.from(memos)
-		.where(eq(memos.intervalPresetId, presetId))
-		.limit(1)
-		.all();
-	if (usageRows.length > 0) {
-		throw new ValidationError('このプリセットは使用中のメモがあるため削除できません');
-	}
-
-	await db
-		.delete(intervalPresets)
-		.where(and(eq(intervalPresets.id, presetId), eq(intervalPresets.userId, userId)));
-}
-
-// 新規メモ作成時の既定プリセットをユーザーごとに切り替える。system 標準 or
-// このユーザー自身のカスタムプリセットのみ指定できる（getAccessiblePreset で検証）。
-// user_settings.default_interval_preset_id を守る DB トリガー（0009 migration）とは
-// 独立した、アプリ層での早期検証。
-export async function setDefaultPresetForUser(
-	db: Db,
-	userId: string,
-	presetId: string
-): Promise<void> {
-	await getAccessiblePreset(db, userId, presetId);
-	await db
-		.insert(userSettings)
-		.values({ userId, defaultIntervalPresetId: presetId })
-		.onConflictDoUpdate({
-			target: userSettings.userId,
-			set: { defaultIntervalPresetId: presetId }
-		});
-}
-
-// ユーザーが既定プリセットを未設定、または参照先が削除済み（onDelete: 'set null'）の
-// 場合は DEFAULT_INTERVAL_PRESET_ID にフォールバックする。
-export async function getDefaultPresetId(db: Db, userId: string): Promise<string> {
-	const rows = await db
-		.select({ defaultIntervalPresetId: userSettings.defaultIntervalPresetId })
-		.from(userSettings)
-		.where(eq(userSettings.userId, userId))
-		.limit(1)
-		.all();
-	return rows[0]?.defaultIntervalPresetId ?? DEFAULT_INTERVAL_PRESET_ID;
 }
