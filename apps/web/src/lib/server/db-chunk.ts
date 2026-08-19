@@ -27,10 +27,19 @@ function chunk<T>(items: readonly T[], size: number): T[][] {
 // 0件で空配列を返す。interval-presets.ts・reviews.ts の複数のクエリが、この同じ
 // ヘルパー経由でチャンク分割する（#18 の設計レビューで指摘、ロジックの重複と
 // 分岐の複雑化を避けるため共通化）。
+//
+// bindsPerItem: 1件（id 1つ）につきそのクエリが消費する bind パラメータ数。
+// 既定の1は「inArray に id を渡すだけ」の呼び出しに対応する。1件で複数列に
+// bind する INSERT（例: reviewSchedules の欠落治癒が memo_id・version の2列に
+// bind する）では、これを渡さないとチャンクサイズが id 数基準のままになり、
+// 実際の bind 総数が D1_MAX_BIND_PARAMS を超えて `too many SQL variables` に
+// なる（正確性レビューで指摘、51件以上の欠落で実機再現）。
 export async function queryInChunks<T, R>(
 	ids: readonly T[],
-	query: (chunkIds: T[]) => Promise<R[]>
+	query: (chunkIds: T[]) => Promise<R[]>,
+	bindsPerItem = 1
 ): Promise<R[]> {
-	const results = await Promise.all(chunk(ids, D1_MAX_BIND_PARAMS).map(query));
+	const chunkSize = Math.max(1, Math.floor(D1_MAX_BIND_PARAMS / bindsPerItem));
+	const results = await Promise.all(chunk(ids, chunkSize).map(query));
 	return results.flat();
 }

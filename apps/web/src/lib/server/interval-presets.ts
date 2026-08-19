@@ -206,9 +206,11 @@ export async function getOwnedCustomPreset(db: Db, userId: string, presetId: str
 // 同時に未完了 reviews を削除しており、「アーカイブ済みメモに未完了 reviews が
 // 残らない」不変条件（docs/schema.md）を再計算対象に含めることで静かに破ってしまうため。
 // この SELECT から db.batch() 確定までの間に別リクエストが同じメモを archiveMemo
-// した場合の残存レースは、updateCustomPresetIntervals 側の再確認（
-// stillActiveMemoIds）で狭めているが完全には防げない（正確性レビューで
-// 指摘、docs/design-decisions.md の #18 節に記録）。
+// した場合の残存レースは、claim（batch A）自身のガード（memoIsNotArchived）が
+// 実行時点で archivedAt をライブに確認するため、勝敗判定の時点では防がれる。
+// ただし claim に勝った後・batch B（reviews への実際の INSERT）実行前に
+// archiveMemo が割り込む窓は別に残る（正確性レビューで指摘、
+// docs/design-decisions.md の #18・#85 節に記録）。
 async function collectAffectedMemoIds(db: Db, presetId: string): Promise<string[]> {
 	const rows = await db
 		.select({ id: memos.id })
@@ -303,7 +305,7 @@ export async function previewPresetIntervalsUpdate(
 		const input = inputs.get(memoId);
 		// collectAffectedMemoIds が返した直後に見つからなくなるのは
 		// loadReviewRecalculationInputs のコメントに記した通り理屈上は起こらないが、
-		// 起きた場合は確定側（stillActiveMemoIds ガード）と同じく対象から除外する。
+		// 起きた場合は対象から除外する。
 		if (!input) continue;
 		previewCount += computeReviewRecalculation(memoId, input, intervals).affectedCount;
 	}
@@ -361,11 +363,16 @@ export async function updateCustomPresetIntervals(
 		);
 
 	// Issue #85: 各メモの claim（DELETE + review_schedules.version bump）を1つの
-	// db.batch() にまとめて実行する。version が読み取り時（loadReviewRecalculationInputs）
-	// のまま変わっていない（別リクエストの completeReview・別のプリセット変更が
-	// 割り込んでいない）memo のみが「勝つ」。claim 自身のガードが対象メモの
-	// archivedAt を直接見るため、旧実装が別クエリで行っていた「batch 実行直前の
-	// アーカイブ再確認」（stillActiveMemoIds）は不要になった（advisor 指摘）。
+	// db.batch()（batch A）にまとめて実行する。version が読み取り時
+	// （loadReviewRecalculationInputs）のまま変わっていない（別リクエストの
+	// completeReview・別のプリセット変更が割り込んでいない）memo のみが「勝つ」。
+	// claim 自身のガードが対象メモの archivedAt を直接見るため、旧実装が
+	// batch 実行直前に別クエリで行っていた「対象メモのアーカイブ再確認」は、
+	// claim の勝敗判定そのものからは不要になった。ただし batch A コミット後・
+	// batch B（下記、reviews への実際の INSERT）実行前の窓で archiveMemo が
+	// 割り込んだ場合、batch B の INSERT 自体にはアーカイブ確認のガードが無い
+	// ため、アーカイブ済みメモに未完了 reviews が復活しうる残存レースは残る
+	// （#18 節と同種・同程度の窓。正確性レビューで指摘）。
 	// DELETE 文をまとめて先に積み、bump 文をまとめて後に積む（各メモの DELETE は
 	// 必ず自分の bump より先に実行される必要があるが、メモ同士は独立な行を操作する
 	// ため互いの順序は問わない）。bump は .returning({ memoId }) で「勝った」memoId
@@ -396,14 +403,9 @@ export async function updateCustomPresetIntervals(
 		}
 	}
 	const wonPlans = memoPlans.filter(({ memoId }) => wonMemoIds.has(memoId));
-
-	// Issue #85: claim（batch A、上記）は既にコミット済みであり、勝った memo の
-	// reviews は削除された状態で確定している。ここで負けたメモがいるからといって
-	// batch B（プリセットの UPDATE・勝った memo 分の INSERT）の実行を中断すると、
-	// 勝った memo の未完了 reviews が INSERT されないまま永久に失われる（実機で
-	// 再現・advisor 指摘）。そのため batch B は常に実行し、409 を投げるかどうかの
-	// 判定はその後に行う。
-	const loserMemoIds = memoPlans.map(({ memoId }) => memoId).filter((memoId) => !wonMemoIds.has(memoId));
+	const loserMemoIds = memoPlans
+		.map(({ memoId }) => memoId)
+		.filter((memoId) => !wonMemoIds.has(memoId));
 
 	const updatePresetStatement = db
 		.update(intervalPresets)
@@ -423,12 +425,23 @@ export async function updateCustomPresetIntervals(
 	try {
 		await db.batch(statements);
 	} catch (err) {
-		// claim に勝った直後・この db.batch() 実行前のごく狭い窓に、別の書き込みが
-		// 同じ memoId に対して先に同じ step 番号を使ってしまった場合の backstop
-		// （#82 節が記録する残存レースと同種、完全な排除はできない）。version の
-		// CAS が主たる検出手段になったことで、この分岐に到達する経路は大幅に狭まったが、
-		// 生の DB エラーとして 500 になるのではなく、ユーザーにリトライを促す
-		// 409 として扱う点は変えない。
+		// batch A（claim）は既にコミット済みであり、勝った memo の reviews は
+		// 削除された状態で確定している。batch B（ここ）が丸ごと失敗すると
+		// （下記 unique 制約 backstop の発火・一過性の D1 エラー等）、batch B は
+		// 単一の db.batch() のため INSERT 側はロールバックされるが、既にコミット
+		// 済みの batch A の DELETE は元に戻らない。この場合、勝った memo の
+		// 未完了 reviews は失われたままになる（`changeMemoPreset` 側の
+		// `commitReviewRecalculation` が持つのと同種の残存リスクで、
+		// docs/design-decisions.md #85 節に記録。同じプリセットで再実行すれば
+		// computeReviewRecalculation が完了済み行だけから再計算できるため
+		// 回復可能）。
+		//
+		// この catch 自体は、claim に勝った直後・この db.batch() 実行前のごく
+		// 狭い窓に、別の書き込みが同じ memoId に対して先に同じ step 番号を
+		// 使ってしまった場合の backstop（#82 節が記録する残存レースと同種、
+		// 完全な排除はできない）。version の CAS が主たる検出手段になったことで、
+		// この分岐に到達する経路は大幅に狭まったが、生の DB エラーとして 500 に
+		// なるのではなく、ユーザーにリトライを促す 409 として扱う点は変えない。
 		if (isUniqueConstraintViolation(err, 'reviews.step')) {
 			throw new ConflictError(
 				'このプリセットを使っているメモの復習予定が同時に更新されました。もう一度お試しください。'
@@ -437,12 +450,13 @@ export async function updateCustomPresetIntervals(
 		throw err;
 	}
 
-	// batch B のコミット後に負けたメモの生死を確認する。ここで初めて 409 を
-	// 投げても、勝った memo の reviews は既に batch B で INSERT 済みのため
-	// 失われない（batch A 直後に判定していた旧実装は winner の reviews を
-	// 失う不具合があった。advisor 指摘・実機で再現・修正）。アーカイブ済みで
-	// 負けたメモは既存の不変条件（アーカイブ済みメモに未完了 reviews は残らない）
-	// の範囲内であり、静かに除外してよい。
+	// batch B のコミット後に負けたメモの生死を確認する。batch A 直後（batch B
+	// 実行前）に判定していた旧実装は、負けたメモが1件でもいると batch B の
+	// 実行自体を中断しており、既に claim に勝っていた memo の未完了 reviews が
+	// 永久に失われる不具合があった（実機で再現・advisor 指摘）。batch B の
+	// コミット後に判定することで、勝った memo の reviews は既に INSERT 済みの
+	// ため失われない。アーカイブ済みで負けたメモは既存の不変条件（アーカイブ
+	// 済みメモに未完了 reviews は残らない）の範囲内であり、静かに除外してよい。
 	if (loserMemoIds.length > 0) {
 		const stillActiveLoserRows = await queryInChunks(loserMemoIds, (ids) =>
 			db

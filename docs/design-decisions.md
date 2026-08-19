@@ -2335,8 +2335,13 @@ MemoRecalcInputs>` を返し、見つからなかった memoId は含めない�
 
 - **不変条件**:「reviews への書き込み経路は、同じ論理操作内で
   `review_schedules.version` の CAS に勝った場合のみ書き込む」。これを
-  `completeReview`・`changeMemoPreset`・`updateCustomPresetIntervals`・
-  `archiveMemo` の4経路すべてに適用した。
+  `completeReview`・`changeMemoPreset`・`updateCustomPresetIntervals` の
+  3経路に適用した。`archiveMemo` は CAS には参加せず、version を無条件に
+  bump するだけ（アーカイブは一方向の操作で、他の書き込みと version を
+  奪い合う必要が無いため）。以後の claim がこの bump 後の version を
+  読み取り、アーカイブ後に古い version へ書き込もうとする操作を弾く（正確な
+  役割は「CAS に勝つ側」ではなく「他の claim を無効化する側」。scope 外
+  レビューで、この記述が「4経路すべてが CAS する」と誤読できる旨の指摘）。
   - **`completeReview`**: 冒頭の JOIN で対象メモの `review_schedules.version`
     も一緒に取得し、`completeCurrent`（対象ステップの completedAt を立てる
     UPDATE）の WHERE に「version が読み取り時のまま変わっていないか」の
@@ -2408,21 +2413,36 @@ MemoRecalcInputs>` を返し、見つからなかった memoId は含めない�
       claim に負けたメモのうち「アーカイブされたから対象外」以外の理由
       （version 不一致 = 別の書き込みが割り込んだ）で負けたメモが1件でも
       あれば、batch B の**コミット後**に `ConflictError` を投げる。この順序
-      により、勝ったメモの reviews が失われることはなく、かつ負けたメモは
-      「古い intervals のまま」という不整合を隠さず 409 としてユーザーに
-      伝えられる（＝プリセットの intervals は更新されるが、負けたメモの
-      reviews は別途 retry してもらう必要がある。retry は claim を
-      やり直すだけなので安全）。`interval-presets.test.ts` の
+      により、「負けたメモがいるだけで batch B の実行自体を止めてしまい
+      勝ったメモの reviews が INSERT されない」という初版の不具合は解消
+      される。かつ負けたメモは「古い intervals のまま」という不整合を隠さず
+      409 としてユーザーに伝えられる（＝プリセットの intervals は更新される
+      が、負けたメモの reviews は別途 retry してもらう必要がある。retry は
+      claim をやり直すだけなので安全）。`interval-presets.test.ts` の
       「still recreates a winning memo reviews and updates the preset
       even when a losing memo forces a 409」で固定化した。
+      - **ただし batch B 自体が丸ごと失敗した場合（下記 unique 制約
+        backstop の発火・一過性の D1 エラー等）は話が別**: batch B は
+        単一の `db.batch()` なので INSERT 側はロールバックされるが、
+        既にコミット済みの batch A（claim の DELETE）は元に戻らない。
+        この場合は勝ったメモの未完了 reviews が失われたままになる
+        （設計レビューで指摘）。単一メモ経路の `commitReviewRecalculation`
+        が持つ残存リスクと同種・同程度の窓であり、同じプリセットで
+        再実行すれば `computeReviewRecalculation` が完了済み行だけから
+        再計算できるため回復可能。#82 の「残るリスク」節が記録していた
+        残存レースと同種の、狙って完全には排除しない残存窓として受容する。
     - `MAX_STATEMENTS_PER_MEMO` は batch A（claim: DELETE 1 + version bump 1
       の2文）が律速する。batch B（プリセット UPDATE 1件 + メモ毎最大1件の
       INSERT）は常にそれ以下になるため、悲観的見積もりは batch A の2文を
       使う。`MAX_BATCH_STATEMENTS`（500）が許容する最大メモ数は、
       #84 時点の249件とほぼ同水準（250件）を維持する。
-    - claim に負けたメモを再確認するための別クエリ（旧 `stillActiveMemoIds`）
-      は、claim 自身のガードが対象メモの `archivedAt` を直接見るようになった
-      ことで不要になった（advisor 指摘）。
+    - claim の勝敗判定そのものに使っていた「batch 実行直前の対象メモ
+      アーカイブ再確認」（旧 `stillActiveMemoIds`）は、claim 自身のガード
+      （`memoIsNotArchived`）が対象メモの `archivedAt` を直接見るように
+      なったことで不要になった（advisor 指摘）。ただし用途は異なるが
+      同型の SELECT（`stillActiveLoserRows`）が、batch B コミット後に
+      「負けたメモのうちアーカイブ済みでないもの」を数えて 409 判定する
+      ためだけに残っている（上記）。
     - **claim の結果配列を読む際、DELETE 文をまとめて先に積み、bump 文をまとめて
       後に積む形にした**（初版は `[DELETE, bump]` のペアを `flatMap` で交互に
       積み、`claimResults[i * 2 + 1]` という暗黙のストライドで bump 結果を

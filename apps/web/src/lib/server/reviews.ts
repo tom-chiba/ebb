@@ -587,7 +587,11 @@ function memoIsNotArchived(db: Db, memoId: string) {
 // ことを #82 で確認済み、docs/design-decisions.md の #82 節を参照）。そのため
 // 呼び出し側は、この2文を独立した db.batch() として実行し、bump の返り値で
 // 「勝った」ことを確認した後にのみ、別の呼び出しで newRows を INSERT する。
-export function buildReviewScheduleClaimStatements(db: Db, memoId: string, expectedVersion: number) {
+export function buildReviewScheduleClaimStatements(
+	db: Db,
+	memoId: string,
+	expectedVersion: number
+) {
 	const notArchived = memoIsNotArchived(db, memoId);
 	const deleteStatement = db
 		.delete(reviews)
@@ -602,7 +606,13 @@ export function buildReviewScheduleClaimStatements(db: Db, memoId: string, expec
 	const bumpStatement = db
 		.update(reviewSchedules)
 		.set({ version: sql`${reviewSchedules.version} + 1` })
-		.where(and(eq(reviewSchedules.memoId, memoId), eq(reviewSchedules.version, expectedVersion), notArchived))
+		.where(
+			and(
+				eq(reviewSchedules.memoId, memoId),
+				eq(reviewSchedules.version, expectedVersion),
+				notArchived
+			)
+		)
 		.returning({ memoId: reviewSchedules.memoId });
 	return { deleteStatement, bumpStatement };
 }
@@ -735,40 +745,41 @@ export async function loadReviewRecalculationInputs(
 ): Promise<Map<string, MemoRecalcInputs>> {
 	if (memoIds.length === 0) return new Map();
 
-	const [createdAtRows, completedRows, incompleteCountRows, scheduleVersionRows] = await Promise.all([
-		queryInChunks(memoIds, (ids) =>
-			db
-				.select({ id: memos.id, createdAt: memos.createdAt })
-				.from(memos)
-				.where(inArray(memos.id, ids))
-				.all()
-		),
-		queryInChunks(memoIds, (ids) =>
-			db
-				.select({ memoId: reviews.memoId, step: reviews.step, completedAt: reviews.completedAt })
-				.from(reviews)
-				.where(and(inArray(reviews.memoId, ids), isNotNull(reviews.completedAt)))
-				.all()
-		),
-		// GROUP BY はあるが bind は inArray 1つのみ（他に条件を持たない）ため、
-		// db-chunk.ts の D1_MAX_BIND_PARAMS チャンクサイズがそのまま使える。
-		queryInChunks(memoIds, (ids) =>
-			db
-				.select({ memoId: reviews.memoId, count: count() })
-				.from(reviews)
-				.where(and(inArray(reviews.memoId, ids), isNull(reviews.completedAt)))
-				.groupBy(reviews.memoId)
-				.all()
-		),
-		// Issue #85: claim（buildReviewScheduleClaimStatements）に渡す expectedVersion。
-		queryInChunks(memoIds, (ids) =>
-			db
-				.select({ memoId: reviewSchedules.memoId, version: reviewSchedules.version })
-				.from(reviewSchedules)
-				.where(inArray(reviewSchedules.memoId, ids))
-				.all()
-		)
-	]);
+	const [createdAtRows, completedRows, incompleteCountRows, scheduleVersionRows] =
+		await Promise.all([
+			queryInChunks(memoIds, (ids) =>
+				db
+					.select({ id: memos.id, createdAt: memos.createdAt })
+					.from(memos)
+					.where(inArray(memos.id, ids))
+					.all()
+			),
+			queryInChunks(memoIds, (ids) =>
+				db
+					.select({ memoId: reviews.memoId, step: reviews.step, completedAt: reviews.completedAt })
+					.from(reviews)
+					.where(and(inArray(reviews.memoId, ids), isNotNull(reviews.completedAt)))
+					.all()
+			),
+			// GROUP BY はあるが bind は inArray 1つのみ（他に条件を持たない）ため、
+			// db-chunk.ts の D1_MAX_BIND_PARAMS チャンクサイズがそのまま使える。
+			queryInChunks(memoIds, (ids) =>
+				db
+					.select({ memoId: reviews.memoId, count: count() })
+					.from(reviews)
+					.where(and(inArray(reviews.memoId, ids), isNull(reviews.completedAt)))
+					.groupBy(reviews.memoId)
+					.all()
+			),
+			// Issue #85: claim（buildReviewScheduleClaimStatements）に渡す expectedVersion。
+			queryInChunks(memoIds, (ids) =>
+				db
+					.select({ memoId: reviewSchedules.memoId, version: reviewSchedules.version })
+					.from(reviewSchedules)
+					.where(inArray(reviewSchedules.memoId, ids))
+					.all()
+			)
+		]);
 
 	// 完了済み行のうち、メモごとに最大 step の1行だけを残す。SQL 側で
 	// max(step)・max(completedAt) を別々に集約しない理由: 「最新の完了済み
@@ -797,13 +808,21 @@ export async function loadReviewRecalculationInputs(
 		.map((row) => row.id)
 		.filter((id) => !versionMap.has(id));
 	if (missingScheduleMemoIds.length > 0) {
-		await queryInChunks(missingScheduleMemoIds, async (ids) => {
-			await db
-				.insert(reviewSchedules)
-				.values(ids.map((memoId) => ({ memoId, version: 0 })))
-				.onConflictDoNothing();
-			return [];
-		});
+		// この INSERT は1行につき memo_id・version の2列を bind するため、
+		// queryInChunks の既定（1 id = 1 bind）のままだと51件以上の欠落で
+		// `too many SQL variables` になる（実機で再現・正確性レビューで指摘）。
+		// bindsPerItem: 2 を渡してチャンクサイズを半分にする。
+		await queryInChunks(
+			missingScheduleMemoIds,
+			async (ids) => {
+				await db
+					.insert(reviewSchedules)
+					.values(ids.map((memoId) => ({ memoId, version: 0 })))
+					.onConflictDoNothing();
+				return [];
+			},
+			2
+		);
 	}
 
 	// memos 側から見つかった id だけを結果に含める。このメモ実装に delete-memo

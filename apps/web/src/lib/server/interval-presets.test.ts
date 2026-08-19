@@ -1,6 +1,15 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDb, eq, intervalPresets, reviews, reviewSchedules, userSettings, type Db } from '@ebb/db';
+import {
+	createDb,
+	eq,
+	inArray,
+	intervalPresets,
+	reviews,
+	reviewSchedules,
+	userSettings,
+	type Db
+} from '@ebb/db';
 import { ConflictError, NotFoundError, ValidationError } from './errors';
 import {
 	createCustomPreset,
@@ -563,68 +572,69 @@ describe('updateCustomPresetIntervals', () => {
 	// batch B（プリセット UPDATE + INSERT）で必ず INSERT されることを確認する
 	// 回帰テスト（advisor 指摘・実機で再現した「winner の未完了 reviews が
 	// 永久に失われる」不具合の修正確認）。
-	it(
-		'still recreates a winning memo reviews and updates the preset even when a losing memo forces a 409',
-		async () => {
-			const winner = await createMemo(db, ownerId, {
-				title: 'winner', // ownerPreset の intervals: [1, 24, 72]
-				content: 'c',
-				intervalPresetId: ownerPresetId
+	it('still recreates a winning memo reviews and updates the preset even when a losing memo forces a 409', async () => {
+		const winner = await createMemo(db, ownerId, {
+			title: 'winner', // ownerPreset の intervals: [1, 24, 72]
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const loser = await createMemo(db, ownerId, {
+			title: 'loser',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const [loserDue] = await db
+			.select({ id: reviews.id })
+			.from(reviews)
+			.where(eq(reviews.memoId, loser.id))
+			.orderBy(reviews.step)
+			.limit(1)
+			.all();
+		if (!loserDue) throw new Error('fixture setup failed');
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(Date.now() - 1000) })
+			.where(eq(reviews.id, loserDue.id));
+
+		const originalBatch = db.batch.bind(db);
+		const batchSpy = vi
+			.spyOn(db, 'batch')
+			.mockImplementationOnce(async (queries: Parameters<typeof originalBatch>[0]) => {
+				// updateCustomPresetIntervals の SELECT 完了後・claim batch 実行前に
+				// loser だけ completeReview で version を進めて古くする。winner の
+				// version には触れない。
+				await completeReview(db, ownerId, loserDue.id);
+				return originalBatch(queries);
 			});
-			const loser = await createMemo(db, ownerId, {
-				title: 'loser',
-				content: 'c',
-				intervalPresetId: ownerPresetId
-			});
-			const [loserDue] = await db
-				.select({ id: reviews.id })
-				.from(reviews)
-				.where(eq(reviews.memoId, loser.id))
-				.orderBy(reviews.step)
-				.limit(1)
-				.all();
-			if (!loserDue) throw new Error('fixture setup failed');
-			await db
-				.update(reviews)
-				.set({ scheduledAt: new Date(Date.now() - 1000) })
-				.where(eq(reviews.id, loserDue.id));
 
-			const originalBatch = db.batch.bind(db);
-			const batchSpy = vi
-				.spyOn(db, 'batch')
-				.mockImplementationOnce(async (queries: Parameters<typeof originalBatch>[0]) => {
-					// updateCustomPresetIntervals の SELECT 完了後・claim batch 実行前に
-					// loser だけ completeReview で version を進めて古くする。winner の
-					// version には触れない。
-					await completeReview(db, ownerId, loserDue.id);
-					return originalBatch(queries);
-				});
-
-			try {
-				await expect(
-					updateCustomPresetIntervals(db, ownerId, ownerPresetId, '2h, 5h')
-				).rejects.toThrow(ConflictError);
-			} finally {
-				batchSpy.mockRestore();
-			}
-
-			// winner の未完了 reviews は失われず、新しい intervals で再作成されている。
-			const winnerRows = await db
-				.select()
-				.from(reviews)
-				.where(eq(reviews.memoId, winner.id))
-				.all();
-			expect(winnerRows.filter((row) => row.completedAt === null)).toHaveLength(2);
-
-			// プリセット自体も更新されている（batch B は常に実行されるため）。
-			const [preset] = await db
-				.select()
-				.from(intervalPresets)
-				.where(eq(intervalPresets.id, ownerPresetId))
-				.all();
-			expect(preset?.intervals).toEqual([2, 5]);
+		try {
+			await expect(
+				updateCustomPresetIntervals(db, ownerId, ownerPresetId, '2h, 5h')
+			).rejects.toThrow(ConflictError);
+		} finally {
+			batchSpy.mockRestore();
 		}
-	);
+
+		// winner の未完了 reviews は失われず、新しい intervals で再作成されている。
+		const winnerRows = await db.select().from(reviews).where(eq(reviews.memoId, winner.id)).all();
+		expect(winnerRows.filter((row) => row.completedAt === null)).toHaveLength(2);
+
+		// loser は claim に負けたため reviews は再計算されず、元の(完了済み1件 +
+		// 未完了2件)のまま手つかずで残っている(409で操作全体が失敗したことを
+		// 示すだけで、loser 側のデータを壊してはいけない)。
+		const loserRows = await db.select().from(reviews).where(eq(reviews.memoId, loser.id)).all();
+		expect(loserRows).toHaveLength(3);
+		expect(loserRows.filter((row) => row.completedAt !== null)).toHaveLength(1);
+		expect(loserRows.filter((row) => row.completedAt === null)).toHaveLength(2);
+
+		// プリセット自体も更新されている（batch B は常に実行されるため）。
+		const [preset] = await db
+			.select()
+			.from(intervalPresets)
+			.where(eq(intervalPresets.id, ownerPresetId))
+			.all();
+		expect(preset?.intervals).toEqual([2, 5]);
+	});
 
 	// collectAffectedMemoIds が対象メモを列挙した後、db.batch() 確定前にもう一度
 	// アーカイブ状態を確認する stillActiveMemoIds ガード（正確性レビューで指摘）の
@@ -727,6 +737,42 @@ describe('updateCustomPresetIntervals', () => {
 			.all();
 		expect(healedRow?.version).toBe(1);
 	});
+
+	// queryInChunks は「1 id = 1 bind」を前提に D1_MAX_BIND_PARAMS(100) 単位で
+	// チャンク分割する（db-chunk.ts 参照）。review_schedules 治癒 INSERT が
+	// version も明示的に bind すると1行2 bind になり、51件以上の欠落で
+	// `too many SQL variables` になる回帰があった（正確性レビューで指摘・実機で
+	// 再現）。60件（1チャンクに収まる100件以下だが、2 bind/行なら超過する件数）で
+	// 再現し、治癒が生の D1 エラーにならないことを固定化する。
+	it(
+		'heals more than 50 memos missing their review_schedules row without hitting the D1 bind parameter limit',
+		{ timeout: 20_000 },
+		async () => {
+			const memoCount = 60;
+			const memoIds: string[] = [];
+			for (let i = 0; i < memoCount; i++) {
+				const memo = await createMemo(db, ownerId, {
+					title: `missing-schedule-${i}`,
+					content: 'c',
+					intervalPresetId: ownerPresetId
+				});
+				memoIds.push(memo.id);
+				await db.delete(reviewSchedules).where(eq(reviewSchedules.memoId, memo.id));
+			}
+
+			await expect(
+				updateCustomPresetIntervals(db, ownerId, ownerPresetId, '2h, 5h')
+			).resolves.not.toThrow();
+
+			const healedRows = await db
+				.select({ version: reviewSchedules.version })
+				.from(reviewSchedules)
+				.where(inArray(reviewSchedules.memoId, memoIds))
+				.all();
+			expect(healedRows).toHaveLength(memoCount);
+			expect(healedRows.every((row) => row.version === 1)).toBe(true);
+		}
+	);
 });
 
 describe('listMemosUsingPreset', () => {
