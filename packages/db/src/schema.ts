@@ -105,6 +105,22 @@ export const reviews = sqliteTable(
 	]
 );
 
+// reviews への書き込み経路（review 完了・プリセット変更による再計算・アーカイブ）が
+// 使う楽観ロック用のバージョン。memos の列にしない理由: memos.updatedAt は
+// $onUpdate を持つため、drizzle の buildUpdateSet（列を .set() に含めなくても
+// onUpdateFn 持ちの列は常に SET 句へ追加される）により、memos への UPDATE を
+// 1文でも発行すればどのフィールドを更新したかに関わらず updatedAt が更新されて
+// しまう（実測確認済み）。version を memos の列にすると review 完了のたびに
+// updatedAt が変わり、changeMemoPreset/updateMemo の楽観ロック（expectedUpdatedAt）
+// を汚染して、他クライアントの編集フォームが復習完了のたびに 409 になる回帰を生む。
+// 専用テーブルに分離してこの結合を構造的に排除する（Issue #85）。
+export const reviewSchedules = sqliteTable('review_schedules', {
+	memoId: text('memo_id')
+		.primaryKey()
+		.references(() => memos.id, { onDelete: 'cascade' }),
+	version: integer('version').default(0).notNull()
+});
+
 export const pushSubscriptions = sqliteTable(
 	'push_subscriptions',
 	{
@@ -160,6 +176,10 @@ export const memosRelations = relations(memos, ({ one, many }) => ({
 
 export const reviewsRelations = relations(reviews, ({ one }) => ({
 	memo: one(memos, { fields: [reviews.memoId], references: [memos.id] })
+}));
+
+export const reviewSchedulesRelations = relations(reviewSchedules, ({ one }) => ({
+	memo: one(memos, { fields: [reviewSchedules.memoId], references: [memos.id] })
 }));
 
 export const pushSubscriptionsRelations = relations(pushSubscriptions, ({ one }) => ({

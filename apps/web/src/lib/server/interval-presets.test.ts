@@ -1,6 +1,15 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDb, eq, intervalPresets, reviews, userSettings, type Db } from '@ebb/db';
+import {
+	createDb,
+	eq,
+	inArray,
+	intervalPresets,
+	reviews,
+	reviewSchedules,
+	userSettings,
+	type Db
+} from '@ebb/db';
 import { ConflictError, NotFoundError, ValidationError } from './errors';
 import {
 	createCustomPreset,
@@ -246,7 +255,7 @@ describe('previewPresetIntervalsUpdate', () => {
 		// 実行系（updateCustomPresetIntervals）と同じメモ数を使い、プレビューが
 		// 「N件の予定が更新されます」と成功を返した直後に確定操作だけが拒否される
 		// 非対称（正確性レビューで指摘）が起きないことを確認する。
-		const memoCount = Math.ceil((MAX_BATCH_STATEMENTS - 1) / 2) + 1;
+		const memoCount = Math.ceil(MAX_BATCH_STATEMENTS / 2) + 1;
 		for (let i = 0; i < memoCount; i++) {
 			await createMemo(db, ownerId, {
 				title: `memo-${i}`,
@@ -265,7 +274,7 @@ describe('previewPresetIntervalsUpdate', () => {
 		// 101件から `too many SQL variables` になる）、loadReviewRecalculationInputs
 		// （$lib/server/reviews.ts、#84 で一括取得に変更）が memoId をチャンク分割せずに
 		// inArray へまとめて渡すと、MAX_BATCH_STATEMENTS（500）が許容する規模
-		// （悲観的見積もりで最大249メモ）の範囲内でも生の D1 エラーになりうる
+		// （悲観的見積もりで最大250メモ）の範囲内でも生の D1 エラーになりうる
 		// （#18 の正確性レビューで指摘、実測で確認した回帰）。ここでは
 		// MAX_BATCH_STATEMENTS には抵触しないが100件は超えるメモ数で実行し、
 		// チャンク分割が正しく機能して例外を投げないことを確認する。
@@ -449,10 +458,10 @@ describe('updateCustomPresetIntervals', () => {
 			// estimateWorstCaseBatchStatementCount による悲観的見積もりで早期リジェクトする
 			// ようになった（設計レビューで指摘。以前は実測の statements.length のみで
 			// 判定しており、大量メモに対する確定操作が高コストな処理を全て実行してから
-			// 拒否していた）。この見積もりは1メモあたり最大2文という前提のため、
-			// 実際の文数によらず memoCount 単体で「1 + memoCount*2 <= 500」となる
-			// 249メモまでは必ず成功する。
-			const memoCount = Math.floor((MAX_BATCH_STATEMENTS - 1) / 2);
+			// 拒否していた）。この見積もりは batch A（claim の DELETE + version bump、
+			// 1メモあたり最大2文）が律速するという前提のため、実際の文数によらず
+			// memoCount 単体で「memoCount*2 <= 500」となる250メモまでは必ず成功する。
+			const memoCount = Math.floor(MAX_BATCH_STATEMENTS / 2);
 			for (let i = 0; i < memoCount; i++) {
 				await createMemo(db, ownerId, {
 					title: `memo-${i}`,
@@ -478,7 +487,7 @@ describe('updateCustomPresetIntervals', () => {
 			// previewPresetIntervalsUpdate と同じ悲観的見積もりを実行系の入口でも使う
 			// ようになったため、対象メモ数だけで即座にリジェクトされ、実際の統計文数
 			// （completedCount 次第でもっと少ない可能性がある）には依存しない。
-			const memoCount = Math.ceil((MAX_BATCH_STATEMENTS - 1) / 2) + 1;
+			const memoCount = Math.ceil(MAX_BATCH_STATEMENTS / 2) + 1;
 			for (let i = 0; i < memoCount; i++) {
 				await createMemo(db, ownerId, {
 					title: `memo-${i}`,
@@ -544,18 +553,94 @@ describe('updateCustomPresetIntervals', () => {
 			batchSpy.mockRestore();
 		}
 
-		// バッチ全体がロールバックされ、プリセット自体も更新されていない。
+		// この memo は claim（batch A）に負けたため reviews は再計算されないが、
+		// プリセット自体の UPDATE は batch B で常に実行されるため反映される
+		// （batch A 直後に中断すると、他に勝った memo がいた場合その reviews を
+		// 永久に失うため。advisor 指摘・実機で再現し修正）。ユーザーは 409 を
+		// 受けてこの memo だけ retry すればよい。
 		const [preset] = await db
 			.select()
 			.from(intervalPresets)
 			.where(eq(intervalPresets.id, ownerPresetId))
 			.all();
-		expect(preset?.intervals).toEqual([1, 24, 72]);
+		expect(preset?.intervals).toEqual([2, 5]);
 	});
 
-	// collectAffectedMemoIds が対象メモを列挙した後、db.batch() 確定前にもう一度
-	// アーカイブ状態を確認する stillActiveMemoIds ガード（正確性レビューで指摘）の
-	// 回帰テスト。db.batch を横取りする既存の競合テストとは異なるタイミング
+	// claim（batch A: DELETE + version bump）に勝った memo の reviews は batch A の
+	// 時点で既に削除・確定されている。そのため、同じ操作の中で別の memo が claim に
+	// 負けて全体が ConflictError になる場合でも、勝った memo の reviews が
+	// batch B（プリセット UPDATE + INSERT）で必ず INSERT されることを確認する
+	// 回帰テスト（advisor 指摘・実機で再現した「winner の未完了 reviews が
+	// 永久に失われる」不具合の修正確認）。
+	it('still recreates a winning memo reviews and updates the preset even when a losing memo forces a 409', async () => {
+		const winner = await createMemo(db, ownerId, {
+			title: 'winner', // ownerPreset の intervals: [1, 24, 72]
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const loser = await createMemo(db, ownerId, {
+			title: 'loser',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		const [loserDue] = await db
+			.select({ id: reviews.id })
+			.from(reviews)
+			.where(eq(reviews.memoId, loser.id))
+			.orderBy(reviews.step)
+			.limit(1)
+			.all();
+		if (!loserDue) throw new Error('fixture setup failed');
+		await db
+			.update(reviews)
+			.set({ scheduledAt: new Date(Date.now() - 1000) })
+			.where(eq(reviews.id, loserDue.id));
+
+		const originalBatch = db.batch.bind(db);
+		const batchSpy = vi
+			.spyOn(db, 'batch')
+			.mockImplementationOnce(async (queries: Parameters<typeof originalBatch>[0]) => {
+				// updateCustomPresetIntervals の SELECT 完了後・claim batch 実行前に
+				// loser だけ completeReview で version を進めて古くする。winner の
+				// version には触れない。
+				await completeReview(db, ownerId, loserDue.id);
+				return originalBatch(queries);
+			});
+
+		try {
+			await expect(
+				updateCustomPresetIntervals(db, ownerId, ownerPresetId, '2h, 5h')
+			).rejects.toThrow(ConflictError);
+		} finally {
+			batchSpy.mockRestore();
+		}
+
+		// winner の未完了 reviews は失われず、新しい intervals で再作成されている。
+		const winnerRows = await db.select().from(reviews).where(eq(reviews.memoId, winner.id)).all();
+		expect(winnerRows.filter((row) => row.completedAt === null)).toHaveLength(2);
+
+		// loser は claim に負けたため reviews は再計算されず、元の(完了済み1件 +
+		// 未完了2件)のまま手つかずで残っている(409で操作全体が失敗したことを
+		// 示すだけで、loser 側のデータを壊してはいけない)。
+		const loserRows = await db.select().from(reviews).where(eq(reviews.memoId, loser.id)).all();
+		expect(loserRows).toHaveLength(3);
+		expect(loserRows.filter((row) => row.completedAt !== null)).toHaveLength(1);
+		expect(loserRows.filter((row) => row.completedAt === null)).toHaveLength(2);
+
+		// プリセット自体も更新されている（batch B は常に実行されるため）。
+		const [preset] = await db
+			.select()
+			.from(intervalPresets)
+			.where(eq(intervalPresets.id, ownerPresetId))
+			.all();
+		expect(preset?.intervals).toEqual([2, 5]);
+	});
+
+	// collectAffectedMemoIds が対象メモを列挙した後、claim（batch A）確定前に
+	// アーカイブされた場合に対象から外れることの回帰テスト（正確性レビューで指摘）。
+	// Issue #85 以降は、archiveMemo が version を bump し claim 自身のガード
+	// （memoIsNotArchived・version の CAS）がライブに再確認するため、この経路で
+	// 弾かれる。db.batch を横取りする既存の競合テストとは異なるタイミング
 	// （「対象メモの列挙後・再確認前」）を再現する必要があるため、代わりに
 	// loadReviewRecalculationInputs（#84 で対象メモ全件を一括取得するようになった、
 	// updateCustomPresetIntervals 内で1回だけ呼ばれる関数）を横取りし、その内部で
@@ -602,8 +687,8 @@ describe('updateCustomPresetIntervals', () => {
 			.all();
 		expect(activeRows).toHaveLength(2);
 
-		// archiveMemo が削除した未完了行のまま。stillActiveMemoIds ガードが機能して
-		// いなければ、ここに新しい未完了行が2件 INSERT されてしまう。
+		// archiveMemo が削除した未完了行のまま。claim のガードが機能していなければ、
+		// ここに新しい未完了行が2件 INSERT されてしまう。
 		const archivedRows = await db
 			.select()
 			.from(reviews)
@@ -611,6 +696,86 @@ describe('updateCustomPresetIntervals', () => {
 			.all();
 		expect(archivedRows).toHaveLength(0);
 	});
+
+	// Issue #85 の回帰テスト（正確性レビューで指摘）: migrate〜deploy window の
+	// 既存データを想定し、対象メモの一部が review_schedules 行を持たない状態でも、
+	// 一括更新（bulk 経路）が恒久的に失敗せず治癒して成功することを確認する。
+	it('heals memos missing their review_schedules row (pre-#85 data) instead of excluding them forever', async () => {
+		const withSchedule = await createMemo(db, ownerId, {
+			title: 'with-schedule',
+			content: 'c',
+			intervalPresetId: ownerPresetId // intervals: [1, 24, 72]
+		});
+		const missingSchedule = await createMemo(db, ownerId, {
+			title: 'missing-schedule',
+			content: 'c',
+			intervalPresetId: ownerPresetId
+		});
+		await db.delete(reviewSchedules).where(eq(reviewSchedules.memoId, missingSchedule.id));
+
+		const { updatedReviewsCount } = await updateCustomPresetIntervals(
+			db,
+			ownerId,
+			ownerPresetId,
+			'2h, 5h'
+		);
+		// 両メモとも元の3ステップ全てが未完了だったため合計6件。
+		expect(updatedReviewsCount).toBe(6);
+
+		for (const memo of [withSchedule, missingSchedule]) {
+			const rows = await db
+				.select()
+				.from(reviews)
+				.where(eq(reviews.memoId, memo.id))
+				.orderBy(reviews.step)
+				.all();
+			expect(rows).toHaveLength(2);
+		}
+
+		const [healedRow] = await db
+			.select({ version: reviewSchedules.version })
+			.from(reviewSchedules)
+			.where(eq(reviewSchedules.memoId, missingSchedule.id))
+			.all();
+		expect(healedRow?.version).toBe(1);
+	});
+
+	// queryInChunks は既定では「1 id = 1 bind」を前提に D1_MAX_BIND_PARAMS(100) 単位で
+	// チャンク分割する（db-chunk.ts 参照）。review_schedules 治癒 INSERT は
+	// memo_id・version の2列に bind するため bindsPerItem: 2 を渡す必要があり、
+	// これを渡し忘れる（既定の1のままになる）と51件以上の欠落で
+	// `too many SQL variables` になる回帰があった（正確性レビューで指摘・実機で
+	// 再現）。60件（1チャンクに収まる100件以下だが、2 bind/行なら超過する件数）で
+	// 再現し、治癒が生の D1 エラーにならないことを固定化する。
+	it(
+		'heals more than 50 memos missing their review_schedules row without hitting the D1 bind parameter limit',
+		{ timeout: 20_000 },
+		async () => {
+			const memoCount = 60;
+			const memoIds: string[] = [];
+			for (let i = 0; i < memoCount; i++) {
+				const memo = await createMemo(db, ownerId, {
+					title: `missing-schedule-${i}`,
+					content: 'c',
+					intervalPresetId: ownerPresetId
+				});
+				memoIds.push(memo.id);
+				await db.delete(reviewSchedules).where(eq(reviewSchedules.memoId, memo.id));
+			}
+
+			await expect(
+				updateCustomPresetIntervals(db, ownerId, ownerPresetId, '2h, 5h')
+			).resolves.not.toThrow();
+
+			const healedRows = await db
+				.select({ version: reviewSchedules.version })
+				.from(reviewSchedules)
+				.where(inArray(reviewSchedules.memoId, memoIds))
+				.all();
+			expect(healedRows).toHaveLength(memoCount);
+			expect(healedRows.every((row) => row.version === 1)).toBe(true);
+		}
+	);
 });
 
 describe('listMemosUsingPreset', () => {

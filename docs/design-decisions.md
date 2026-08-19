@@ -2289,3 +2289,187 @@ MemoRecalcInputs>` を返し、見つからなかった memoId は含めない�
   （呼び出し回数は対象メモ数に依らず1回）を横取りする形に変更した。検証内容
   （アーカイブされたメモの reviews が0件のまま・他のメモは正しく再計算される）
   自体は変えていない。
+
+## review スケジュールにバージョンを導入して競合を検出する (#85)
+
+- **背景**: プリセット再計算（`changeMemoPreset`・`updateCustomPresetIntervals`）
+  は、計画作成用の SELECT から `db.batch()` 実行までの間に review 完了・メモの
+  アーカイブ・別のプリセット変更が割り込む競合窓を持っていた。#82・#84 時点では
+  この窓を「unique 制約違反への偶発的な衝突」に頼って検出しており、完了済み
+  ステップ数と新旧 intervals の組み合わせ次第では衝突すら起こらず、古い
+  スナップショットに基づく再計算が静かに成功してしまうケースが正確性レビューで
+  発見・再現されていた（#82 節を参照）。
+
+- **version の所有先は memo の列ではなく専用テーブル `review_schedules`
+  （`memo_id` 1:1 の PK、`version` 整数）にした**。理由は実測で確認した
+  drizzle-orm の挙動: `buildUpdateSet`（`sqlite-core/dialect.js`）は、
+  `$onUpdate` を持つ列を `.set()` に明示的に含めなくても、その UPDATE 文の
+  SET 句へ自動的に追加する。`memos.updatedAt` は `$onUpdate` を持つため、
+  version を memos の列にすると、`completeReview` が version を進めるたびに
+  `memos` テーブルへの UPDATE が発生し、`updatedAt` が意図せず更新されてしまう。
+  これは `changeMemoPreset`・`updateMemo` の楽観ロック（`expectedUpdatedAt`）を
+  汚染し、他クライアントが読んでいた `updatedAt` を使った title/content の
+  更新が、無関係な review の完了のたびに 409 になる回帰を生む（advisor 指摘、
+  `memos.test.ts` の「does not conflict a title-only update with an updatedAt
+  read before an unrelated review completion」で固定化）。専用テーブルに
+  分離することで、この結合を構造的に排除した。
+  - migration（`0012_uneven_jean_grey.sql`）では、既存メモ全件に
+    `version = 0` の行をバックフィルする `INSERT ... SELECT` を追加した。
+    以後の新規メモは `createMemo` が memos・reviews と同じ `db.batch()` で
+    `review_schedules` 行（`version = 0`）も作るため、このテーブルは
+    メモと常に1:1で存在する前提が成立する（delete-memo 機能が無いことに
+    も依存する）。
+  - **この1:1の前提には、migrate（新テーブル作成）から deploy（新しい
+    `createMemo` への切り替え）が完了するまでの短い window（#7 節: この
+    順序前提）という穴が残る**（正確性レビューで指摘）。この window に
+    旧バージョンのコードで作られたメモは `review_schedules` 行を持たない。
+    治癒しないまま version だけを 0 にフォールバックすると、以後の claim の
+    bump 文（`WHERE memo_id = ? AND version = 0`）が対象行の不在によって
+    恒久的に0件のままになり、そのメモの review 完了・プリセット変更が
+    「一度だけ失敗する」ではなく永久に失敗し続けてしまう。`ensureReviewsExist`
+    （memos.ts、#16 の reviews 欠落治癒）と同じ考え方で、`completeReview`・
+    `planReviewRecalculation`・`loadReviewRecalculationInputs` の各読み取り
+    箇所に `ensureReviewScheduleExists`（`version = 0` で `onConflictDoNothing`
+    INSERT）を追加し、行が見つからなかった時点で治癒してから version 0 として
+    扱うようにした。
+
+- **不変条件**:「reviews への書き込み経路は、同じ論理操作内で
+  `review_schedules.version` の CAS に勝った場合のみ書き込む」。これを
+  `completeReview`・`changeMemoPreset`・`updateCustomPresetIntervals` の
+  3経路に適用した。`archiveMemo` は CAS には参加せず、version を無条件に
+  bump するだけ（アーカイブは一方向の操作で、他の書き込みと version を
+  奪い合う必要が無いため）。以後の claim がこの bump 後の version を
+  読み取り、アーカイブ後に古い version へ書き込もうとする操作を弾く（正確な
+  役割は「CAS に勝つ側」ではなく「他の claim を無効化する側」。scope 外
+  レビューで、この記述が「4経路すべてが CAS する」と誤読できる旨の指摘）。
+  また `ensureReviewsExist`（memos.ts、#16 由来の reviews 欠落治癒。対象メモの
+  reviews が0件のときにだけ発火する）も CAS ガードなしで `db.insert(reviews)`
+  する例外であり、version は変更しない。reviews が0件の状態からの復元という
+  狭い状況にのみ効く治癒であり、この不変条件が守ろうとしている「同時書き込み
+  競合の検出」とは別の目的のため、意図的に対象外とした（正確性レビューで、
+  この不変条件の記述が例外を暗黙に無視している旨の指摘）。
+  - **`completeReview`**: 冒頭の JOIN で対象メモの `review_schedules.version`
+    も一緒に取得し、`completeCurrent`（対象ステップの completedAt を立てる
+    UPDATE）の WHERE に「version が読み取り時のまま変わっていないか」の
+    EXISTS 条件を追加した。別リクエストの claim（プリセット変更）が先に
+    割り込んで version を進めていた場合、この UPDATE は0行になり、既存の
+    「0行なら ConflictError」分岐がそのまま働く。加えて、この呼び出し自身が
+    実際に完了させた場合（既存の `wonThisCompletion` ガードと同じ形）に限り
+    version を1進める文を同じ `db.batch()` に追加した。これにより
+    `completeReview` 自身も「reviews の状態を変える書き込み」として version
+    を進める側に回る。
+  - **`changeMemoPreset`・`updateCustomPresetIntervals`**: DELETE（未完了
+    reviews）+ version bump を「claim」として1つの `db.batch()` にまとめ、
+    bump の `.returning()` で勝敗を判定してから、勝った場合にのみ別の
+    呼び出しで新しい行を INSERT する2段階方式にした（#82 で確立した
+    「memo の UPDATE を先に確定させ、勝った場合にのみ reviews を再計算する」
+    という2段階の考え方を、reviews の再計算そのものにも適用したもの）。
+    INSERT 文自体に WHERE を持たせて version を検証することはできない
+    （D1 の `batch()` が `INSERT ... VALUES` への WHERE 付与や、それに代わる
+    guarded な生 SQL INSERT の実行を許さないことは #82 で確認済み）ため、
+    「DELETE + bump が勝ったことを確認してから INSERT する」という順序上の
+    分離が唯一の実現手段になる。
+  - claim のガード（`reviewScheduleVersionMatches`・`memoIsNotArchived`、
+    `$lib/server/reviews.ts`）は、version の列を直接 WHERE に混ぜるのではなく
+    EXISTS で包む必要がある。実装時に一度、DELETE 文（`reviews` テーブルが
+    対象）の WHERE へ `review_schedules` の列をそのまま条件式として混ぜた
+    ところ、`review_schedules` がその文の FROM/JOIN に無いため
+    "no such column: review_schedules.memo_id" という D1 エラーになった
+    （実機で確認）。UPDATE 対象のテーブル自身の列であれば直接条件式に書けるが、
+    それ以外の文からは EXISTS 経由でしか参照できない、という drizzle/SQL の
+    制約に注意が必要。
+  - **`changeMemoPreset`（単一メモ経路）には、上記の一括経路と同じ形の
+    残存リスクが未修正のまま残っている**（advisor 指摘。一括経路のような
+    データ損失バグとして実機再現はしていないが、構造は同一）: `claimReviewSchedule`
+    は自分自身で `db.batch([DELETE, bump])` を実行してコミットし、
+    `commitReviewRecalculation` はその後、別の独立した呼び出しとして
+    `db.insert(reviews).values(plan.newRows)` を実行する。この INSERT が
+    失敗する（unique 制約違反など）と、claim の DELETE + bump は既に
+    コミット済みのため元に戻らず、`changeMemoPreset` の catch 節に伝播しても
+    memos 側フィールドしか復元されない。到達には unique 制約の backstop が
+    実際に発火する必要があり、一括経路の初版バグ（claim 成功後に無条件で
+    処理全体を中断する設計）よりはるかに窓が狭いため、一括経路と同じ
+    「batch B を常に実行してから 409 判定する」形へ揃える修正は見送った。
+    #82 の「残るリスク」節が記録していた残存レースと同種の、狙って完全には
+    排除しない残存窓として受容する（ただし一括経路の初版のように恒常的に
+    発生する経路ではない点を区別しておく）。
+  - アーカイブ済みメモの除外は version の一致だけでは保証できない: version を
+    読み取った時点より後にアーカイブされた場合、その読み取り自体が既に
+    アーカイブ後の状態であれば version は「一致している」ように見えてしまう。
+    アーカイブは一方向（un-archive しない）操作のため、claim 評価時点の
+    `memos.archivedAt` を毎回ライブに確認する EXISTS 条件を version チェックと
+    独立に持たせることで、読み取りタイミングに関わらず確実に除外できる
+    （advisor 指摘、`interval-presets.test.ts` の既存回帰テストで検証）。
+  - **`updateCustomPresetIntervals`（複数メモ対象）固有の追加考慮**:
+    `updatePresetStatement`（プリセット自体の `intervals` 列 UPDATE）は
+    メモ単位のガードを持てず、claim の勝敗に関わらずこのプリセットを使う
+    全メモに適用される。
+    - **初版実装は「claim（batch A）に負けたメモが1件でもいれば、batch B
+      （プリセットの UPDATE・勝った memo 分の INSERT）を一切実行せず
+      ConflictError で即座に中断する」という設計だったが、これは
+      実機で再現される重大なデータ損失バグだった**（advisor 指摘）:
+      claim の DELETE は batch A の時点で既にコミットされており、直後に
+      batch B の実行そのものを止めると、既に claim に「勝った」別のメモの
+      未完了 reviews が INSERT されないまま永久に失われる（winner と loser の
+      2メモを用意し、`db.batch` を横取りして loser だけを batch A 実行直前に
+      競合させ、`ConflictError` 発生後に winner の reviews が0件になることを
+      実機で確認した）。
+    - **修正後の設計**: batch B は claim の勝敗によらず常に実行する
+      （プリセットの UPDATE・勝ったメモ分の INSERT を必ず反映する）。
+      claim に負けたメモのうち「アーカイブされたから対象外」以外の理由
+      （version 不一致 = 別の書き込みが割り込んだ）で負けたメモが1件でも
+      あれば、batch B の**コミット後**に `ConflictError` を投げる。この順序
+      により、「負けたメモがいるだけで batch B の実行自体を止めてしまい
+      勝ったメモの reviews が INSERT されない」という初版の不具合は解消
+      される。かつ負けたメモは「古い intervals のまま」という不整合を隠さず
+      409 としてユーザーに伝えられる（＝プリセットの intervals は更新される
+      が、負けたメモの reviews は別途 retry してもらう必要がある。retry は
+      claim をやり直すだけなので安全）。`interval-presets.test.ts` の
+      「still recreates a winning memo reviews and updates the preset
+      even when a losing memo forces a 409」で固定化した。
+      - **ただし batch B 自体が丸ごと失敗した場合（下記 unique 制約
+        backstop の発火・一過性の D1 エラー等）は話が別**: batch B は
+        単一の `db.batch()` なので INSERT 側はロールバックされるが、
+        既にコミット済みの batch A（claim の DELETE）は元に戻らない。
+        この場合は勝ったメモの未完了 reviews が失われたままになる
+        （設計レビューで指摘）。単一メモ経路の `commitReviewRecalculation`
+        が持つ残存リスクと同種・同程度の窓であり、同じプリセットで
+        再実行すれば `computeReviewRecalculation` が完了済み行だけから
+        再計算できるため回復可能。#82 の「残るリスク」節が記録していた
+        残存レースと同種の、狙って完全には排除しない残存窓として受容する。
+    - `MAX_STATEMENTS_PER_MEMO` は batch A（claim: DELETE 1 + version bump 1
+      の2文）が律速する。batch B（プリセット UPDATE 1件 + メモ毎最大1件の
+      INSERT）は常にそれ以下になるため、悲観的見積もりは batch A の2文を
+      使う。`MAX_BATCH_STATEMENTS`（500）が許容する最大メモ数は、
+      #84 時点の249件とほぼ同水準（250件）を維持する。
+    - claim の勝敗判定そのものに使っていた「batch 実行直前の対象メモ
+      アーカイブ再確認」（旧 `stillActiveMemoIds`）は、claim 自身のガード
+      （`memoIsNotArchived`）が対象メモの `archivedAt` を直接見るように
+      なったことで不要になった（advisor 指摘）。ただし用途は異なるが
+      同型の SELECT（`stillActiveLoserRows`）が、batch B コミット後に
+      「負けたメモのうちアーカイブ済みでないもの」を数えて 409 判定する
+      ためだけに残っている（上記）。
+    - **claim の結果配列を読む際、DELETE 文をまとめて先に積み、bump 文をまとめて
+      後に積む形にした**（初版は `[DELETE, bump]` のペアを `flatMap` で交互に
+      積み、`claimResults[i * 2 + 1]` という暗黙のストライドで bump 結果を
+      読んでいたが、積む側・読む側の2箇所に同じレイアウト知識が分散する
+      設計になっていた。設計レビューで指摘）。bump 文は `.returning({ memoId })`
+      で自分の memoId 自身を返すため、結果を読む側は位置ではなく返ってきた
+      memoId の値から勝者集合を作れる。各メモの DELETE が自分の bump より先に
+      実行される必要があるが、メモ同士は独立な行を操作するため「全 DELETE →
+      全 bump」の順序に変えても各メモの整合性は保たれる。
+
+- **`isUniqueConstraintViolation` による 409 変換は backstop として残した**が、
+  主たる検出手段ではなくなった。claim に勝った直後・INSERT 実行前のごく狭い窓
+  （2段階方式のため完全には排除できない、#82 節が記録する残存レースと同種）に
+  限り、DB 制約エラーからの変換に頼る。#82 で発見された「非overlapping な
+  step 番号のため unique 制約にすら頼れず静かに成功する」ケースは、version の
+  CAS が主たる防御線になったことで、`memos.test.ts` の
+  「does not silently apply a losing preset change even when no
+  unique-constraint collision would occur」がそのまま検出できる
+  （このテスト自体は実際には #82 由来の `updatedAt` 楽観ロックで先に
+  弾かれる別経路だが、version CAS 経由の同種の競合は新規追加した
+  「detects a stale changeMemoPreset claim even when a concurrent bulk
+  preset update races in」で検証している。`updateCustomPresetIntervals` は
+  memos.updatedAt に触れないため、この経路の検出は version CAS のみに
+  依存する）。

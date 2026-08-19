@@ -9,8 +9,8 @@ import {
 	memos,
 	or,
 	reviews,
+	reviewSchedules,
 	sql,
-	type BatchItem,
 	type Db
 } from '@ebb/db';
 import { nextReviewAt } from '@ebb/core';
@@ -22,7 +22,7 @@ import {
 } from './errors';
 import { getAccessiblePreset } from './interval-presets';
 import { clamp, normalizeOffset, type PaginationOptions } from './pagination';
-import { planReviewRecalculation } from './reviews';
+import { commitReviewRecalculation, planReviewRecalculation } from './reviews';
 
 export const TITLE_MAX_LENGTH = 200;
 export const CONTENT_MAX_LENGTH = 50_000;
@@ -303,10 +303,15 @@ export async function createMemo(db: Db, userId: string, input: CreateMemoInput)
 
 	let insertedMemoRows: (typeof memos.$inferSelect)[];
 	try {
-		// D1 の batch は単一の暗黙トランザクションとして実行され、どちらかが失敗すれば
-		// 両方ロールバックされる。intervals は上のチェックにより常に1件以上のため、
-		// reviewRows が空になることはない。
-		[insertedMemoRows] = await db.batch([insertMemo, db.insert(reviews).values(reviewRows)]);
+		// D1 の batch は単一の暗黙トランザクションとして実行され、どれかが失敗すれば
+		// 全てロールバックされる。intervals は上のチェックにより常に1件以上のため、
+		// reviewRows が空になることはない。review_schedules 行は Issue #85 の
+		// 楽観ロック用で、以後このメモに1:1で存在する前提を作る（version=0 始まり）。
+		[insertedMemoRows] = await db.batch([
+			insertMemo,
+			db.insert(reviews).values(reviewRows),
+			db.insert(reviewSchedules).values({ memoId: id, version: 0 })
+		]);
 	} catch (err) {
 		if (input.id !== undefined && isUniqueConstraintViolation(err, 'memos.id')) {
 			const existing = await findOwnMemoById(db, userId, input.id);
@@ -446,21 +451,22 @@ export async function changeMemoPreset(
 	}
 
 	const plan = await planReviewRecalculation(db, id, newIntervals);
+
+	// Issue #85: reviews の DELETE + review_schedules.version の bump を claim として
+	// 1つの db.batch() で実行し、plan 作成時の version からずれていないか（＝1) の直後・
+	// 2) の実行前に別リクエストの completeReview・別のプリセット変更が割り込んでいないか）
+	// を判定する。version 不一致・対象メモのアーカイブは commitReviewRecalculation 内部の
+	// ガードで検出され、DB 制約エラーの文字列判定に主に依存することはなくなった（経緯は
+	// docs/design-decisions.md の #82・#85 節を参照）。
 	try {
-		// planReviewRecalculation は常に DELETE 文を先頭に積むため実行時には常に
-		// 1件以上になるが、可変長の配列であることは型システムでは静的に証明できない
-		// ため、既存の completeReview・updateCustomPresetIntervals と同じ型注釈で表明する。
-		await db.batch(plan.statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]);
+		await commitReviewRecalculation(db, id, plan);
 	} catch (err) {
-		// 上記の db.batch() が失敗しうるのは、1) の直後・2) の実行前に別リクエストの
-		// completeReview が割り込む、ごく狭い残存レースのみ（#82 節に記録）。
-		// この呼び出し自身の書き込み（thisChangeStamp で識別）がまだ現在の値である
-		// 場合に限り、1) で確定させた全フィールド（title・content・intervalPresetId）を
-		// 呼び出し前の状態へ戻す。intervalPresetId だけを戻すと、同じ呼び出しで
-		// 一緒に確定していた title・content が静かに確定したまま残ってしまう
-		// （409 を返したのに一部フィールドだけ保存される部分適用。正確性レビューで
-		// 指摘）。他の誰かが既にこのメモを更に更新していた場合は、その更新を
-		// 上書きしないよう戻さない。
+		// この呼び出し自身の書き込み（thisChangeStamp で識別）がまだ現在の値である場合に
+		// 限り、1) で確定させた全フィールド（title・content・intervalPresetId）を呼び出し前の
+		// 状態へ戻す。intervalPresetId だけを戻すと、同じ呼び出しで一緒に確定していた
+		// title・content が静かに確定したまま残ってしまう（409 を返したのに一部フィールドだけ
+		// 保存される部分適用。正確性レビューで指摘）。他の誰かが既にこのメモを更に更新して
+		// いた場合は、その更新を上書きしないよう戻さない。
 		await db
 			.update(memos)
 			.set({
@@ -469,9 +475,6 @@ export async function changeMemoPreset(
 				intervalPresetId: existing.intervalPresetId
 			})
 			.where(and(eq(memos.id, id), eq(memos.updatedAt, thisChangeStamp)));
-		if (isUniqueConstraintViolation(err, 'reviews.step')) {
-			throw new ConflictError('メモの復習予定が同時に更新されました。もう一度お試しください。');
-		}
 		throw err;
 	}
 
@@ -512,9 +515,19 @@ export async function archiveMemo(db: Db, userId: string, id: string) {
 	// （#16 の受け入れ条件「メモを削除すると予定も消える」に対応するため）。
 	// 完了済み（completedAt が設定済み）の行は履歴として残す方針（#18 の再計算レシピが
 	// 完了済みステップ数を起点にするための前提でもある）なので削除しない。
+	// review_schedules.version も同じ batch で進める（Issue #85）。この呼び出しは
+	// getMemo で既に所有権・非アーカイブを確認済みなので version の一致は問わず、常に
+	// 進めてよい。これにより、この削除より前に読み取られた version を前提にした
+	// changeMemoPreset・updateCustomPresetIntervals の claim は必ず版不一致で負け、
+	// アーカイブ後に未完了 review が復活しない（claimReviewSchedule 側でも
+	// archivedAt を直接確認しているため、二重の安全策になる）。
 	const [archivedRows] = await db.batch([
 		db.update(memos).set({ archivedAt: new Date() }).where(ownMemo(userId, id)).returning(),
-		db.delete(reviews).where(and(eq(reviews.memoId, id), isNull(reviews.completedAt)))
+		db.delete(reviews).where(and(eq(reviews.memoId, id), isNull(reviews.completedAt))),
+		db
+			.update(reviewSchedules)
+			.set({ version: sql`${reviewSchedules.version} + 1` })
+			.where(eq(reviewSchedules.memoId, id))
 	]);
 	const archived = archivedRows[0];
 	if (!archived) throw new NotFoundError('memo not found');

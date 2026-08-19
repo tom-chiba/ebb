@@ -14,6 +14,7 @@ import {
 	lte,
 	memos,
 	reviews,
+	reviewSchedules,
 	sql,
 	type BatchItem,
 	type Db
@@ -21,7 +22,7 @@ import {
 import { nextReviewAt } from '@ebb/core';
 import { queryInChunks } from './db-chunk';
 import { excerptOf } from './excerpt';
-import { ConflictError, NotFoundError } from './errors';
+import { ConflictError, isUniqueConstraintViolation, NotFoundError } from './errors';
 import { clamp, normalizeOffset, type PaginationOptions } from './pagination';
 
 const DEFAULT_LIMIT = 10;
@@ -279,9 +280,25 @@ export async function getDueReviewDetail(
 	};
 }
 
+// review_schedules は createMemo が memos・reviews と同じ db.batch() で必ず作るため
+// 通常はメモと1:1で存在するが、migrate（新テーブル作成）から deploy（新しい
+// createMemo への切り替え）が完了するまでの短い window（docs/design-decisions.md の
+// #7 節: この順序前提）に、旧バージョンのコードで作られたメモは review_schedules
+// 行を持たない。ensureReviewsExist（memos.ts、#16 の reviews 欠落治癒と同じ形）に
+// 倣い、行が見つからなかった場合はここで治癒する。治癒しないと、この後の claim の
+// bump 文（`WHERE memo_id = ? AND version = 0`）が対象行の不在によって恒久的に
+// 0件のままになり、対象メモの review 完了・プリセット変更が永久に失敗し続ける
+// （advisor 指摘、実機の D1 エラーではなく静的レビューで発見）。
+async function ensureReviewScheduleExists(db: Db, memoId: string): Promise<void> {
+	await db.insert(reviewSchedules).values({ memoId, version: 0 }).onConflictDoNothing();
+}
+
 export async function completeReview(db: Db, userId: string, id: string): Promise<CompletedReview> {
 	const requestedAt = new Date();
 	// reviews 自体は userId を持たないため、所有権の確認は memos との JOIN で行う。
+	// scheduleVersion は Issue #85 の楽観ロック用（下記 wonThisCompletion・
+	// scheduleVersionMatches の説明を参照）。review_schedules 行が無いメモを
+	// 対象から除外しないよう leftJoin にする（ensureReviewScheduleExists 参照）。
 	const rows = await db
 		.select({
 			id: reviews.id,
@@ -289,10 +306,12 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 			memoTitle: memos.title,
 			step: reviews.step,
 			completedAt: reviews.completedAt,
-			intervalPresetId: memos.intervalPresetId
+			intervalPresetId: memos.intervalPresetId,
+			scheduleVersion: reviewSchedules.version
 		})
 		.from(reviews)
 		.innerJoin(memos, eq(reviews.memoId, memos.id))
+		.leftJoin(reviewSchedules, eq(reviewSchedules.memoId, memos.id))
 		.where(
 			and(
 				eq(reviews.id, id),
@@ -306,6 +325,11 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 	const target = rows[0];
 	if (!target) throw new NotFoundError('review not found');
 	if (target.completedAt !== null) throw new ConflictError('review has already been completed');
+
+	if (target.scheduleVersion === null) {
+		await ensureReviewScheduleExists(db, target.memoId);
+	}
+	const scheduleVersion = target.scheduleVersion ?? 0;
 
 	await assertIsCurrentStep(db, target.memoId, target.step);
 
@@ -342,6 +366,16 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 			.where(and(eq(reviews.id, id), eq(reviews.completedAt, completedAt)))
 	);
 
+	// Issue #85: reviews への書き込み経路は、同じ論理操作内で review_schedules.version
+	// の CAS に勝った場合のみ書き込む、という不変条件を completeReview 自身にも課す。
+	// scheduleVersionMatches が false になるのは、この呼び出しの SELECT（冒頭の
+	// scheduleVersion 取得）より後に、別リクエストの changeMemoPreset・
+	// updateCustomPresetIntervals（いずれも claim 成功時に version をこの条件と
+	// 同じ形で更新する、下記 reviewScheduleVersionMatches を参照）が割り込んだ場合。
+	// completeCurrent の WHERE に含めることで、古いスナップショット（旧 intervals・
+	// 旧 step 構成）を前提にした完了・再アンカリングがコミットされることを防ぐ。
+	const scheduleVersionMatches = reviewScheduleVersionMatches(db, target.memoId, scheduleVersion);
+
 	// #82 以降 changeMemoPreset は intervalPresetId の変更と reviews の作り直しを
 	// 同じ db.batch() で行うため、通常この reviews のステップ数は現在のプリセットの
 	// intervals と整合している。しかし #82 のデプロイより前に古い updateMemo で
@@ -370,11 +404,27 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 		.update(reviews)
 		.set({ completedAt })
 		// SELECT 後に #18 の再計算等で期限が未来へ移された場合も、古い画面や通知から
-		// 期限前に完了できないよう UPDATE 自体でも due 条件を再検証する。
+		// 期限前に完了できないよう UPDATE 自体でも due 条件を再検証する。scheduleVersionMatches
+		// により、#85 の claim（changeMemoPreset・updateCustomPresetIntervals）が
+		// この SELECT より後に割り込んだ場合も同じ 0 行ヒットで検出する。
 		.where(
-			and(eq(reviews.id, id), isNull(reviews.completedAt), lte(reviews.scheduledAt, completedAt))
+			and(
+				eq(reviews.id, id),
+				isNull(reviews.completedAt),
+				lte(reviews.scheduledAt, completedAt),
+				scheduleVersionMatches
+			)
 		)
 		.returning();
+
+	// この呼び出し自身の完了・再アンカリングが確定したことを、後続の claim（#85）が
+	// 検出できるようにする。wonThisCompletion で「この呼び出しが実際に勝った場合のみ」
+	// に絞るのは reanchorUpdates と同じ理由（Codex のレビューで指摘された既存の
+	// ガードと同型）。
+	const bumpScheduleVersion = db
+		.update(reviewSchedules)
+		.set({ version: sql`${reviewSchedules.version} + 1` })
+		.where(and(eq(reviewSchedules.memoId, target.memoId), wonThisCompletion));
 
 	// db.batch は静的に1件以上とわかるタプル型（BatchItem<'sqlite'> の非空配列）を
 	// 要求するが、再アンカリング対象の件数は実行時にしか決まらない。completeCurrent が
@@ -383,11 +433,13 @@ export async function completeReview(db: Db, userId: string, id: string): Promis
 	// ため、型注釈で表明する（db.batch の結果は先頭要素の completedRows のみ参照する）。
 	const batchQueries: [typeof completeCurrent, ...BatchItem<'sqlite'>[]] = [
 		completeCurrent,
-		...reanchorUpdates.map((u) => u.query)
+		...reanchorUpdates.map((u) => u.query),
+		bumpScheduleVersion
 	];
 	const [completedRows] = await db.batch(batchQueries);
 	if (!completedRows[0]) {
-		// 直前の存在確認と実際の UPDATE の間に、別リクエストが先に完了させた場合。
+		// 直前の存在確認と実際の UPDATE の間に、別リクエストが先に完了させたか、
+		// #85 の claim が割り込んだ場合。
 		throw new ConflictError('review has already been completed');
 	}
 
@@ -442,9 +494,12 @@ export interface ReviewRecalculationPlan {
 	// このメモの現在の未完了 reviews 件数（= このプランの実行で削除・作り直される件数）。
 	// 「N 件の予定が更新されます」のプレビューと実際の更新が同じ定義を共有するための値。
 	affectedCount: number;
-	// 呼び出し側が他のメモ分の statements・プリセット自体の UPDATE と合わせて
-	// 1つの db.batch() にまとめて実行する（このプラン自体は実行しない）。
-	statements: BatchItem<'sqlite'>[];
+	// 呼び出し側が claimReviewSchedule（このメモ分の claim）に勝った場合にのみ
+	// INSERT する行（Issue #85）。
+	newRows: (typeof reviews.$inferInsert)[];
+	// この計画を作った時点の review_schedules.version。claimReviewSchedule・
+	// buildReviewScheduleClaimStatements に渡す（Issue #85）。
+	expectedVersion: number;
 }
 
 // メモ1件分の再計算に必要な入力。#84 で「対象メモを一括取得する」ようにした
@@ -458,6 +513,8 @@ export interface MemoRecalcInputs {
 	latestCompleted: { step: number; completedAt: Date } | undefined;
 	// このメモの現在の未完了 reviews 件数。
 	incompleteCount: number;
+	// このメモの review_schedules.version（Issue #85 の楽観ロック用）。
+	version: number;
 }
 
 // #18 の再計算レシピ（docs/schema.md の reviews 節、ユーザー承認済みの設計判断）を
@@ -491,23 +548,119 @@ export function computeReviewRecalculation(
 	return { affectedCount: input.incompleteCount, newRows };
 }
 
-// computeReviewRecalculation が返す newRows から、実際に db.batch() へ積む
-// DELETE/INSERT 文を組み立てる（実行はしない）。DELETE は常に積み、INSERT は
-// newRows が1件以上あるときのみ積む（＝メモ1件あたり最大2文、
-// interval-presets.ts の MAX_STATEMENTS_PER_MEMO が前提とする上限と一致）。
-// planReviewRecalculation（単一メモ）・updateCustomPresetIntervals（一括、#84）の
-// 両方がこのヘルパー経由で文を組み立てる。
-export function buildReviewRecalculationStatements(
+// Issue #85: reviews への書き込み経路は、同じ論理操作内で review_schedules.version
+// の CAS に勝った場合のみ書き込む、という不変条件を守るための共通ガード。version が
+// 読み取り時のまま変わっていない（他の claim・completeReview がまだ割り込んで
+// いない）ことを、review_schedules が FROM に無い文（reviews への DELETE 等）からも
+// 使える形（EXISTS）で表す。列を直接 WHERE に混ぜると、その文が review_schedules を
+// FROM/JOIN していない場合は「スコープに無い列」として SQL エラーになる（実測で確認、
+// D1 が "no such column: review_schedules.memo_id" を返した）。
+function reviewScheduleVersionMatches(db: Db, memoId: string, expectedVersion: number) {
+	return exists(
+		db
+			.select({ one: sql`1` })
+			.from(reviewSchedules)
+			.where(and(eq(reviewSchedules.memoId, memoId), eq(reviewSchedules.version, expectedVersion)))
+	);
+}
+
+// 対象メモが（このガード評価時点で）アーカイブされていないかを、同じ理由で EXISTS の
+// 形で表す。アーカイブは一方向の操作（un-archive しない）のため、version の一致だけを
+// 見ると「アーカイブ後に読み取った version」を「変化なし」と誤認し、アーカイブ済み
+// メモの reviews を復活させてしまう（advisor 指摘）。
+function memoIsNotArchived(db: Db, memoId: string) {
+	return exists(
+		db
+			.select({ one: sql`1` })
+			.from(memos)
+			.where(and(eq(memos.id, memoId), isNull(memos.archivedAt)))
+	);
+}
+
+// memoId の未完了 reviews を書き換える権利を主張する DELETE + version bump の組
+// （実行はしない）。両方とも version 不一致・対象メモのアーカイブのいずれかで0行に
+// なり、bump は .returning() で呼び出し側に成否を伝える。
+//
+// この2文の直後に newRows の INSERT を無条件で積むことはできない（D1 の
+// batch() は `INSERT ... VALUES` に WHERE を持てないため、db.insert().select() や
+// 生SQLの guarded INSERT も db.batch() の prepared statement 要件を満たせず使えない
+// ことを #82 で確認済み、docs/design-decisions.md の #82 節を参照）。そのため
+// 呼び出し側は、この2文を独立した db.batch() として実行し、bump の返り値で
+// 「勝った」ことを確認した後にのみ、別の呼び出しで newRows を INSERT する。
+export function buildReviewScheduleClaimStatements(
 	db: Db,
 	memoId: string,
-	newRows: (typeof reviews.$inferInsert)[]
-): BatchItem<'sqlite'>[] {
+	expectedVersion: number
+) {
+	const notArchived = memoIsNotArchived(db, memoId);
 	const deleteStatement = db
 		.delete(reviews)
-		.where(and(eq(reviews.memoId, memoId), isNull(reviews.completedAt)));
-	const statements: BatchItem<'sqlite'>[] = [deleteStatement];
-	if (newRows.length > 0) statements.push(db.insert(reviews).values(newRows));
-	return statements;
+		.where(
+			and(
+				eq(reviews.memoId, memoId),
+				isNull(reviews.completedAt),
+				reviewScheduleVersionMatches(db, memoId, expectedVersion),
+				notArchived
+			)
+		);
+	const bumpStatement = db
+		.update(reviewSchedules)
+		.set({ version: sql`${reviewSchedules.version} + 1` })
+		.where(
+			and(
+				eq(reviewSchedules.memoId, memoId),
+				eq(reviewSchedules.version, expectedVersion),
+				notArchived
+			)
+		)
+		.returning({ memoId: reviewSchedules.memoId });
+	return { deleteStatement, bumpStatement };
+}
+
+// メモ1件分の claim を実行し、勝敗を返す（changeMemoPreset 向け）。対象メモが
+// 複数ありうる updateCustomPresetIntervals は、全メモ分の claim を1つの
+// db.batch() にまとめて発行したいため、代わりに buildReviewScheduleClaimStatements を
+// 直接使う（Issue #85）。
+export async function claimReviewSchedule(
+	db: Db,
+	memoId: string,
+	expectedVersion: number
+): Promise<boolean> {
+	const { deleteStatement, bumpStatement } = buildReviewScheduleClaimStatements(
+		db,
+		memoId,
+		expectedVersion
+	);
+	const [, bumpedRows] = await db.batch([deleteStatement, bumpStatement]);
+	return bumpedRows.length > 0;
+}
+
+// planReviewRecalculation（単一メモ）が返す計画を実際に適用する: claim に勝った
+// 場合にのみ newRows を INSERT する。updateCustomPresetIntervals（複数メモの claim を
+// 1つの db.batch() にまとめたい）は、代わりに buildReviewScheduleClaimStatements を
+// 直接使う。changeMemoPreset・回帰テストの両方がこのヘルパー経由で計画を適用する
+// （Issue #85）。
+export async function commitReviewRecalculation(
+	db: Db,
+	memoId: string,
+	plan: ReviewRecalculationPlan
+): Promise<void> {
+	const won = await claimReviewSchedule(db, memoId, plan.expectedVersion);
+	if (!won) {
+		throw new ConflictError('メモの復習予定が同時に更新されました。もう一度お試しください。');
+	}
+	if (plan.newRows.length === 0) return;
+	try {
+		await db.insert(reviews).values(plan.newRows);
+	} catch (err) {
+		// claim に勝った直後・この INSERT 実行前のごく狭い窓に、別の書き込みが同じ
+		// memoId に対して先に同じ step 番号を使ってしまった場合の backstop（#82 節が
+		// 記録する残存レースと同種、完全な排除はできない）。
+		if (isUniqueConstraintViolation(err, 'reviews.step')) {
+			throw new ConflictError('メモの復習予定が同時に更新されました。もう一度お試しください。');
+		}
+		throw err;
+	}
 }
 
 // メモ1件分の未完了 reviews を、新しい intervals に基づいて作り直すための
@@ -527,6 +680,24 @@ export async function planReviewRecalculation(
 		.all();
 	const memo = memoRows[0];
 	if (!memo) throw new NotFoundError('memo not found');
+
+	const scheduleRows = await db
+		.select({ version: reviewSchedules.version })
+		.from(reviewSchedules)
+		.where(eq(reviewSchedules.memoId, memoId))
+		.limit(1)
+		.all();
+	// createMemo とマイグレーションのバックフィルにより review_schedules 行は通常
+	// メモと1:1で存在するが、その前提が崩れた場合（ensureReviewScheduleExists の
+	// コメントを参照）は治癒してから version 0 として扱う。治癒しないまま
+	// expectedVersion だけを 0 にフォールバックすると、後続の claim の bump 文
+	// （`WHERE memo_id = ? AND version = 0`）が対象行の不在によって恒久的に
+	// 0件のままになり、このメモの再計算が永久に失敗し続ける。
+	const scheduleRow = scheduleRows[0];
+	if (!scheduleRow) {
+		await ensureReviewScheduleExists(db, memoId);
+	}
+	const expectedVersion = scheduleRow?.version ?? 0;
 
 	const latestCompletedRows = await db
 		.select({ step: reviews.step, completedAt: reviews.completedAt })
@@ -553,51 +724,62 @@ export async function planReviewRecalculation(
 				step: latestCompletedRow.step,
 				completedAt: latestCompletedRow.completedAt as Date
 			},
-			incompleteCount: incompleteRows.length
+			incompleteCount: incompleteRows.length,
+			version: expectedVersion
 		},
 		intervals
 	);
 
-	return { affectedCount, statements: buildReviewRecalculationStatements(db, memoId, newRows) };
+	return { affectedCount, newRows, expectedVersion };
 }
 
 // updateCustomPresetIntervals・previewPresetIntervalsUpdate（#84）向け。対象メモ数に
-// 依らず常に3クエリ集合（チャンク分割込み）で完了する点が、1メモにつき3 SELECT を
-// 発行する planReviewRecalculation との違い。戻り値の Map は対象メモ数より少ない
-// ことがある（後述）ため、呼び出し側は memoIds の各要素に対して `.get(memoId)` が
-// undefined になり得ることを前提にする。
+// 依らず常に一定数のクエリ集合（チャンク分割込み。#84 時点は3、Issue #85 で
+// version 取得を追加し4）で完了する点が、1メモにつき3 SELECT を発行する
+// planReviewRecalculation との違い。戻り値の Map は対象メモ数より少ないことがある
+// （後述）ため、呼び出し側は memoIds の各要素に対して `.get(memoId)` が undefined に
+// なり得ることを前提にする。
 export async function loadReviewRecalculationInputs(
 	db: Db,
 	memoIds: readonly string[]
 ): Promise<Map<string, MemoRecalcInputs>> {
 	if (memoIds.length === 0) return new Map();
 
-	const [createdAtRows, completedRows, incompleteCountRows] = await Promise.all([
-		queryInChunks(memoIds, (ids) =>
-			db
-				.select({ id: memos.id, createdAt: memos.createdAt })
-				.from(memos)
-				.where(inArray(memos.id, ids))
-				.all()
-		),
-		queryInChunks(memoIds, (ids) =>
-			db
-				.select({ memoId: reviews.memoId, step: reviews.step, completedAt: reviews.completedAt })
-				.from(reviews)
-				.where(and(inArray(reviews.memoId, ids), isNotNull(reviews.completedAt)))
-				.all()
-		),
-		// GROUP BY はあるが bind は inArray 1つのみ（他に条件を持たない）ため、
-		// db-chunk.ts の D1_MAX_BIND_PARAMS チャンクサイズがそのまま使える。
-		queryInChunks(memoIds, (ids) =>
-			db
-				.select({ memoId: reviews.memoId, count: count() })
-				.from(reviews)
-				.where(and(inArray(reviews.memoId, ids), isNull(reviews.completedAt)))
-				.groupBy(reviews.memoId)
-				.all()
-		)
-	]);
+	const [createdAtRows, completedRows, incompleteCountRows, scheduleVersionRows] =
+		await Promise.all([
+			queryInChunks(memoIds, (ids) =>
+				db
+					.select({ id: memos.id, createdAt: memos.createdAt })
+					.from(memos)
+					.where(inArray(memos.id, ids))
+					.all()
+			),
+			queryInChunks(memoIds, (ids) =>
+				db
+					.select({ memoId: reviews.memoId, step: reviews.step, completedAt: reviews.completedAt })
+					.from(reviews)
+					.where(and(inArray(reviews.memoId, ids), isNotNull(reviews.completedAt)))
+					.all()
+			),
+			// GROUP BY はあるが bind は inArray 1つのみ（他に条件を持たない）ため、
+			// db-chunk.ts の D1_MAX_BIND_PARAMS チャンクサイズがそのまま使える。
+			queryInChunks(memoIds, (ids) =>
+				db
+					.select({ memoId: reviews.memoId, count: count() })
+					.from(reviews)
+					.where(and(inArray(reviews.memoId, ids), isNull(reviews.completedAt)))
+					.groupBy(reviews.memoId)
+					.all()
+			),
+			// Issue #85: claim（buildReviewScheduleClaimStatements）に渡す expectedVersion。
+			queryInChunks(memoIds, (ids) =>
+				db
+					.select({ memoId: reviewSchedules.memoId, version: reviewSchedules.version })
+					.from(reviewSchedules)
+					.where(inArray(reviewSchedules.memoId, ids))
+					.all()
+			)
+		]);
 
 	// 完了済み行のうち、メモごとに最大 step の1行だけを残す。SQL 側で
 	// max(step)・max(completedAt) を別々に集約しない理由: 「最新の完了済み
@@ -616,20 +798,46 @@ export async function loadReviewRecalculationInputs(
 		}
 	}
 	const incompleteCountMap = new Map(incompleteCountRows.map((row) => [row.memoId, row.count]));
+	const versionMap = new Map(scheduleVersionRows.map((row) => [row.memoId, row.version]));
+
+	// review_schedules 行が無いメモ（ensureReviewScheduleExists のコメントを参照）を
+	// ここで治癒する。治癒しないまま version だけを 0 にフォールバックすると、
+	// 後続の claim の bump 文が対象行の不在によって恒久的に0件のままになり、
+	// このメモの再計算が永久に失敗し続ける。
+	const missingScheduleMemoIds = createdAtRows
+		.map((row) => row.id)
+		.filter((id) => !versionMap.has(id));
+	if (missingScheduleMemoIds.length > 0) {
+		// この INSERT は1行につき memo_id・version の2列を bind するため、
+		// queryInChunks の既定（1 id = 1 bind）のままだと51件以上の欠落で
+		// `too many SQL variables` になる（実機で再現・正確性レビューで指摘）。
+		// bindsPerItem: 2 を渡してチャンクサイズを半分にする。
+		await queryInChunks(
+			missingScheduleMemoIds,
+			async (ids) => {
+				await db
+					.insert(reviewSchedules)
+					.values(ids.map((memoId) => ({ memoId, version: 0 })))
+					.onConflictDoNothing();
+				return [];
+			},
+			2
+		);
+	}
 
 	// memos 側から見つかった id だけを結果に含める。このメモ実装に delete-memo
 	// 機能は無く、対象は必ず collectAffectedMemoIds が直前に返した非アーカイブ
 	// メモの id であるため理屈上は常に全件見つかるが、万一見つからなければ
 	// 「対象から静かに除外する」（呼び出し元は Map.get が undefined を返す
-	// memoId をスキップする）方を選んだ。呼び出し元にとっては
-	// stillActiveMemoIds ガードが除外する「途中でアーカイブされたメモ」と
-	// 同じ扱いになる。
+	// memoId をスキップする）方を選んだ。呼び出し元にとっては claim（Issue #85）が
+	// 除外する「途中でアーカイブ・変更されたメモ」と同じ扱いになる。
 	const inputs = new Map<string, MemoRecalcInputs>();
 	for (const row of createdAtRows) {
 		inputs.set(row.id, {
 			createdAt: row.createdAt,
 			latestCompleted: latestCompletedMap.get(row.id),
-			incompleteCount: incompleteCountMap.get(row.id) ?? 0
+			incompleteCount: incompleteCountMap.get(row.id) ?? 0,
+			version: versionMap.get(row.id) ?? 0
 		});
 	}
 	return inputs;
