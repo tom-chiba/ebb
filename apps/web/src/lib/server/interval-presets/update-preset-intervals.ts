@@ -189,7 +189,7 @@ export async function updateCustomPresetIntervals(
 			...claimPairs.map(({ deleteStatement }) => deleteStatement),
 			...claimPairs.map(({ bumpStatement }) => bumpStatement)
 		];
-		// db.batch は静的に非空とわかるタプル型を要求する（reviews/complete-review.ts の
+		// db.batch は静的に非空とわかるタプル型を要求する（#17 の reviews/complete-review.ts の
 		// completeReview と同じ理由）。claimPairs.length > 0 のガードにより実行時には
 		// 常に1件以上になるが、配列の展開は配列型のままでタプル型と直接オーバーラップ
 		// しないため、unknown 経由でキャストする。
@@ -214,7 +214,7 @@ export async function updateCustomPresetIntervals(
 		.filter(({ plan }) => plan.newRows.length > 0)
 		.map(({ plan }) => db.insert(reviews).values(plan.newRows));
 
-	// db.batch は静的に非空とわかるタプル型を要求する（reviews/complete-review.ts の
+	// db.batch は静的に非空とわかるタプル型を要求する（#17 の reviews/complete-review.ts の
 	// completeReview と同じ理由）。updatePresetStatement は常に配列先頭にあるため
 	// 実行時には常に1件以上になる。
 	const statements: [typeof updatePresetStatement, ...BatchItem<'sqlite'>[]] = [
