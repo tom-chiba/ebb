@@ -19,11 +19,15 @@
 		}
 	}
 
-	let steps = $state(
-		form && 'intervals' in form && typeof form.intervals === 'string'
+	// form/data を直接 $state(...) の初期化式へ渡すと svelte-check の
+	// state_referenced_locally 警告が出るため、関数呼び出しに包んで参照する
+	// （挙動は変えない。SSR 時点でも評価されるため、JS 無効でも入力値保持は成立する）。
+	function initialSteps(): number[] {
+		return form && 'intervals' in form && typeof form.intervals === 'string'
 			? safeParseIntervals(form.intervals)
-			: [...data.preset.intervals]
-	);
+			: [...data.preset.intervals];
+	}
+	let steps = $state(initialSteps());
 
 	const baseTime = new Date();
 	const unchanged = $derived(formatIntervals(steps) === formatIntervals(data.preset.intervals));
