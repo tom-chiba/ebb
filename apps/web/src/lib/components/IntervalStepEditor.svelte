@@ -46,7 +46,13 @@
 	let pendingUnit = $state<'h' | 'd'>(
 		steps.at(-1) !== undefined ? naturalUnit(steps.at(-1)!) : 'h'
 	);
-	let pendingAmount = $state(minAmountFor(pendingUnit));
+	// pendingUnit（直前行の $state）を直接 $state(...) の初期化式へ渡すと
+	// svelte-check の state_referenced_locally 警告が出るため、関数呼び出しに
+	// 包んで参照する（挙動は変えない。読むタイミングは pendingUnit の初期化直後のまま）。
+	function initialPendingAmount(): number {
+		return minAmountFor(pendingUnit);
+	}
+	let pendingAmount = $state(initialPendingAmount());
 
 	function resetPending() {
 		pendingUnit = steps.at(-1) !== undefined ? naturalUnit(steps.at(-1)!) : 'h';

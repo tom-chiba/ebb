@@ -9,9 +9,6 @@
 
 	let { data, form }: PageProps = $props();
 
-	let name = $state(form?.name ?? '');
-	let steps = $state(form?.intervals ? safeParseIntervals(form.intervals) : []);
-
 	// 直前の送信が失敗した場合、hidden field 経由で受け取った生の intervals 文字列を
 	// ステップ一覧へ復元する。ここに来る値は IntervalStepEditor が構築した
 	// formatIntervals() の出力のはずだが、フォーム再送・改ざん等で不正な文字列が
@@ -24,6 +21,18 @@
 			return [];
 		}
 	}
+
+	// form を直接 $state(...) の初期化式へ渡すと svelte-check の
+	// state_referenced_locally 警告が出るため、関数呼び出しに包んで参照する
+	// （挙動は変えない。SSR 時点でも評価されるため、JS 無効でも入力値保持は成立する）。
+	function initialName(): string {
+		return form?.name ?? '';
+	}
+	function initialSteps(): number[] {
+		return form?.intervals ? safeParseIntervals(form.intervals) : [];
+	}
+	let name = $state(initialName());
+	let steps = $state(initialSteps());
 
 	// このページを開いた時点を基準にした「実時刻プレビュー」。実際の保存時刻とは
 	// ずれ得るが、あくまで目安表示のため、送信のたびに再計算する必要はない。

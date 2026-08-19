@@ -1,3 +1,44 @@
+import { deserialize } from '$app/forms';
+
+// 現在ページのフォームアクションへ POST し、結果を deserialize するだけの薄いヘルパー
+// （$app/forms の deserialize は SvelteKit のアクション結果専用のシリアライズ形式を
+// パースするため、呼び出し側で自前実装しない）。action は現在の URL からの相対パス
+// （例: '?/subscribePush'）で、ルートごとに異なるアクションを指すことを前提にしている。
+// 成功可否の判定・result.data の型ガードは呼び出し側の責務のまま残す
+// （purposefully returns the raw ActionResult; settings/onboarding で success 判定や
+// data の中身が異なるため）。
+//
+// 呼び出し側で `applyAction`（$app/forms）は使わないこと。`type: 'error'`
+// （未処理例外による500）の結果を最寄りのエラーページへの全画面遷移として扱うため、
+// ユーザー操作なしで onMount から実行されるバックグラウンド呼び出し
+// （PushNotificationSettings の refreshSubscriptionState 等）がサーバー側の
+// 一時的な失敗だけで画面全体をエラーページに差し替えてしまう
+// （正確性レビューで指摘、settings #19）。
+export async function postFormAction(action: string, body: FormData) {
+	const response = await fetch(action, { method: 'POST', body });
+	return deserialize(await response.text());
+}
+
+// pushManager.subscribe() が返した購読を保存用アクションへ送る共通処理
+// （settings/#19・onboarding/#24 で重複していた）。savePushSubscription は endpoint に
+// 対する upsert（$lib/server/push-subscriptions.ts 参照）のため、この呼び出しは常に
+// 「今ログイン中のユーザーがこの endpoint の所有者になる」ことを意味する。
+export async function submitPushSubscription(
+	action: string,
+	subscription: PushSubscription
+): Promise<boolean> {
+	const json = subscription.toJSON();
+	if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
+		throw new Error('購読情報の取得に失敗しました');
+	}
+	const body = new FormData();
+	body.set('endpoint', json.endpoint);
+	body.set('p256dh', json.keys.p256dh);
+	body.set('auth', json.keys.auth);
+	const result = await postFormAction(action, body);
+	return result.type === 'success';
+}
+
 // pushManager.subscribe() の applicationServerKey は Uint8Array<ArrayBuffer> を
 // 要求するため、VAPID 公開鍵の base64url 文字列をここで変換する（#8/#19 で共通利用）。
 export function urlBase64ToUint8Array(base64Url: string): Uint8Array<ArrayBuffer> {
