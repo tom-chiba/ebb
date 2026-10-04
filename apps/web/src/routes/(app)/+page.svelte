@@ -39,13 +39,11 @@
 		showReminder = await needsPushReminder();
 	});
 
-	let hasMore = $derived(data.total > data.items.length);
-
 	// resolve() が返す型付きパスにクエリを追加した結果は plain string になるが、
-	// resolve() 自体を通しているため実体は内部リンクとして安全（Card の href 型
-	// との整合のためのキャスト）。
-	function reviewHref(id: string): ResolvedPathname {
-		return `${resolve('/(app)/reviews/[id]', { id })}?from=home` as ResolvedPathname;
+	// resolve() 自体を通しているため実体は内部リンクとして安全（<a> の href に求められる
+	// ResolvedPathname 型との整合のためのキャスト）。
+	function loadMoreHref(limit: number): ResolvedPathname {
+		return `${resolve('/')}?limit=${limit}` as ResolvedPathname;
 	}
 
 	function isSameDay(a: Date, b: Date) {
@@ -58,7 +56,7 @@
 </script>
 
 <PageHeading
-	title="復習するメモ"
+	title="復習"
 	caption="期限が来た順 ・ {formatTime(baseTime)} 時点"
 	count={data.items.length > 0 ? `${data.total} 件` : undefined}
 />
@@ -91,7 +89,7 @@
 	<ul>
 		{#each data.items as review (review.id)}
 			<li>
-				<Card href={reviewHref(review.id)}>
+				<Card href={resolve('/(app)/reviews/[id]', { id: review.id })}>
 					<div class="due">
 						<span class="dot" class:overdue={!isSameDay(review.scheduledAt, baseTime)}></span>
 						<span class="due-time">{formatTime(review.scheduledAt)} 期限</span>
@@ -102,8 +100,12 @@
 			</li>
 		{/each}
 	</ul>
-	{#if hasMore}
-		<p class="more"><a href={resolve('/reviews')}>もっと見る ›</a></p>
+	{#if data.loadMore}
+		<p class="more">
+			<a href={loadMoreHref(data.loadMore.limit)} data-sveltekit-noscroll>
+				さらに {data.loadMore.count} 件を表示
+			</a>
+		</p>
 	{/if}
 {/if}
 

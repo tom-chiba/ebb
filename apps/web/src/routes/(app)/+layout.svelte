@@ -9,8 +9,10 @@
 		return pathname === base || pathname.startsWith(`${base}/`);
 	}
 
-	let isHome = $derived(page.url.pathname === resolve('/'));
-	let isReviews = $derived(isActivePath(page.url.pathname, resolve('/reviews')));
+	// 復習タブは一覧（/）と、通知の遷移先である詳細（/reviews/[id]）の両方で active にする。
+	let isReviews = $derived(
+		page.url.pathname === resolve('/') || isActivePath(page.url.pathname, resolve('/reviews'))
+	);
 	let isMemos = $derived(isActivePath(page.url.pathname, resolve('/memos')));
 	let isSettings = $derived(isActivePath(page.url.pathname, resolve('/settings')));
 </script>
@@ -20,14 +22,7 @@
 </main>
 
 <nav class="bottom-nav">
-	<a href={resolve('/')} class:active={isHome} aria-current={isHome ? 'page' : undefined}>
-		ホーム
-	</a>
-	<a
-		href={resolve('/reviews')}
-		class:active={isReviews}
-		aria-current={isReviews ? 'page' : undefined}
-	>
+	<a href={resolve('/')} class:active={isReviews} aria-current={isReviews ? 'page' : undefined}>
 		復習
 	</a>
 	<a href={resolve('/memos')} class:active={isMemos} aria-current={isMemos ? 'page' : undefined}>

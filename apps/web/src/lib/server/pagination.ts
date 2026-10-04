@@ -26,3 +26,20 @@ export function normalizeOffset(value: number | undefined): number {
 	if (value === undefined || !Number.isFinite(value)) return 0;
 	return Math.max(0, Math.trunc(value));
 }
+
+// 「さらに N 件を表示」（?limit= を step ずつ増やすリンク）の次回 limit と追加表示件数。
+// 全件表示済み、または limit が上限（max）に達している場合は null。
+export function computeLoadMore(args: {
+	limit: number;
+	max: number;
+	total: number;
+	shown: number;
+	step: number;
+}): { limit: number; count: number } | null {
+	const { limit, max, total, shown, step } = args;
+	if (total <= shown || limit >= max) return null;
+	return {
+		limit: Math.min(limit + step, max),
+		count: Math.min(step, max - limit, total - shown)
+	};
+}

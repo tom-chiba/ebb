@@ -14,6 +14,7 @@ import { excerptOf } from '../excerpt';
 import { clamp, normalizeOffset, type PaginationOptions } from '../pagination';
 
 const DEFAULT_LIMIT = 10;
+// 1 回の取得で各行の memos.content（最大 50,000 文字）を読むため上限を設けている。
 const MAX_LIMIT = 100;
 
 type ListOptions = PaginationOptions;
@@ -22,7 +23,7 @@ export interface DueReviewSummary {
 	id: string;
 	memoId: string;
 	memoTitle: string;
-	// ホームの一覧カードでの抜粋表示用。一覧クエリの時点で切り詰め、生の
+	// 復習タブの一覧カードでの抜粋表示用。一覧クエリの時点で切り詰め、生の
 	// memos.content（最大 50,000 文字）を呼び出し元に持ち出さない
 	// （apps/web/src/routes/(app)/memos/+page.server.ts と同じ方針）。
 	memoExcerpt: string;
@@ -72,7 +73,7 @@ export async function listDueReviews(db: Db, userId: string, options: ListOption
 			.all()
 	]);
 
-	// 呼び出し元（ホームのカード表示）は抜粋しか使わないため、ここで切り詰めて
+	// 呼び出し元（復習タブのカード表示）は抜粋しか使わないため、ここで切り詰めて
 	// 生の memos.content（最大 50,000 文字）を持ち出さない
 	// （apps/web/src/routes/(app)/memos/+page.server.ts と同じ方針）。
 	const items: DueReviewSummary[] = rows.map((row) => ({
@@ -88,6 +89,8 @@ export async function listDueReviews(db: Db, userId: string, options: ListOption
 		items,
 		total: totalRows[0]?.total ?? 0,
 		limit,
+		// 呼び出し元（復習タブの「さらに表示」）が上限到達を判定するための値。
+		maxLimit: MAX_LIMIT,
 		offset
 	};
 }
