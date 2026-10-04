@@ -5,6 +5,7 @@
 	import Card from '$lib/components/Card.svelte';
 	import Flash from '$lib/components/Flash.svelte';
 	import PageHeading from '$lib/components/PageHeading.svelte';
+	import Button from '$lib/components/Button.svelte';
 	import { formatDateTime, formatTime } from '$lib/format-date-time';
 	import { needsPushReminder } from '$lib/push-subscribe';
 	import type { ResolvedPathname } from '$app/types';
@@ -39,11 +40,16 @@
 		showReminder = await needsPushReminder();
 	});
 
+	let hasPrev = $derived(data.offset > 0);
+	let hasNext = $derived(data.offset + data.items.length < data.total);
+	let prevOffset = $derived(Math.max(0, data.offset - data.limit));
+	let nextOffset = $derived(data.offset + data.limit);
+
 	// resolve() が返す型付きパスにクエリを追加した結果は plain string になるが、
-	// resolve() 自体を通しているため実体は内部リンクとして安全（<a> の href に求められる
+	// resolve() 自体を通しているため実体は内部リンクとして安全（Button の href に求められる
 	// ResolvedPathname 型との整合のためのキャスト）。
-	function loadMoreHref(limit: number): ResolvedPathname {
-		return `${resolve('/')}?limit=${limit}` as ResolvedPathname;
+	function pageHref(offset: number): ResolvedPathname {
+		return `${resolve('/')}?offset=${offset}` as ResolvedPathname;
 	}
 
 	function isSameDay(a: Date, b: Date) {
@@ -84,7 +90,11 @@
 {/if}
 
 {#if data.items.length === 0}
-	<p class="empty">期限が来た復習はありません。</p>
+	{#if data.total === 0}
+		<p class="empty">期限が来た復習はありません。</p>
+	{:else}
+		<p class="empty">このページに表示する復習はありません。</p>
+	{/if}
 {:else}
 	<ul>
 		{#each data.items as review (review.id)}
@@ -100,14 +110,16 @@
 			</li>
 		{/each}
 	</ul>
-	{#if data.loadMore}
-		<p class="more">
-			<a href={loadMoreHref(data.loadMore.limit)} data-sveltekit-noscroll>
-				さらに {data.loadMore.count} 件を表示
-			</a>
-		</p>
-	{/if}
 {/if}
+
+<nav>
+	{#if hasPrev}
+		<Button variant="compact" tone="neutral" href={pageHref(prevOffset)}>‹ 前へ</Button>
+	{/if}
+	{#if hasNext}
+		<Button variant="compact" tone="neutral" href={pageHref(nextOffset)}>次へ ›</Button>
+	{/if}
+</nav>
 
 <Fab href={resolve('/memos/new')} label="新規メモを作成" />
 
@@ -205,13 +217,9 @@
 		color: var(--color-text-muted);
 	}
 
-	.more {
-		text-align: center;
-		margin-top: 0.5rem;
-		font-size: var(--text-small);
-	}
-
-	.more a {
-		color: var(--color-accent);
+	nav {
+		display: flex;
+		justify-content: space-between;
+		margin-top: 1.5rem;
 	}
 </style>

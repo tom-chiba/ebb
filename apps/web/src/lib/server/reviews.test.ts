@@ -278,8 +278,6 @@ describe('listDueReviews', () => {
 	it('clamps a limit above the maximum down to 100', async () => {
 		const result = await listDueReviews(db, ownerId, { limit: 1000 });
 		expect(result.limit).toBe(100);
-		// 呼び出し元（復習タブの「さらに表示」）が上限到達を判定するのに使う。
-		expect(result.maxLimit).toBe(100);
 	});
 
 	it('clamps a non-positive limit up to 1', async () => {

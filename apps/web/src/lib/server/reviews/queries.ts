@@ -14,7 +14,6 @@ import { excerptOf } from '../excerpt';
 import { clamp, normalizeOffset, type PaginationOptions } from '../pagination';
 
 const DEFAULT_LIMIT = 10;
-// 1 回の取得で各行の memos.content（最大 50,000 文字）を読むため上限を設けている。
 const MAX_LIMIT = 100;
 
 type ListOptions = PaginationOptions;
@@ -89,8 +88,6 @@ export async function listDueReviews(db: Db, userId: string, options: ListOption
 		items,
 		total: totalRows[0]?.total ?? 0,
 		limit,
-		// 呼び出し元（復習タブの「さらに表示」）が上限到達を判定するための値。
-		maxLimit: MAX_LIMIT,
 		offset
 	};
 }

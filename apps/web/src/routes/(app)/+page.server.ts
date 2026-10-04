@@ -1,11 +1,10 @@
 import { redirect } from '@sveltejs/kit';
 import { requireAuthedDb } from '$lib/server/api';
 import { hasSeenOnboarding } from '$lib/server/onboarding';
-import { computeLoadMore, parsePaginationParam } from '$lib/server/pagination';
+import { parsePaginationParam } from '$lib/server/pagination';
 import { listDueReviews } from '$lib/server/reviews';
 import type { PageServerLoad } from './$types';
 
-// 初回表示件数と、「さらに表示」1 回あたりの増分。
 const PAGE_SIZE = 10;
 
 export const load: PageServerLoad = async (event) => {
@@ -20,12 +19,11 @@ export const load: PageServerLoad = async (event) => {
 		redirect(303, '/onboarding');
 	}
 
-	// 「さらに N 件を表示」は ?limit= を PAGE_SIZE ずつ増やすリンクで実現する
-	// （JavaScript なしでも動く）。壊れた・改ざんされた値は初回表示件数に戻す
-	// （/memos と同じ方針）。上限は listDueReviews 側でクランプされる。
-	const limitParam = parsePaginationParam(event.url.searchParams.get('limit'));
-	const requestedLimit = typeof limitParam === 'number' ? limitParam : PAGE_SIZE;
-	const result = await listDueReviews(db, user.id, { limit: requestedLimit, offset: 0 });
+	// 壊れた・改ざんされた offset はエラーにせず 1 ページ目へフォールバックする
+	// （リンクを辿るだけの人間向けページのため。/memos と同じ方針）。
+	const offsetParam = parsePaginationParam(event.url.searchParams.get('offset'));
+	const offset = typeof offsetParam === 'number' ? offsetParam : 0;
+	const result = await listDueReviews(db, user.id, { limit: PAGE_SIZE, offset });
 
 	// 復習完了直後のフラッシュ表示。/reviews/[id]/+page.server.ts の complete アクションが
 	// 302 の宛先 URL に載せるだけの単純な方式（セッション等は使わない）。
@@ -40,17 +38,7 @@ export const load: PageServerLoad = async (event) => {
 			: null;
 
 	return {
-		items: result.items,
-		total: result.total,
-		// 次の「さらに表示」リンクの limit と、追加で見える件数。上限に達した後は null。
-		// 上限に達しても完了した復習は一覧から消えるため、残りは順に繰り上がって見える。
-		loadMore: computeLoadMore({
-			limit: result.limit,
-			max: result.maxLimit,
-			total: result.total,
-			shown: result.items.length,
-			step: PAGE_SIZE
-		}),
+		...result,
 		completedTitle,
 		nextScheduledAt,
 		// 通知が無効なまま使っているユーザーへの控えめなリマインド（#24）表示可否の判定に使う。

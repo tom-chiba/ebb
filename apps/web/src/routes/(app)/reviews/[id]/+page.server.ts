@@ -29,8 +29,8 @@ export const actions: Actions = {
 		const { user, db } = requireAuthedDb(event);
 		try {
 			const result = await completeReview(db, user.id, event.params.id);
-			// 完了直後の一覧はこの review が消えた状態になる。limit を維持しても
-			// 取りこぼしは起きないが、フラッシュ表示を先頭で見せるため素の一覧 URL に戻す。
+			// 完了直後の一覧はこの review が消えた状態になるため、offset を維持すると
+			// 後続の行がひとつずつ前にずれて表示がスキップされうる。素の一覧 URL に戻す。
 			const params = new URLSearchParams({ completedTitle: result.memoTitle });
 			if (result.nextScheduledAt) {
 				params.set('nextScheduledAt', result.nextScheduledAt.toISOString());
