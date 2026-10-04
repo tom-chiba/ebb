@@ -18,25 +18,11 @@
 	const baseTime = new Date();
 
 	// 通知が無効なまま使っているユーザーへの控えめなリマインド（#24）。
-	// 一度「あとで」を押したら、しつこくならないよう数日は再表示しない。
-	const REMINDER_DISMISS_KEY = 'ebb:push-reminder-dismissed-at';
-	const REMINDER_DISMISS_DAYS = 3;
-
+	// 通知を有効にするまで表示し続ける（「あとで」による非表示は #94 で廃止）。
 	let showReminder = $state(false);
 
-	function isReminderDismissed(): boolean {
-		const dismissedAt = Number(localStorage.getItem(REMINDER_DISMISS_KEY));
-		if (!dismissedAt) return false;
-		return Date.now() - dismissedAt < REMINDER_DISMISS_DAYS * 24 * 60 * 60 * 1000;
-	}
-
-	function dismissReminder() {
-		localStorage.setItem(REMINDER_DISMISS_KEY, String(Date.now()));
-		showReminder = false;
-	}
-
 	onMount(async () => {
-		if (!data.vapidPublicKey || isReminderDismissed()) return;
+		if (!data.vapidPublicKey) return;
 		showReminder = await needsPushReminder();
 	});
 
@@ -70,10 +56,7 @@
 {#if showReminder}
 	<div class="push-reminder">
 		<span>復習の通知がまだ有効になっていません。</span>
-		<div class="push-reminder-actions">
-			<a href={resolve('/settings')}>設定で有効にする</a>
-			<button type="button" onclick={dismissReminder}>あとで</button>
-		</div>
+		<a href={resolve('/settings')}>設定で有効にする</a>
 	</div>
 {/if}
 
@@ -143,26 +126,10 @@
 		margin-bottom: var(--space-stack);
 	}
 
-	.push-reminder-actions {
-		display: flex;
-		align-items: center;
-		gap: 0.875rem;
+	.push-reminder a {
 		flex: none;
-	}
-
-	.push-reminder-actions a {
 		color: var(--color-accent);
 		font-weight: 500;
-	}
-
-	.push-reminder-actions button {
-		font-family: var(--font-sans);
-		font-size: var(--text-small);
-		color: var(--color-text-faint);
-		background: none;
-		border: none;
-		padding: 0;
-		cursor: pointer;
 	}
 
 	ul {
