@@ -17,12 +17,7 @@ export const load: PageServerLoad = async (event) => {
 				totalSteps: review.totalSteps,
 				previewNextScheduledAt: review.previewNextScheduledAt
 			},
-			renderedContent: renderMarkdown(review.memoContent),
-			// ホームのカードから来た場合はここに from=home が付いており、完了後も
-			// ホームへ戻す（下の complete アクション）。フォームの hidden input へ渡すため、
-			// action="?/complete" が現在の検索文字列をまるごと置き換えて消えてしまう前に
-			// ロード時点の値をそのまま保持しておく。
-			from: event.url.searchParams.get('from')
+			renderedContent: renderMarkdown(review.memoContent)
 		};
 	} catch (err) {
 		handleDomainError(err);
@@ -34,16 +29,13 @@ export const actions: Actions = {
 		const { user, db } = requireAuthedDb(event);
 		try {
 			const result = await completeReview(db, user.id, event.params.id);
-			const formData = await event.request.formData();
-			const from = formData.get('from');
 			// 完了直後の一覧はこの review が消えた状態になるため、offset を維持すると
 			// 後続の行がひとつずつ前にずれて表示がスキップされうる。素の一覧 URL に戻す。
-			const destination = from === 'home' ? '/' : '/reviews';
 			const params = new URLSearchParams({ completedTitle: result.memoTitle });
 			if (result.nextScheduledAt) {
 				params.set('nextScheduledAt', result.nextScheduledAt.toISOString());
 			}
-			redirect(303, `${destination}?${params.toString()}`);
+			redirect(303, `/?${params.toString()}`);
 		} catch (err) {
 			handleDomainError(err);
 		}
