@@ -3,7 +3,7 @@
 interface __BaseEnv_Env {
 	DB: D1Database;
 	VAPID_PUBLIC_KEY: "BFknaCFpg1G3yB8-5zuBGvgxe4C0yh_4qT1-JNV5sapFB8IOTuc6dacHDSRbZyOHAAGqEpKqMkx6AedzUeBvB4I";
-	VAPID_SUBJECT: "mailto:tomoki-chiba@gaji.jp";
+	VAPID_SUBJECT: "mailto:michiamo.t1@gmail.com";
 	VAPID_PRIVATE_KEY: string;
 }
 declare namespace Cloudflare {
