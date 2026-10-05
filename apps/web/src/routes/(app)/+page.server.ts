@@ -1,12 +1,11 @@
 import { redirect } from '@sveltejs/kit';
 import { requireAuthedDb } from '$lib/server/api';
 import { hasSeenOnboarding } from '$lib/server/onboarding';
+import { parsePaginationParam } from '$lib/server/pagination';
 import { listDueReviews } from '$lib/server/reviews';
 import type { PageServerLoad } from './$types';
 
-// ホームは抜粋のみを見せるプレビューなので、全件は listDueReviews の呼び出し元
-// である /reviews（もっと見るの遷移先）に任せる。
-const HOME_ITEMS_LIMIT = 5;
+const PAGE_SIZE = 10;
 
 export const load: PageServerLoad = async (event) => {
 	const { user, db } = requireAuthedDb(event);
@@ -20,12 +19,16 @@ export const load: PageServerLoad = async (event) => {
 		redirect(303, '/onboarding');
 	}
 
-	const result = await listDueReviews(db, user.id, { limit: HOME_ITEMS_LIMIT, offset: 0 });
+	// 壊れた・改ざんされた offset はエラーにせず 1 ページ目へフォールバックする
+	// （リンクを辿るだけの人間向けページのため。/memos と同じ方針）。
+	const offsetParam = parsePaginationParam(event.url.searchParams.get('offset'));
+	const offset = typeof offsetParam === 'number' ? offsetParam : 0;
+	const result = await listDueReviews(db, user.id, { limit: PAGE_SIZE, offset });
 
-	// /reviews/+page.server.ts と同じ理由・同じ方式（302 の宛先 URL に載せるだけの
-	// 直前の復習完了結果のフラッシュ表示）。ホーム発の復習完了は
-	// /reviews/[id]/+page.server.ts の complete アクションが from=home のときに
-	// ここへリダイレクトすることで届く。
+	// 復習完了直後のフラッシュ表示。/reviews/[id]/+page.server.ts の complete アクションが
+	// 302 の宛先 URL に載せるだけの単純な方式（セッション等は使わない）。
+	// 通常経路では常に妥当な値だが、URL を手で書き換えられた場合に Invalid Date が
+	// Intl.DateTimeFormat に渡って例外になるのを避ける。
 	const completedTitle = event.url.searchParams.get('completedTitle');
 	const nextScheduledAtParam = event.url.searchParams.get('nextScheduledAt');
 	const parsedNextScheduledAt = nextScheduledAtParam ? new Date(nextScheduledAtParam) : null;
@@ -35,8 +38,7 @@ export const load: PageServerLoad = async (event) => {
 			: null;
 
 	return {
-		items: result.items,
-		total: result.total,
+		...result,
 		completedTitle,
 		nextScheduledAt,
 		// 通知が無効なまま使っているユーザーへの控えめなリマインド（#24）表示可否の判定に使う。

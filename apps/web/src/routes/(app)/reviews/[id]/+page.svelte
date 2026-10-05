@@ -10,7 +10,7 @@
 </script>
 
 <div class="header">
-	<a href={resolve('/reviews')}>‹ 復習</a>
+	<a href={resolve('/')}>‹ 復習</a>
 	<span class="progress">{data.review.step + 1} 回目 / 全 {data.review.totalSteps} 回</span>
 </div>
 
@@ -21,9 +21,6 @@
 
 <BottomBar>
 	<form method="POST" action="?/complete">
-		{#if data.from}
-			<input type="hidden" name="from" value={data.from} />
-		{/if}
 		<Button variant="primary" type="submit">復習した</Button>
 	</form>
 	<p class="preview">
